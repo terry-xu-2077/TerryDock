@@ -1,0 +1,28 @@
+# Build output
+build/
+build_mingw/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.cmake.tmp
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+x64/
+x86/
+Release/
+Debug/
+
+# Local toolchain used only for syntax checking
+_toolchain/
+
+# OS
+Thumbs.db
+desktop.ini

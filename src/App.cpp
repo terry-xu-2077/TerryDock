@@ -1,0 +1,4319 @@
+#include "App.h"
+
+#include "Utils.h"
+
+#include <commctrl.h>
+#include <commdlg.h>
+#include <mmsystem.h>
+#include <shlobj.h>
+
+#include <cmath>
+
+namespace ld
+{
+
+namespace
+{
+
+/// Hover magnification spring: quick, with just a hint of overshoot.
+const SpringParams kScaleSpring{6.8f, 0.78f, 0.0006f, 0.02f};
+
+/// Launch bounce: slow, springy, clearly visible.
+const BounceParams kBounce;
+
+/// Panel width in macOS mode: quick, essentially critically damped.
+const SpringParams kPanelSpring{3.4f, 0.92f, 0.05f, 1.0f};
+const SpringParams kFullscreenSlideSpring{5.2f, 0.92f, 0.001f, 0.03f};
+
+    /// Release timing for the magnification driven away from 1.0. Lower is
+    /// snappier; too low and the row snaps back instead of gliding home.
+    constexpr double kReleaseSeconds = 0.05;
+
+    /// Presence under this counts as released. The exponential tail is
+    /// invisible, but letting it run would keep the animation loop alive
+    /// for another few hundred milliseconds after the dock looks settled.
+    constexpr float kReleaseCutoff = 0.015f;
+
+/// Process polling period.
+constexpr double kPollIntervalSeconds = 1.0;
+
+/// Gap between the bottom of the dock and the bottom of the work area.
+constexpr float kBottomGap = 4.0f;
+constexpr wchar_t kDialogTabPageProperty[] = L"LightDock.DialogTabPage";
+
+void MarkDialogTabPage(HWND control, int page)
+{
+    if (control)
+    {
+        SetPropW(control, kDialogTabPageProperty,
+                 reinterpret_cast<HANDLE>(static_cast<INT_PTR>(page + 1)));
+    }
+}
+
+struct TabVisibilityContext
+{
+    int page = 0;
+};
+
+BOOL CALLBACK ApplyTabVisibility(HWND child, LPARAM parameter)
+{
+    const auto* context = reinterpret_cast<TabVisibilityContext*>(parameter);
+    HANDLE tag = GetPropW(child, kDialogTabPageProperty);
+    if (tag)
+    {
+        const int page = static_cast<int>(reinterpret_cast<INT_PTR>(tag)) - 1;
+        ShowWindow(child, page == context->page ? SW_SHOW : SW_HIDE);
+    }
+
+    return TRUE;
+}
+
+void ShowDialogTabPage(HWND dialog, int page)
+{
+    TabVisibilityContext context{page};
+    EnumChildWindows(dialog, ApplyTabVisibility,
+                     reinterpret_cast<LPARAM>(&context));
+}
+
+struct TagDialogChildrenContext
+{
+    HWND dialog = nullptr;
+    int tabId = 0;
+    int saveId = 0;
+    int cancelId = 0;
+    int splitY = 0;
+    int endFirstPageY = 0;
+    int finalPage = 1;
+    int shiftFirstPage = 0;
+    int shiftSecondPage = 0;
+    int shiftFinalPage = 0;
+};
+
+BOOL CALLBACK TagDialogChildren(HWND child, LPARAM parameter)
+{
+    auto* context = reinterpret_cast<TagDialogChildrenContext*>(parameter);
+    const int id = GetDlgCtrlID(child);
+    if (id == context->tabId || id == context->saveId || id == context->cancelId
+        || GetPropW(child, kDialogTabPageProperty))
+    {
+        return TRUE;
+    }
+
+    RECT rect{};
+    GetWindowRect(child, &rect);
+    MapWindowPoints(nullptr, context->dialog,
+                    reinterpret_cast<POINT*>(&rect), 2);
+
+    int page = 0;
+    if (rect.top >= context->splitY)
+    {
+        page = rect.top < context->endFirstPageY ? 1 : context->finalPage;
+    }
+
+    MarkDialogTabPage(child, page);
+    const int shift = page == 0 ? context->shiftFirstPage
+        : page == 1 ? context->shiftSecondPage
+                    : context->shiftFinalPage;
+    if (shift != 0)
+    {
+        SetWindowPos(child, nullptr, rect.left,
+                     rect.top + shift, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    return TRUE;
+}
+
+void ArmTimer(HANDLE timer, int milliseconds)
+{
+    LARGE_INTEGER due{};
+    due.QuadPart = -static_cast<LONGLONG>(milliseconds) * 10000LL;
+
+    SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
+}
+
+// --- dialog appearance helpers --------------------------------------------
+
+/// Default plate colour: the classic dark slate tile. The global settings
+/// no longer own plate colours, so this constant is what a fresh icon gets.
+const D2D1_COLOR_F kDefaultPlateTop{0.231f, 0.259f, 0.322f, 1.0f};
+
+/// The automatically derived gradient partner: the same hue, darkened
+/// towards the bottom, so a single colour pick still produces the subtle
+/// vertical blend every macOS tile has.
+D2D1_COLOR_F DerivedPlateBottom(const D2D1_COLOR_F& top)
+{
+    return D2D1::ColorF(
+        top.r * 0.72f, top.g * 0.72f, top.b * 0.72f, 1.0f);
+}
+
+/// DPI of the monitor a dialog lives on (falls back to the system DPI).
+int DialogDpi(HWND hwnd)
+{
+    using FnGetDpiForWindow = UINT(WINAPI*)(HWND);
+
+    static FnGetDpiForWindow dpiForWindow = []() -> FnGetDpiForWindow
+    {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        return user32
+            ? reinterpret_cast<FnGetDpiForWindow>(
+                  GetProcAddress(user32, "GetDpiForWindow"))
+            : nullptr;
+    }();
+
+    if (dpiForWindow)
+    {
+        const UINT dpi = dpiForWindow(hwnd);
+        if (dpi > 0)
+        {
+            return static_cast<int>(dpi);
+        }
+    }
+
+    HDC dc = GetDC(hwnd);
+    const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
+    ReleaseDC(hwnd, dc);
+    return dpi > 0 ? dpi : 96;
+}
+
+/// Segoe UI 9pt (the modern Windows UI font), scaled for the dialog's DPI.
+/// The stock DEFAULT_GUI_FONT renders like Windows 95, which is what made
+/// the dialogs look dated. The fonts live for the process lifetime.
+HFONT DialogFont(bool bold)
+{
+    static HFONT regular = nullptr;
+    static HFONT semibold = nullptr;
+
+    HFONT& slot = bold ? semibold : regular;
+
+    if (!slot)
+    {
+        HDC dc = GetDC(nullptr);
+        const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+        ReleaseDC(nullptr, dc);
+
+        const int height = -MulDiv(9, dpi, 72);
+
+        slot = CreateFontW(
+            height, 0, 0, 0, bold ? FW_SEMIBOLD : FW_NORMAL,
+            FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    }
+
+    return slot;
+}
+
+} // namespace
+
+int App::Run(HINSTANCE instance)
+{
+    DockWindow::EnablePerMonitorDpiAwareness();
+
+    // TEMP-DIAG-BEGIN
+    for (int i = 0; i < __argc; ++i)
+    {
+        const std::wstring arg = __wargv[i];
+        const std::wstring key = L"--diag-hover=";
+
+        if (arg.rfind(key, 0) == 0)
+        {
+            diagMouseX_ = static_cast<float>(_wtof(arg.c_str() + key.size()));
+        }
+    }
+    // TEMP-DIAG-END
+
+    // RegisterDragDrop requires OLE initialization, not just COM STA.
+    const HRESULT com = OleInitialize(nullptr);
+    if (FAILED(com))
+    {
+        MessageBoxW(nullptr, L"无法初始化 Windows 拖放服务。", L"LightDock", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    if (!Initialize(instance))
+    {
+        if (SUCCEEDED(com))
+        {
+            OleUninitialize();
+        }
+
+        return 1;
+    }
+
+    running_ = true;
+    timeBeginPeriod(1);
+
+    // High-resolution waitable timers avoid the coarse timer quantum that
+    // Remote Desktop sessions can apply to ordinary waitable timers.
+    constexpr ULONG kCreateWaitableTimerHighResolution = 0x00000002u;
+    HANDLE timer = CreateWaitableTimerExW(
+        nullptr, nullptr, kCreateWaitableTimerHighResolution,
+        TIMER_ALL_ACCESS);
+    if (!timer)
+    {
+        timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+    }
+
+    lastFrame_ = std::chrono::steady_clock::now();
+    lastPoll_ = lastFrame_;
+    lastDisplayCheck_ = lastFrame_;
+    lastFullscreenCheck_ = lastFrame_;
+
+    MSG message{};
+
+    while (running_)
+    {
+        ArmTimer(timer, animating_ ? frameIntervalMs_ : kIdleIntervalMs);
+
+        MsgWaitForMultipleObjectsEx(
+            1, &timer, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+        {
+            if (message.message == WM_QUIT)
+            {
+                running_ = false;
+                break;
+            }
+
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        if (!running_)
+        {
+            break;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const double dt =
+            std::chrono::duration<double>(now - lastFrame_).count();
+        lastFrame_ = now;
+
+        CheckPointer();
+
+        if (now - lastPoll_ >= std::chrono::duration<double>(kPollIntervalSeconds))
+        {
+            lastPoll_ = now;
+            PollProcesses();
+        }
+
+        if (now - lastDisplayCheck_ >= std::chrono::seconds(1))
+        {
+            lastDisplayCheck_ = now;
+            CheckDisplayChange();
+        }
+
+        if (now - lastFullscreenCheck_ >= std::chrono::milliseconds(250))
+        {
+            lastFullscreenCheck_ = now;
+            CheckFullscreen();
+        }
+
+        if (animating_ || needsRender_)
+        {
+            needsRender_ = false;
+            Tick(dt);
+        }
+    }
+
+    timeEndPeriod(1);
+
+    if (timer)
+    {
+        CloseHandle(timer);
+    }
+
+    Shutdown();
+
+    if (SUCCEEDED(com))
+    {
+        OleUninitialize();
+    }
+
+    return 0;
+}
+
+bool App::Initialize(HINSTANCE instance)
+{
+    instance_ = instance;
+
+    config_ = Config::Load();
+    fullscreenVisibility_.Reset(config_.settings.autoHide ? 0.0f : 1.0f);
+
+    EnsureDirectoryExists(Config::Directory());
+    EnsureDirectoryExists(GetIconCacheDir());
+
+    if (!icons_.Initialize())
+    {
+        return false;
+    }
+
+    if (!renderer_.Initialize())
+    {
+        return false;
+    }
+
+    if (!window_.Create(instance, this))
+    {
+        return false;
+    }
+
+    DetectRefreshRate();
+    RefreshMonitors();
+    LoadItems();
+    RebuildMetrics();
+
+    window_.AddTrayIcon(MakeTrayIcon(GetSystemMetrics(SM_CXSMICON)), L"LightDock");
+
+    return true;
+}
+
+void App::Shutdown()
+{
+    window_.RemoveTrayIcon();
+
+    items_.clear();
+    pointers_.clear();
+
+    renderer_.Shutdown();
+    window_.Destroy();
+}
+
+// ---------------------------------------------------------------------------
+// Data
+// ---------------------------------------------------------------------------
+
+void App::LoadItems()
+{
+    items_.clear();
+
+    const std::wstring cacheDirectory = GetIconCacheDir();
+
+    for (const AppEntry& entry : config_.apps)
+    {
+        auto item = std::make_unique<DockItem>();
+
+        item->id = entry.id;
+        item->name = entry.name;
+        item->targetPath = entry.targetPath;
+        item->resolvedPath = entry.resolvedPath;
+        item->arguments = entry.arguments;
+        item->processName = entry.processName;
+        item->iconFile = entry.iconFile;
+        item->plate = entry.plate;
+
+        if (item->id.empty())
+        {
+            item->id = MakeStableId(item->targetPath);
+        }
+
+        if (item->resolvedPath.empty())
+        {
+            item->resolvedPath = item->targetPath;
+        }
+
+        // Icon cache first: never re-parse every executable on startup.
+        const std::wstring cacheFile = cacheDirectory + L"\\" + item->iconFile;
+        item->iconSource = icons_.LoadFromCache(cacheFile);
+
+        if (!item->iconSource && FileExists(item->resolvedPath))
+        {
+            AppInfo info = icons_.Inspect(item->resolvedPath, 256);
+            if (info.icon)
+            {
+                item->iconSource = info.icon;
+                icons_.SaveToCache(info.icon.Get(), cacheFile);
+            }
+        }
+
+        item->scale = 1.0f;
+        item->scaleSpring.Reset(1.0f);
+        item->bounceSpring.Reset(0.0f);
+
+        items_.push_back(std::move(item));
+    }
+
+    RebuildItemPointers();
+}
+
+void App::RebuildItemPointers()
+{
+    pointers_.clear();
+    pointers_.reserve(items_.size());
+
+    for (auto& item : items_)
+    {
+        pointers_.push_back(item.get());
+    }
+}
+
+void App::SaveConfiguration() const
+{
+    DockConfig snapshot;
+    snapshot.settings = config_.settings;
+    snapshot.apps.reserve(items_.size());
+
+    for (const auto& item : items_)
+    {
+        AppEntry entry;
+        entry.id = item->id;
+        entry.name = item->name;
+        entry.targetPath = item->targetPath;
+        entry.resolvedPath = item->resolvedPath;
+        entry.arguments = item->arguments;
+        entry.processName = item->processName;
+        entry.iconFile = item->iconFile;
+        entry.plate = item->plate;
+
+        snapshot.apps.push_back(std::move(entry));
+    }
+
+    Config::Save(snapshot);
+}
+
+void App::AddApplication(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return;
+    }
+
+    const std::wstring id = MakeStableId(path);
+
+    for (const auto& item : items_)
+    {
+        if (item->id == id)
+        {
+            return; // already on the dock
+        }
+    }
+
+    AppInfo info = icons_.Inspect(path, 256);
+    if (info.resolvedPath.empty())
+    {
+        info.resolvedPath = path;
+    }
+
+    if (info.processName.empty())
+    {
+        info.processName = GetFileName(info.resolvedPath);
+    }
+
+    if (info.name.empty())
+    {
+        info.name = GetFileStem(info.resolvedPath);
+    }
+
+    // A shortcut already carries its own arguments; passing them again would
+    // duplicate them.
+    if (GetFileExtension(path) == L".lnk")
+    {
+        info.arguments.clear();
+    }
+
+    auto item = std::make_unique<DockItem>();
+    item->id = id;
+    item->name = info.name;
+    item->targetPath = path;
+    item->resolvedPath = info.resolvedPath;
+    item->arguments = info.arguments;
+    item->processName = info.processName;
+
+    // Readable cache name so the icons directory can be browsed: the
+    // executable's stem plus a short stable suffix, e.g.
+    // "explorer_3f2a1b0c.png". Characters outside the safe ASCII set
+    // (Chinese names and the like) collapse to underscores; a stem made of
+    // nothing else falls back to "app" so the name never turns into hash
+    // soup.
+    std::wstring readable;
+    for (wchar_t ch : GetFileStem(info.resolvedPath))
+    {
+        const bool safe = (ch >= L'0' && ch <= L'9')
+            || (ch >= L'A' && ch <= L'Z')
+            || (ch >= L'a' && ch <= L'z')
+            || ch == L'-' || ch == L'_';
+
+        readable.push_back(safe ? ch : L'_');
+    }
+
+    if (readable.find_first_not_of(L'_') == std::wstring::npos)
+    {
+        readable = L"app";
+    }
+
+    item->iconFile = readable.substr(0, 24) + L"_" + id.substr(0, 8) + L".png";
+    item->iconSource = info.icon;
+
+    if (item->iconSource)
+    {
+        icons_.SaveToCache(item->iconSource.Get(),
+                           GetIconCacheDir() + L"\\" + item->iconFile);
+    }
+
+    item->scale = 1.0f;
+    item->scaleSpring.Reset(1.0f);
+    item->bounceSpring.Reset(0.0f);
+
+    items_.push_back(std::move(item));
+    RebuildItemPointers();
+
+    SaveConfiguration();
+    UpdateSurfaceAndGeometry();
+    RepositionWindow();
+    WakeAnimation();
+}
+
+void App::RemoveApplication(size_t index)
+{
+    if (index >= items_.size())
+    {
+        return;
+    }
+
+    const std::wstring iconFile = items_[index]->iconFile;
+
+    items_.erase(items_.begin() + static_cast<ptrdiff_t>(index));
+    RebuildItemPointers();
+
+    if (!iconFile.empty())
+    {
+        DeleteFileIfExists(GetIconCacheDir() + L"\\" + iconFile);
+    }
+
+    SaveConfiguration();
+    UpdateSurfaceAndGeometry();
+    RepositionWindow();
+    WakeAnimation();
+}
+
+void App::LaunchApplication(size_t index)
+{
+    if (index >= items_.size())
+    {
+        return;
+    }
+
+    DockItem& item = *items_[index];
+
+    item.launching = true;
+    item.launchElapsed = 0.0;
+    item.bounceTimer = 0.0f;
+    item.bounceSpring.Reset(0.0f);
+
+    AppLauncher::Launch(item.targetPath, item.arguments);
+
+    WakeAnimation();
+}
+
+// ---------------------------------------------------------------------------
+// Geometry
+// ---------------------------------------------------------------------------
+
+void App::RebuildMetrics()
+{
+    dpiScale_ = static_cast<float>(window_.GetDpi()) / 96.0f;
+    if (dpiScale_ < 1.0f)
+    {
+        dpiScale_ = 1.0f;
+    }
+
+    dockScale_ = dpiScale_ * ClampF(config_.settings.overallScale, 0.5f, 1.5f);
+    metrics_ = MakeMetrics(config_.settings, dockScale_);
+
+    UpdateSurfaceAndGeometry();
+    RepositionWindow();
+}
+
+void App::UpdateSurfaceAndGeometry()
+{
+    geometry_ = ComputeGeometry(static_cast<int>(items_.size()), metrics_);
+
+    if (!renderer_.Resize(geometry_.surfaceWidth, geometry_.surfaceHeight))
+    {
+        return;
+    }
+
+    // The render target was rebuilt: every cached D2D bitmap is stale.
+    for (auto& item : items_)
+    {
+        item->icon.Reset();
+    }
+
+    renderer_.SetPanelStyle(
+        geometry_.maxPanelWidth,
+        geometry_.panelHeight,
+        metrics_.cornerRadius,
+        config_.settings.shadowOpacity,
+        14.0f * dockScale_,
+        5.0f * dockScale_);
+
+    // Seed base positions so the first magnification pass has sane centres.
+    if (config_.settings.panelMode == PanelMode::Fixed)
+    {
+        panelWidth_.Reset(geometry_.basePanelWidth);
+        frame_ = ApplyLayout(pointers_, geometry_,
+                             panelWidth_.value, mouseX_, hoverPresence_,
+                             metrics_);
+    }
+    else
+    {
+        frame_ = ApplyLayout(pointers_, geometry_,
+                             0.0f, mouseX_, hoverPresence_, metrics_);
+    }
+
+    RepositionWindow();
+}
+
+void App::RepositionWindow()
+{
+    // The window is always sized from the geometry, never measured from the
+    // current HWND rect: on first run the window is still 1x1 and measuring
+    // it would place the dock's top left corner at the screen centre.
+    const int width = geometry_.surfaceWidth;
+    const int height = geometry_.surfaceHeight;
+
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    const int gap = static_cast<int>(std::round(kBottomGap * dockScale_));
+    if (config_.settings.autoHide)
+    {
+        window_.RemoveAppBarReservation();
+    }
+    else if (monitorIndex_ >= 0
+             && monitorIndex_ < static_cast<int>(monitors_.size()))
+    {
+        const int reservation = static_cast<int>(
+            std::round(geometry_.panelHeight)) + gap;
+        window_.SetAppBarReservation(
+            monitors_[static_cast<size_t>(monitorIndex_)].rect, reservation);
+    }
+    UpdateDockWindowPosition();
+}
+
+void App::UpdateDockWindowPosition()
+{
+    const int width = geometry_.surfaceWidth;
+    const int height = geometry_.surfaceHeight;
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    const RECT work = CurrentWorkArea();
+    lastWorkArea_ = work;
+    const int x = work.left + ((work.right - work.left) - width) / 2;
+    const int gap = static_cast<int>(std::round(kBottomGap * dockScale_));
+    int y = 0;
+
+    if (config_.settings.autoHide)
+    {
+        const int panelBottom = static_cast<int>(
+            std::round(geometry_.panelY + geometry_.panelHeight));
+        y = work.bottom - gap - panelBottom;
+    }
+    else
+    {
+        // The reserved work-area edge is the panel's top. The canvas extends
+        // above it for icons and shadow, so offset by panelY.
+        y = work.bottom - static_cast<int>(std::round(geometry_.panelY));
+    }
+
+    RECT monitorRect = work;
+    if (monitorIndex_ >= 0 && monitorIndex_ < static_cast<int>(monitors_.size()))
+    {
+        monitorRect = monitors_[static_cast<size_t>(monitorIndex_)].rect;
+    }
+    const int hiddenY = monitorRect.bottom;
+    const float hiddenProgress =
+        1.0f - ClampF(fullscreenVisibility_.value, 0.0f, 1.0f);
+    y += static_cast<int>(std::lround(
+        static_cast<float>(hiddenY - y) * hiddenProgress));
+
+    window_.SetBounds(x, y, width, height);
+}
+
+void App::OnAppBarChanged()
+{
+    RepositionWindow();
+}
+
+void App::CheckFullscreen()
+{
+    bool fullscreen = false;
+    if (monitorIndex_ >= 0 && monitorIndex_ < static_cast<int>(monitors_.size()))
+    {
+        const MonitorTarget& target = monitors_[static_cast<size_t>(monitorIndex_)];
+        HWND foreground = GetForegroundWindow();
+        HWND root = foreground ? GetAncestor(foreground, GA_ROOT) : nullptr;
+
+        if (root && root != window_.Handle() && root != GetShellWindow()
+            && IsWindowVisible(root) && !IsIconic(root)
+            && MonitorFromWindow(root, MONITOR_DEFAULTTONEAREST) == target.handle)
+        {
+            wchar_t className[128]{};
+            GetClassNameW(root, className, ARRAYSIZE(className));
+            const bool shellSurface = wcscmp(className, L"Progman") == 0
+                || wcscmp(className, L"WorkerW") == 0
+                || wcscmp(className, L"Shell_TrayWnd") == 0
+                || wcscmp(className, L"Shell_SecondaryTrayWnd") == 0;
+
+            RECT bounds{};
+            if (!shellSurface && GetWindowRect(root, &bounds))
+            {
+                constexpr LONG tolerance = 2;
+                fullscreen = bounds.left <= target.rect.left + tolerance
+                    && bounds.top <= target.rect.top + tolerance
+                    && bounds.right >= target.rect.right - tolerance
+                    && bounds.bottom >= target.rect.bottom - tolerance;
+            }
+        }
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (fullscreen != fullscreenActive_)
+    {
+        fullscreenActive_ = fullscreen;
+        if (fullscreen)
+        {
+            const int delay = (std::clamp)(
+                config_.settings.autoHideDelayMs, 0, 5000);
+            hideDeadline_ = now + std::chrono::milliseconds(delay);
+            mouseActive_ = false;
+        }
+        else
+        {
+            // Leaving fullscreen does not reveal an auto-hidden dock by
+            // itself. The edge-reveal policy below decides when to show it.
+            autoHideHidePending_ = false;
+            if (!config_.settings.autoHide)
+            {
+                fullscreenVisibility_.target = 1.0f;
+            }
+        }
+        WakeAnimation();
+    }
+
+    // Fullscreen hiding is mandatory. autoHide only controls whether the
+    // dock reserves work-area space; it never disables this transition.
+    if (fullscreen && fullscreenVisibility_.target > 0.0f
+        && now >= hideDeadline_)
+    {
+        fullscreenVisibility_.target = 0.0f;
+        WakeAnimation();
+    }
+}
+
+void App::RefreshMonitors()
+{
+    monitors_.clear();
+
+    EnumDisplayMonitors(
+        nullptr,
+        nullptr,
+        [](HMONITOR monitor, HDC, LPRECT rect, LPARAM data) -> BOOL
+        {
+            auto* self = reinterpret_cast<App*>(data);
+
+            MONITORINFOEXW info{};
+            info.cbSize = sizeof(info);
+
+            if (GetMonitorInfoW(monitor, &info))
+            {
+                MonitorTarget target;
+                target.handle = monitor;
+                target.device = info.szDevice;
+                target.rect = info.rcMonitor;
+                target.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+
+                self->monitors_.push_back(std::move(target));
+            }
+            else if (rect)
+            {
+                MonitorTarget target;
+                target.handle = monitor;
+                target.rect = *rect;
+                self->monitors_.push_back(std::move(target));
+            }
+
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(this));
+
+    // Keep pointing at the same display when possible.
+    monitorIndex_ = 0;
+
+    if (!config_.settings.monitor.empty())
+    {
+        for (size_t i = 0; i < monitors_.size(); ++i)
+        {
+            if (monitors_[i].device == config_.settings.monitor)
+            {
+                monitorIndex_ = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < monitors_.size(); ++i)
+        {
+            if (monitors_[i].primary)
+            {
+                monitorIndex_ = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+}
+
+RECT App::CurrentWorkArea() const
+{
+    if (monitorIndex_ >= 0 && monitorIndex_ < static_cast<int>(monitors_.size()))
+    {
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+
+        if (GetMonitorInfoW(monitors_[static_cast<size_t>(monitorIndex_)].handle,
+                            &info))
+        {
+            return info.rcWork;
+        }
+    }
+
+    MONITORINFO fallback{};
+    fallback.cbSize = sizeof(fallback);
+
+    if (GetMonitorInfoW(MonitorFromWindow(window_.Handle(),
+                                          MONITOR_DEFAULTTOPRIMARY),
+                        &fallback))
+    {
+        return fallback.rcWork;
+    }
+
+    return RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+}
+
+void App::SelectMonitor(int index)
+{
+    if (index < 0 || index >= static_cast<int>(monitors_.size()))
+    {
+        return;
+    }
+
+    monitorIndex_ = index;
+    config_.settings.monitor = monitors_[static_cast<size_t>(index)].device;
+
+    // The new display may run at a different DPI.
+    window_.SetDpi(DockWindow::QueryDpi(window_.Handle()));
+    RebuildMetrics();
+    WakeAnimation();
+
+    SaveConfiguration();
+}
+
+void App::AppendMonitorMenu(HMENU menu)
+{
+    if (monitors_.size() < 2)
+    {
+        return;
+    }
+
+    HMENU submenu = CreatePopupMenu();
+    if (!submenu)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < monitors_.size(); ++i)
+    {
+        const MonitorTarget& target = monitors_[i];
+
+        const long width = target.rect.right - target.rect.left;
+        const long height = target.rect.bottom - target.rect.top;
+
+        wchar_t label[128];
+        swprintf(label, 128, L"显示器 %zu  (%ld × %ld)%ls",
+                 i + 1, width, height,
+                 target.primary ? L"  · 主显示器" : L"");
+
+        const UINT flags = MF_STRING
+            | ((static_cast<int>(i) == monitorIndex_) ? MF_CHECKED : 0);
+
+        AppendMenuW(submenu, flags,
+                    kMenuMonitorBase + static_cast<UINT>(i), label);
+    }
+
+    AppendMenuW(menu, MF_POPUP,
+                reinterpret_cast<UINT_PTR>(submenu), L"显示器");
+}
+
+void App::CheckDisplayChange()
+{
+    const int count = GetSystemMetrics(SM_CMONITORS);
+    if (count != static_cast<int>(monitors_.size()))
+    {
+        RefreshMonitors();
+        RepositionWindow();
+        return;
+    }
+
+    const RECT work = CurrentWorkArea();
+
+    if (work.left != lastWorkArea_.left
+        || work.top != lastWorkArea_.top
+        || work.right != lastWorkArea_.right
+        || work.bottom != lastWorkArea_.bottom)
+    {
+        RepositionWindow();
+    }
+}
+
+void App::DetectRefreshRate()
+{
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+
+    int hertz = 60;
+    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode)
+        && mode.dmDisplayFrequency > 0)
+    {
+        hertz = mode.dmDisplayFrequency;
+    }
+
+    int interval = 1000 / hertz;
+    if (interval < 5)
+    {
+        interval = 5;
+    }
+
+    if (interval > 17)
+    {
+        interval = 17;
+    }
+
+    frameIntervalMs_ = interval;
+}
+
+float App::HoverStrength() const
+{
+    if (!mouseActive_)
+    {
+        return 0.0f;
+    }
+
+    // Fixed mode deliberately treats the whole expanded panel as the hover
+    // surface. Using the base icon row here would make the panel collapse
+    // as soon as the cursor crossed into either side of its reserved space,
+    // even though HitTest still considered that space part of the dock.
+    if (config_.settings.panelMode == PanelMode::Fixed
+        && frame_.panelWidth > 0.0f)
+    {
+        const float left = frame_.panelX - metrics_.hitMargin;
+        const float right = frame_.panelX + frame_.panelWidth
+            + metrics_.hitMargin;
+
+        if (mouseX_ >= left && mouseX_ <= right)
+        {
+            return 1.0f;
+        }
+
+        const float fadeDistance = metrics_.paddingX;
+        return RowInfluenceFade(mouseX_, left, right, fadeDistance);
+    }
+
+    float coreLeft = 0.0f;
+    float coreRight = 0.0f;
+    float fadeDistance = 0.0f;
+    RowInfluenceBounds(geometry_, items_.size(), metrics_,
+                       coreLeft, coreRight, fadeDistance);
+
+    return RowInfluenceFade(mouseX_, coreLeft, coreRight, fadeDistance);
+}
+
+// ---------------------------------------------------------------------------
+// Frame
+// ---------------------------------------------------------------------------
+
+void App::Tick(double dt)
+{
+    // How much the pointer drives the dock this frame. Engaging is instant;
+    // releasing glides down so the icons never snap back, whatever way the
+    // cursor leaves (past the end of the row, upwards, or off the window).
+    const float wanted = HoverStrength();
+
+    // Lift the dragged icon smoothly above the dock while it is held.
+    const float wantedLift = draggingIndex_ >= 0 ? 1.0f : 0.0f;
+    const float liftStep = ClampF(static_cast<float>(dt) * 14.0f,
+                                  0.0f, 1.0f);
+    dragLift_ += (wantedLift - dragLift_) * liftStep;
+
+    if (wanted >= hoverPresence_)
+    {
+        hoverPresence_ = wanted;
+    }
+    else
+    {
+        hoverPresence_ = wanted
+            + (hoverPresence_ - wanted)
+              * static_cast<float>(std::exp(-dt / kReleaseSeconds));
+
+        if (hoverPresence_ - wanted < kReleaseCutoff)
+        {
+            hoverPresence_ = wanted;
+        }
+    }
+
+    // Follow the cursor while it still drives the dock; hold the last
+    // influential position through the release so the geometry has a stable
+    // shape to fade out from.
+    if (wanted > 0.0f)
+    {
+        anchorX_ = mouseX_;
+    }
+
+    UpdateScaleTargets(pointers_, anchorX_, hoverPresence_, metrics_);
+
+    // Only the release tail keeps the loop alive; a settled hover stays
+    // idle so a resting dock costs nothing.
+    bool moving = hoverPresence_ != wanted
+        || std::fabs(dragLift_ - wantedLift) > 0.001f;
+
+    for (auto& item : items_)
+    {
+        if (config_.settings.panelMode == PanelMode::Static)
+        {
+            item->launching = false;
+            item->scaleSpring.Reset(1.0f);
+            item->bounceSpring.Reset(0.0f);
+            item->scale = 1.0f;
+            item->bounceOffset = 0.0f;
+            continue;
+        }
+
+        item->scaleSpring.Update(dt, kScaleSpring);
+        item->scale = ClampF(item->scaleSpring.value,
+                             0.5f, metrics_.magnification + 0.1f);
+
+        if (item->launching)
+        {
+            item->launchElapsed += dt;
+            item->bounceTimer -= static_cast<float>(dt);
+
+            if (item->bounceTimer <= 0.0f)
+            {
+                item->bounceSpring.AddImpulse(-kBounce.impulse * dockScale_);
+                item->bounceTimer = kBounce.interval;
+            }
+
+            if (item->launchElapsed > static_cast<double>(kBounce.timeout))
+            {
+                item->launching = false;
+            }
+        }
+
+        item->bounceSpring.Update(dt, kBounce.spring);
+        item->bounceOffset = item->bounceSpring.value;
+
+        if (item->launching
+            || !item->scaleSpring.Settled(kScaleSpring)
+            || !item->bounceSpring.Settled(kBounce.spring))
+        {
+            moving = true;
+        }
+    }
+
+    if (config_.settings.panelMode == PanelMode::Fixed)
+    {
+        // Expand once on entry, collapse on exit: the width is not a function
+        // of the current scales, so the icons always stay inside the panel.
+        // Driven by the same eased presence value as the icons, so leaving
+        // the dock never pops.
+        // Keep the fixed panel's expanded width a little more restrained:
+        // only 70% of the available stretch is used, while the resting
+        // width and the icon layout remain unchanged.
+        constexpr float kFixedPanelStretch = 0.70f;
+        panelWidth_.target = geometry_.basePanelWidth
+            + (geometry_.maxPanelWidth - geometry_.basePanelWidth)
+              * kFixedPanelStretch * hoverPresence_;
+
+        panelWidth_.Update(dt, kPanelSpring);
+
+        if (!panelWidth_.Settled(kPanelSpring))
+        {
+            moving = true;
+        }
+
+        frame_ = ApplyLayout(pointers_, geometry_, panelWidth_.value,
+                             anchorX_, hoverPresence_, metrics_);
+    }
+    else
+    {
+        frame_ = ApplyLayout(pointers_, geometry_, 0.0f,
+                             anchorX_, hoverPresence_, metrics_);
+    }
+
+    // Keep a live insertion slot under the dragged icon. The row is laid out
+    // normally first, then the neighbours are shifted by one icon cell so a
+    // visible gap opens where the dragged item will be dropped.
+    if (draggingIndex_ >= 0
+        && draggingIndex_ < static_cast<int>(items_.size()))
+    {
+        const int from = draggingIndex_;
+        int target = 0;
+
+        for (int i = 0; i < static_cast<int>(items_.size()); ++i)
+        {
+            if (i != from
+                && mouseX_ > items_[static_cast<size_t>(i)]->centerX)
+            {
+                ++target;
+            }
+        }
+
+        dragTargetIndex_ = target;
+        if (target != from)
+        {
+            // Keep the last slot alive while the pointer crosses the
+            // original position, so displaced neighbours ease back home.
+            dragVisualTargetIndex_ = target;
+        }
+
+        const float desired = target == from ? 0.0f : 1.0f;
+        const float placeholderStep = ClampF(
+            static_cast<float>(dt) * 16.0f, 0.0f, 1.0f);
+        dragPlaceholderAmount_ +=
+            (desired - dragPlaceholderAmount_) * placeholderStep;
+
+        if (std::fabs(dragPlaceholderAmount_ - desired) > 0.001f)
+        {
+            moving = true;
+        }
+
+        const int visualTarget = dragVisualTargetIndex_;
+        if (visualTarget >= 0
+            && visualTarget != from
+            && dragPlaceholderAmount_ > 0.001f)
+        {
+            const float slot = items_[static_cast<size_t>(from)]->size
+                + metrics_.spacing;
+
+            if (visualTarget > from)
+            {
+                for (int i = from + 1; i <= visualTarget; ++i)
+                {
+                    DockItem& item = *items_[static_cast<size_t>(i)];
+                    item.x -= slot * dragPlaceholderAmount_;
+                    item.centerX -= slot * dragPlaceholderAmount_;
+                }
+            }
+            else
+            {
+                for (int i = visualTarget; i < from; ++i)
+                {
+                    DockItem& item = *items_[static_cast<size_t>(i)];
+                    item.x += slot * dragPlaceholderAmount_;
+                    item.centerX += slot * dragPlaceholderAmount_;
+                }
+            }
+        }
+    }
+
+    int tooltipIndex = -1;
+    if (draggingIndex_ < 0 && mouseActive_)
+    {
+        tooltipIndex = IndexAtPoint(mouseX_, mouseY_);
+    }
+
+    if (tooltipIndex >= 0
+        && tooltipIndex < static_cast<int>(items_.size()))
+    {
+        tooltipItemId_ = items_[static_cast<size_t>(tooltipIndex)]->id;
+    }
+
+    const float tooltipTarget = tooltipIndex >= 0 ? 1.0f : 0.0f;
+    const float fadeSeconds = ClampF(
+        config_.settings.tooltipFadeSeconds, 0.05f, 1.0f);
+    const float tooltipStep = 1.0f - static_cast<float>(
+        std::exp(-dt / (static_cast<double>(fadeSeconds) * 0.35)));
+    tooltipPresence_ += (tooltipTarget - tooltipPresence_) * tooltipStep;
+    if (std::fabs(tooltipPresence_ - tooltipTarget) < 0.003f)
+    {
+        tooltipPresence_ = tooltipTarget;
+    }
+    tooltipOpacity_ = ClampF(config_.settings.tooltipOpacity, 0.0f, 1.0f)
+        * tooltipPresence_;
+    if (tooltipPresence_ != tooltipTarget)
+    {
+        moving = true;
+    }
+
+    const float previousFullscreenVisibility = fullscreenVisibility_.value;
+    SpringParams fullscreenSpring = kFullscreenSlideSpring;
+    fullscreenSpring.frequency *= ClampF(
+        config_.settings.autoHideSpeed, 0.5f, 2.0f);
+    fullscreenVisibility_.Update(dt, fullscreenSpring);
+    if (std::fabs(fullscreenVisibility_.value - previousFullscreenVisibility)
+        > 0.0001f)
+    {
+        UpdateDockWindowPosition();
+    }
+    if (!fullscreenVisibility_.Settled(fullscreenSpring))
+    {
+        moving = true;
+    }
+
+    Render();
+
+    animating_ = moving;
+}
+
+void App::Render()
+{
+    // Update the panel brushes before BeginDraw() builds the brush cache.
+    // Settings dialogs call Render() synchronously while the main loop is
+    // modal; doing this after BeginDraw() makes a newly picked colour wait
+    // for an unrelated later frame (often the next mouse move).
+    {
+        float tr = 0.0f, tg = 0.0f, tb = 0.0f, ta = 0.0f;
+        float br = 0.0f, bg = 0.0f, bb = 0.0f, ba = 0.0f;
+
+        const bool hasTop = ParseHexColor(config_.settings.backgroundTop,
+                                          tr, tg, tb, ta);
+        const bool hasBottom = ParseHexColor(config_.settings.backgroundBottom,
+                                             br, bg, bb, ba);
+
+        // A single top colour is a deliberate solid-colour panel. The
+        // bottom stop is only needed when the user enables the gradient.
+        const bool usePanelColour = hasTop;
+        const D2D1_COLOR_F solidOrTop = hasTop
+            ? D2D1::ColorF(tr, tg, tb)
+            : D2D1::ColorF(1.0f, 1.0f, 1.0f);
+
+        renderer_.SetPanelBackground(
+            solidOrTop,
+            hasBottom ? D2D1::ColorF(br, bg, bb) : solidOrTop,
+            usePanelColour);
+    }
+
+    if (!renderer_.BeginDraw())
+    {
+        return;
+    }
+
+    renderer_.DrawShadow(frame_.panelX, geometry_.panelY, frame_.panelWidth);
+
+    renderer_.DrawBackground(frame_.panelX,
+                             geometry_.panelY,
+                             frame_.panelWidth,
+                             config_.settings.backgroundOpacity,
+                             config_.settings.borderOpacity);
+
+    // Upload at roughly twice the largest on-screen size: every draw is then
+    // a clean downscale instead of a 5x minification of the 256px source.
+    const unsigned int displaySize = static_cast<unsigned int>(
+        std::ceil(metrics_.iconSize * metrics_.magnification * 2.0f));
+
+    // Resolves the plate look for one icon. Radius and opacity are global
+    // (the tile shape is a dock wide constant, like macOS); the on/off
+    // switch, the icon-to-plate ratio and the colours belong to the icon.
+    auto plateColor = [&](const std::wstring& text,
+                          const D2D1_COLOR_F& fallback) -> D2D1_COLOR_F
+    {
+        float r = fallback.r, g = fallback.g, b = fallback.b, a = 1.0f;
+
+        if (ParseHexColor(text, r, g, b, a))
+        {
+            return D2D1::ColorF(r, g, b, 1.0f);
+        }
+
+        return fallback;
+    };
+
+    const IconBackdrop& backdrop = config_.settings.backdrop;
+
+    // Temporarily move the dragged item for this frame only. The layout
+    // remains unchanged, so the normal row can still be used to calculate
+    // the eventual insertion point on release.
+    DockItem* draggedVisual = nullptr;
+    float savedDragCenterX = 0.0f;
+    float savedDragSize = 0.0f;
+    float savedDragBaselineBottom = 0.0f;
+
+    if (draggingIndex_ >= 0
+        && draggingIndex_ < static_cast<int>(items_.size()))
+    {
+        draggedVisual = items_[static_cast<size_t>(draggingIndex_)].get();
+        savedDragCenterX = draggedVisual->centerX;
+        savedDragSize = draggedVisual->size;
+        savedDragBaselineBottom = draggedVisual->baselineBottom;
+
+        const float visualSize = savedDragSize
+            * (1.0f + 0.08f * dragLift_);
+        const float visualCenterX = mouseX_ - dragGrabX_;
+        const float visualCenterY = mouseY_ - dragGrabY_
+            - 8.0f * dockScale_ * dragLift_;
+
+        draggedVisual->centerX = visualCenterX;
+        draggedVisual->size = visualSize;
+        draggedVisual->baselineBottom = visualCenterY + visualSize * 0.5f;
+    }
+
+    for (auto& item : items_)
+    {
+        const PlateStyle& own = item->plate;
+
+        const bool plateOn = own.enabled;
+
+        // How much of the plate the icon itself occupies. A zero stored
+        // ratio means "follow the global default".
+        const float iconFill = plateOn
+            ? ClampF(own.iconScale > 0.0f ? own.iconScale : backdrop.iconScale,
+                     0.4f, 1.0f)
+            : 1.0f;
+
+        // The corner radius is expressed relative to the icon so the plate
+        // keeps the same look at every magnification step. The rounded clip
+        // exists to make a full bleed icon follow the tile shape; an icon
+        // that sits inside a border must stay untouched, otherwise the clip
+        // shrinks together with the icon and eats into the artwork.
+        const float baseRadius = backdrop.cornerRadius * dockScale_;
+
+        const bool fullBleed = iconFill >= 0.999f;
+
+        const float cornerFraction =
+            fullBleed && metrics_.iconSize > 0.0f
+                ? baseRadius / metrics_.iconSize
+                : 0.0f;
+
+        if (!item->EnsureIconBitmap(renderer_.Target(), renderer_.Wic(),
+                                    displaySize, cornerFraction))
+        {
+            continue;
+        }
+
+        const float size = item->size;
+        const float bottom = item->baselineBottom + item->bounceOffset;
+
+        const D2D1_RECT_F plate = D2D1::RectF(
+            item->centerX - size * 0.5f,
+            bottom - size,
+            item->centerX + size * 0.5f,
+            bottom);
+
+        const float plateOpacity = ClampF(backdrop.opacity, 0.0f, 1.0f);
+
+        // The plate is always a vertical blend: from the icon's colour, or
+        // from an automatically darkened offset unless the user pinned a
+        // second colour.
+        const D2D1_COLOR_F top = plateColor(own.top, kDefaultPlateTop);
+        const D2D1_COLOR_F bottomColor = own.customBottom
+            ? plateColor(own.bottom, DerivedPlateBottom(top))
+            : DerivedPlateBottom(top);
+
+        if (plateOn)
+        {
+            renderer_.DrawIconBackdrop(
+                plate,
+                baseRadius * item->scale,
+                plateOpacity,
+                true,
+                top,
+                bottomColor);
+        }
+
+        if (iconFill >= 0.999f)
+        {
+            renderer_.DrawIcon(item->icon.Get(), plate);
+        }
+        else
+        {
+            // Sit the icon in the middle of its plate so the plate reads as
+            // a border rather than the icon being cropped.
+            const float iconSize = size * iconFill;
+            const float iconTop = plate.top + (size - iconSize) * 0.5f;
+
+            renderer_.DrawIcon(
+                item->icon.Get(),
+                D2D1::RectF(item->centerX - iconSize * 0.5f,
+                            iconTop,
+                            item->centerX + iconSize * 0.5f,
+                            iconTop + iconSize));
+        }
+
+        // The rim is independent of the optional coloured plate. It is
+        // always drawn over the icon, with global defaults and per-icon
+        // colour/opacity overrides.
+        renderer_.DrawPlateRim(plate,
+                               baseRadius * item->scale,
+                               item->plate.strokeOpacity >= 0.0f
+                                   ? item->plate.strokeOpacity
+                                   : backdrop.strokeOpacity,
+                               config_.settings.backdrop.strokeWidth
+                                   * dockScale_ * item->scale,
+                               [&]()
+                               {
+                                   float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
+                                   if (ParseHexColor(item->plate.strokeColor,
+                                                     r, g, b, a))
+                                   {
+                                       return D2D1::ColorF(r, g, b, a);
+                                   }
+                                   return D2D1::ColorF(1, 1, 1, 1);
+                               }());
+    }
+
+    // The label is rendered in the same layered surface as the dock, so it
+    // follows the icon's animated centre and size without a separate window.
+    if (tooltipOpacity_ > 0.003f && !tooltipItemId_.empty())
+    {
+        const auto tooltipItem = std::find_if(
+            items_.begin(), items_.end(), [this](const auto& item)
+            {
+                return item->id == tooltipItemId_;
+            });
+        if (tooltipItem != items_.end()
+            && (draggingIndex_ < 0
+                || tooltipItem->get() != draggedVisual))
+        {
+            const DockItem& item = **tooltipItem;
+            renderer_.DrawTooltip(
+                item.name,
+                item.centerX,
+                item.baselineBottom - item.size - 7.0f * dockScale_,
+                item.scale * config_.settings.tooltipScale,
+                dockScale_,
+                metrics_.cornerRadius * item.scale
+                    * config_.settings.tooltipScale,
+                tooltipOpacity_);
+        }
+    }
+
+    // Running indicator: a small dot under the icon, inside the bottom
+    // padding strip. It follows the icon horizontally but never scales.
+    const float dot = metrics_.indicatorHeight;
+
+    for (const auto& item : items_)
+    {
+        if (!item->running || item.get() == draggedVisual)
+        {
+            continue;
+        }
+
+        renderer_.DrawIndicator(item->centerX - dot * 0.5f,
+                                geometry_.indicatorCenterY - dot * 0.5f,
+                                dot);
+    }
+
+    if (draggedVisual)
+    {
+        draggedVisual->centerX = savedDragCenterX;
+        draggedVisual->size = savedDragSize;
+        draggedVisual->baselineBottom = savedDragBaselineBottom;
+    }
+
+    if (!renderer_.EndDraw())
+    {
+        // The render target was lost; it has been recreated and will be drawn
+        // again on the next frame.
+        return;
+    }
+
+    window_.Present(renderer_.SurfaceDC(), renderer_.Width(), renderer_.Height());
+}
+
+void App::PollProcesses()
+{
+    if (items_.empty())
+    {
+        return;
+    }
+
+    std::vector<std::wstring> names;
+    names.reserve(items_.size());
+
+    for (const auto& item : items_)
+    {
+        names.push_back(item->processName);
+    }
+
+    std::vector<bool> running;
+    ProcessMonitor::Query(names, running);
+
+    for (size_t i = 0; i < items_.size() && i < running.size(); ++i)
+    {
+        DockItem& item = *items_[i];
+
+        if (running[i] && item.launching)
+        {
+            item.launching = false;
+        }
+
+        if (running[i] != item.running)
+        {
+            item.running = running[i];
+            needsRender_ = true;
+        }
+    }
+}
+
+void App::CheckPointer()
+{
+    // TEMP-DIAG-BEGIN
+    if (diagMouseX_ >= 0.0f)
+    {
+        mouseActive_ = true;
+        mouseX_ = diagMouseX_;
+        mouseY_ = geometry_.panelY + geometry_.panelHeight * 0.5f;
+        return;
+    }
+    // TEMP-DIAG-END
+
+    POINT cursor{};
+    if (!GetCursorPos(&cursor))
+    {
+        return;
+    }
+
+    const RECT bounds = window_.GetBounds();
+    const float x = static_cast<float>(cursor.x - bounds.left);
+    const float y = static_cast<float>(cursor.y - bounds.top);
+
+    const bool inside = HitTest(x, y);
+
+    if (!fullscreenActive_)
+    {
+        const float previousTarget = fullscreenVisibility_.target;
+        const auto now = std::chrono::steady_clock::now();
+
+        if (config_.settings.autoHide)
+        {
+            const RECT monitorRect = monitorIndex_ >= 0
+                    && monitorIndex_ < static_cast<int>(monitors_.size())
+                ? monitors_[static_cast<size_t>(monitorIndex_)].rect
+                : RECT{0, 0, GetSystemMetrics(SM_CXSCREEN),
+                       GetSystemMetrics(SM_CYSCREEN)};
+            const RECT work = CurrentWorkArea();
+            const LONG revealBand = (std::max)(2L, static_cast<LONG>(
+                std::lround(4.0f * dockScale_)));
+            const bool atRevealEdge = cursor.x >= monitorRect.left
+                && cursor.x < monitorRect.right
+                && cursor.y >= work.bottom - revealBand
+                && cursor.y < monitorRect.bottom;
+
+            if (inside || atRevealEdge)
+            {
+                autoHideHidePending_ = false;
+                fullscreenVisibility_.target = 1.0f;
+            }
+            else
+            {
+                if (!autoHideHidePending_)
+                {
+                    const int delay = (std::clamp)(
+                        config_.settings.autoHideDelayMs, 0, 5000);
+                    hideDeadline_ = now + std::chrono::milliseconds(delay);
+                    autoHideHidePending_ = true;
+                }
+
+                if (now >= hideDeadline_)
+                {
+                    fullscreenVisibility_.target = 0.0f;
+                    autoHideHidePending_ = false;
+                }
+            }
+        }
+        else
+        {
+            autoHideHidePending_ = false;
+            fullscreenVisibility_.target = 1.0f;
+        }
+
+        if (fullscreenVisibility_.target != previousTarget)
+        {
+            WakeAnimation();
+        }
+    }
+
+    if (inside)
+    {
+        if (!mouseActive_)
+        {
+            mouseActive_ = true;
+            mouseX_ = x;
+            mouseY_ = y;
+            WakeAnimation();
+        }
+    }
+    else if (mouseActive_)
+    {
+        mouseActive_ = false;
+        WakeAnimation();
+    }
+
+    if (inside)
+    {
+        mouseY_ = y;
+    }
+}
+
+void App::WakeAnimation()
+{
+    animating_ = true;
+    needsRender_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+bool App::HitTest(float x, float y)
+{
+    if (modal_ || fullscreenActive_)
+    {
+        return false;
+    }
+
+    // The dock only reacts over the icon row. The padding at either end and
+    // the shadow margins stay transparent, so the magnified state releases
+    // the moment the cursor leaves the icons instead of clinging to the
+    // panel edges. The core bounds are widened by the fade band so that
+    // release can be animated rather than cut.
+    float coreLeft = 0.0f;
+    float coreRight = 0.0f;
+    float fadeDistance = 0.0f;
+    RowInfluenceBounds(geometry_, items_.size(), metrics_,
+                       coreLeft, coreRight, fadeDistance);
+
+    // The gate must follow the row, not the resting slots: in Fixed mode the
+    // panel widens and the icons spread into the extra space, and in Elastic
+    // mode the row drifts sideways. Take the widest span of the two so the
+    // detection region grows and shrinks with the panel.
+    // In fixed mode the panel itself is the interaction surface. Do this
+    // before the icon-row gate: the expanded side padding must remain live
+    // while the pointer travels across it, otherwise WM_NCHITTEST switches
+    // to HTTRANSPARENT and the panel collapses before the cursor reaches the
+    // other icons.
+    if (config_.settings.panelMode == PanelMode::Fixed
+        && frame_.panelWidth > 0.0f)
+    {
+        const float left = frame_.panelX - metrics_.hitMargin;
+        const float right = frame_.panelX + frame_.panelWidth
+            + metrics_.hitMargin;
+        const float top = geometry_.panelY - metrics_.hitMargin;
+        const float bottom = geometry_.panelY + geometry_.panelHeight
+            + metrics_.hitMargin;
+
+        if (x >= left && x <= right && y >= top && y <= bottom)
+        {
+            return true;
+        }
+    }
+
+    if (!items_.empty())
+    {
+        float left = items_.front()->x;
+        float right = items_.front()->x + items_.front()->size;
+
+        for (const auto& item : items_)
+        {
+            left = (std::min)(left, item->x);
+            right = (std::max)(right, item->x + item->size);
+        }
+
+        coreLeft = (std::min)(coreLeft, left - metrics_.hitMargin);
+        coreRight = (std::max)(coreRight, right + metrics_.hitMargin);
+    }
+
+    if (x < coreLeft - fadeDistance || x > coreRight + fadeDistance)
+    {
+        return false;
+    }
+
+    if (HitTestDock(x, y, frame_, geometry_, metrics_))
+    {
+        return true;
+    }
+
+    for (const auto& item : items_)
+    {
+        if (item->size <= 0.0f)
+        {
+            continue;
+        }
+
+        const float bottom = item->baselineBottom + item->bounceOffset;
+        const float half = item->size * 0.5f;
+
+        if (x >= item->centerX - half && x <= item->centerX + half
+            && y >= bottom - item->size && y <= bottom)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+int App::IndexAtPoint(float x, float y) const
+{
+    for (size_t i = 0; i < items_.size(); ++i)
+    {
+        const DockItem& item = *items_[i];
+
+        if (item.size <= 0.0f)
+        {
+            continue;
+        }
+
+        const float bottom = item.baselineBottom + item.bounceOffset;
+        const float half = item.size * 0.5f;
+
+        if (x >= item.centerX - half && x <= item.centerX + half
+            && y >= bottom - item.size && y <= bottom)
+        {
+            return static_cast<int>(i);
+        }
+    }
+
+    return -1;
+}
+
+void App::OnMouseMove(float x, float y)
+{
+    if (modal_)
+    {
+        return;
+    }
+
+    mouseX_ = x;
+    mouseY_ = y;
+
+    // A short movement threshold keeps an ordinary click from becoming a
+    // reorder operation. Once crossed, capture the mouse so the drag can be
+    // completed even if the pointer leaves the panel's rounded hit region.
+    if (pressedIndex_ >= 0 && draggingIndex_ < 0)
+    {
+        const float dx = x - dragStartX_;
+        const float dy = y - dragStartY_;
+        const float threshold = 8.0f * dockScale_;
+
+        if (dx * dx + dy * dy >= threshold * threshold)
+        {
+            draggingIndex_ = pressedIndex_;
+            pressedIndex_ = -1;
+            dragLift_ = 0.0f;
+            dragPlaceholderAmount_ = 0.0f;
+            dragTargetIndex_ = draggingIndex_;
+            dragVisualTargetIndex_ = draggingIndex_;
+
+            if (window_.Handle())
+            {
+                SetCapture(window_.Handle());
+            }
+        }
+    }
+
+    if (!mouseActive_)
+    {
+        mouseActive_ = true;
+    }
+
+    WakeAnimation();
+}
+
+void App::OnMouseButton(int button, bool down, float x, float y)
+{
+    if (modal_)
+    {
+        return;
+    }
+
+    if (button == 0 && down)
+    {
+        pressedIndex_ = IndexAtPoint(x, y);
+        dragStartX_ = x;
+        dragStartY_ = y;
+
+        if (pressedIndex_ >= 0)
+        {
+            const DockItem& item = *items_[static_cast<size_t>(pressedIndex_)];
+            dragGrabX_ = x - item.centerX;
+            dragGrabY_ = y - (item.baselineBottom - item.size * 0.5f);
+        }
+
+        if (pressedIndex_ >= 0 && window_.Handle())
+        {
+            // Capture from the press, not only after the threshold, so a
+            // quick drag can leave the icon or panel without losing the
+            // eventual mouse-up event.
+            SetCapture(window_.Handle());
+        }
+
+        return;
+    }
+
+    if (button == 0 && !down)
+    {
+        if (draggingIndex_ >= 0)
+        {
+            if (GetCapture() == window_.Handle())
+            {
+                ReleaseCapture();
+            }
+
+            FinishIconDrag(x, y);
+
+            draggingIndex_ = -1;
+            pressedIndex_ = -1;
+            dragLift_ = 0.0f;
+            dragPlaceholderAmount_ = 0.0f;
+            dragTargetIndex_ = -1;
+            dragVisualTargetIndex_ = -1;
+            WakeAnimation();
+            return;
+        }
+
+        const int index = IndexAtPoint(x, y);
+
+        if (index >= 0 && index == pressedIndex_)
+        {
+            LaunchApplication(static_cast<size_t>(index));
+        }
+
+        if (GetCapture() == window_.Handle())
+        {
+            ReleaseCapture();
+        }
+
+        pressedIndex_ = -1;
+        dragLift_ = 0.0f;
+        dragPlaceholderAmount_ = 0.0f;
+        dragTargetIndex_ = -1;
+        dragVisualTargetIndex_ = -1;
+        return;
+    }
+
+    if (button == 1 && !down)
+    {
+        ShowContextMenu(IndexAtPoint(x, y), x, y);
+    }
+}
+
+void App::FinishIconDrag(float x, float y)
+{
+    const int from = draggingIndex_;
+    if (from < 0 || from >= static_cast<int>(items_.size()))
+    {
+        return;
+    }
+
+    // A dragged icon released outside the dock is a request to remove it.
+    // Ask every time, including an ordinary drag that simply leaves the
+    // detection area, so an accidental flick cannot delete an entry.
+    if (!HitTest(x, y))
+    {
+        const std::wstring message =
+            L"确定要将“" + items_[static_cast<size_t>(from)]->name
+            + L"”移出 Dock 吗？";
+
+        const int answer = MessageBoxW(
+            window_.Handle(), message.c_str(), L"移出 Dock",
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+
+        if (answer == IDYES)
+        {
+            RemoveApplication(static_cast<size_t>(from));
+        }
+
+        return;
+    }
+
+    // Count the centres to the left of the drop point, excluding the item
+    // being dragged. This gives the insertion index directly for both
+    // leftward and rightward moves.
+    int target = 0;
+    for (int i = 0; i < static_cast<int>(items_.size()); ++i)
+    {
+        if (i != from && x > items_[static_cast<size_t>(i)]->centerX)
+        {
+            ++target;
+        }
+    }
+
+    if (target == from)
+    {
+        return;
+    }
+
+    auto moved = std::move(items_[static_cast<size_t>(from)]);
+    items_.erase(items_.begin() + from);
+    items_.insert(items_.begin() + target, std::move(moved));
+
+    RebuildItemPointers();
+    SaveConfiguration();
+    UpdateSurfaceAndGeometry();
+}
+
+void App::OnDpiChanged(int dpi)
+{
+    if (dpi <= 0)
+    {
+        return;
+    }
+
+    window_.SetDpi(dpi);
+    RebuildMetrics();
+    WakeAnimation();
+}
+
+void App::OnCommand(UINT id)
+{
+    HandleMenuCommand(id);
+}
+
+void App::OnTrayNotify(LPARAM lParam)
+{
+    switch (LOWORD(lParam))
+    {
+    case WM_RBUTTONUP:
+    case WM_CONTEXTMENU:
+        ShowTrayMenu();
+        break;
+
+    case WM_LBUTTONUP:
+    default:
+        break;
+    }
+}
+
+void App::OnDropFiles(HDROP drop)
+{
+    if (!drop)
+    {
+        return;
+    }
+
+    const UINT count = DragQueryFileW(drop, 0xFFFFFFFFu, nullptr, 0);
+
+    if (!modal_)
+    {
+        for (UINT i = 0; i < count; ++i)
+        {
+            const UINT length = DragQueryFileW(drop, i, nullptr, 0);
+            if (length == 0)
+            {
+                continue;
+            }
+
+            std::wstring path(length + 1, L'\0');
+            DragQueryFileW(drop, i, path.data(), length + 1);
+            path.resize(length);
+            AddApplication(path);
+        }
+    }
+
+    DragFinish(drop);
+}
+
+void App::OnExternalDragEnter(const std::vector<std::wstring>& paths,
+                              float x, float y)
+{
+    if (modal_ || paths.empty())
+    {
+        return;
+    }
+
+    if (externalDragActive_)
+    {
+        FinishExternalDrag(false, x, y);
+    }
+
+    externalDragPaths_ = paths;
+
+    const std::wstring& path = externalDragPaths_.front();
+    AppInfo info = icons_.Inspect(path, 256);
+    if (info.resolvedPath.empty())
+    {
+        info.resolvedPath = path;
+    }
+
+    if (info.name.empty())
+    {
+        info.name = GetFileStem(path);
+    }
+
+    auto preview = std::make_unique<DockItem>();
+    preview->id = L"__external_drag_preview__";
+    preview->name = info.name;
+    preview->targetPath = path;
+    preview->resolvedPath = info.resolvedPath;
+    preview->arguments = info.arguments;
+    preview->processName = info.processName;
+    preview->iconSource = info.icon;
+    preview->scale = 1.0f;
+    preview->scaleSpring.Reset(1.0f);
+    preview->bounceSpring.Reset(0.0f);
+
+    items_.push_back(std::move(preview));
+    RebuildItemPointers();
+
+    externalDragActive_ = true;
+    lastExternalDragFrame_ = std::chrono::steady_clock::now();
+    draggingIndex_ = static_cast<int>(items_.size()) - 1;
+    pressedIndex_ = -1;
+    dragLift_ = 0.0f;
+    dragPlaceholderAmount_ = 0.0f;
+    dragTargetIndex_ = draggingIndex_;
+    dragVisualTargetIndex_ = draggingIndex_;
+    dragGrabX_ = metrics_.iconSize * 0.5f;
+    dragGrabY_ = metrics_.iconSize * 0.5f;
+    mouseX_ = x;
+    mouseY_ = y;
+    mouseActive_ = true;
+    UpdateSurfaceAndGeometry();
+    SetTimer(window_.Handle(), 0x4C444B31u,
+             static_cast<UINT>((std::max)(8, frameIntervalMs_)), nullptr);
+    WakeAnimation();
+    OnAnimationTimer();
+}
+
+void App::OnExternalDragMove(float x, float y)
+{
+    if (!externalDragActive_ || modal_)
+    {
+        return;
+    }
+
+    mouseX_ = x;
+    mouseY_ = y;
+    mouseActive_ = true;
+    WakeAnimation();
+    // Some OLE drag loops do not dispatch the dock window's timer messages
+    // reliably. Advance immediately on every DragOver as a guaranteed
+    // repaint path; the timer still fills the gaps when the pointer pauses.
+    OnAnimationTimer();
+}
+
+void App::OnExternalDragLeave()
+{
+    if (externalDragActive_)
+    {
+        FinishExternalDrag(false, mouseX_, mouseY_);
+    }
+}
+
+void App::OnExternalDrop(float x, float y)
+{
+    if (!externalDragActive_)
+    {
+        return;
+    }
+
+    OnExternalDragMove(x, y);
+    FinishExternalDrag(true, x, y);
+}
+
+void App::FinishExternalDrag(bool commit, float x, float y)
+{
+    if (!externalDragActive_
+        || draggingIndex_ < 0
+        || draggingIndex_ >= static_cast<int>(items_.size()))
+    {
+        return;
+    }
+
+    mouseX_ = x;
+    mouseY_ = y;
+
+    int insertion = dragTargetIndex_;
+    const int previewIndex = draggingIndex_;
+    const int originalCount = static_cast<int>(items_.size()) - 1;
+
+    items_.erase(items_.begin() + previewIndex);
+    RebuildItemPointers();
+
+    draggingIndex_ = -1;
+    pressedIndex_ = -1;
+    dragLift_ = 0.0f;
+    dragPlaceholderAmount_ = 0.0f;
+    dragTargetIndex_ = -1;
+    dragVisualTargetIndex_ = -1;
+    externalDragActive_ = false;
+    KillTimer(window_.Handle(), 0x4C444B31u);
+
+    if (commit && !externalDragPaths_.empty())
+    {
+        insertion = std::clamp(insertion, 0, originalCount);
+
+        for (size_t pathIndex = 0;
+             pathIndex < externalDragPaths_.size(); ++pathIndex)
+        {
+            const std::wstring path = externalDragPaths_[pathIndex];
+            const std::wstring id = MakeStableId(path);
+            AddApplication(path);
+
+            auto found = std::find_if(
+                items_.begin(), items_.end(),
+                [&id](const std::unique_ptr<DockItem>& item)
+                {
+                    return item->id == id;
+                });
+
+            if (found != items_.end())
+            {
+                const int target = std::clamp(
+                    insertion + static_cast<int>(pathIndex),
+                    0, static_cast<int>(items_.size()) - 1);
+                auto moved = std::move(*found);
+                items_.erase(found);
+                items_.insert(items_.begin() + target, std::move(moved));
+                RebuildItemPointers();
+            }
+        }
+
+        SaveConfiguration();
+        UpdateSurfaceAndGeometry();
+    }
+
+    externalDragPaths_.clear();
+    RebuildItemPointers();
+    WakeAnimation();
+}
+
+void App::OnAnimationTimer()
+{
+    if (!externalDragActive_ || modal_ || !running_)
+    {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    double dt = std::chrono::duration<double>(
+        now - lastExternalDragFrame_).count();
+    lastExternalDragFrame_ = now;
+    dt = std::clamp(dt, 0.0, 0.05);
+
+    if (animating_ || needsRender_)
+    {
+        needsRender_ = false;
+        Tick(dt);
+    }
+}
+
+HICON App::MakeTrayIcon(int size)
+{
+    if (size <= 0)
+    {
+        size = 16;
+    }
+
+    HDC screen = GetDC(nullptr);
+    if (!screen)
+    {
+        return nullptr;
+    }
+
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = size;
+    info.bmiHeader.biHeight = -size;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP color = CreateDIBSection(
+        screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+
+    HICON result = nullptr;
+
+    if (color)
+    {
+        HDC dc = CreateCompatibleDC(screen);
+
+        if (dc)
+        {
+            HGDIOBJ previous = SelectObject(dc, color);
+
+            if (bits)
+            {
+                std::memset(bits, 0, static_cast<size_t>(size) * size * 4);
+            }
+
+            // Rounded dark tray plate.
+            HBRUSH plate = CreateSolidBrush(RGB(26, 27, 33));
+            HPEN outline = CreatePen(PS_SOLID, 1, RGB(96, 100, 112));
+
+            HGDIOBJ previousBrush = SelectObject(dc, plate);
+            HGDIOBJ previousPen = SelectObject(dc, outline);
+
+            const int inset = (std::max)(1, size / 16);
+            const int radius = (std::max)(2, size / 4);
+
+            RoundRect(dc, inset, inset, size - inset, size - inset,
+                      radius, radius);
+
+            // Three "docks" pinned to the bottom of the plate.
+            HBRUSH dotBrush = CreateSolidBrush(RGB(140, 190, 255));
+            HGDIOBJ previousDot = SelectObject(dc, dotBrush);
+
+            const int dotRadius = (std::max)(1, size / 9);
+            const int centerY = size * 5 / 8;
+            const int spacing = dotRadius * 3;
+
+            for (int i = -1; i <= 1; ++i)
+            {
+                const int cx = size / 2 + i * spacing;
+                Ellipse(dc, cx - dotRadius, centerY - dotRadius,
+                        cx + dotRadius, centerY + dotRadius);
+            }
+
+            SelectObject(dc, previousDot);
+            DeleteObject(dotBrush);
+
+            SelectObject(dc, previousBrush);
+            SelectObject(dc, previousPen);
+            SelectObject(dc, previous);
+
+            DeleteObject(plate);
+            DeleteObject(outline);
+
+            HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
+
+            if (mask)
+            {
+                ICONINFO iconInfo{};
+                iconInfo.fIcon = TRUE;
+                iconInfo.hbmMask = mask;
+                iconInfo.hbmColor = color;
+
+                result = CreateIconIndirect(&iconInfo);
+                DeleteObject(mask);
+            }
+
+            DeleteDC(dc);
+        }
+
+        DeleteObject(color);
+    }
+
+    ReleaseDC(nullptr, screen);
+
+    return result;
+}
+
+void App::OnDestroy()
+{
+    running_ = false;
+    PostQuitMessage(0);
+}
+
+void App::ShowContextMenu(int index, float x, float y)
+{
+    HMENU menu = CreatePopupMenu();
+    if (!menu)
+    {
+        return;
+    }
+
+    if (index >= 0)
+    {
+        // Per application only: this app's shortcut properties.
+        AppendMenuW(menu, MF_STRING, kMenuOpen, L"打开");
+        AppendMenuW(menu, MF_STRING, kMenuEdit, L"图标配置…");
+        AppendMenuW(menu, MF_STRING, kMenuRemove, L"从 Dock 移除");
+    }
+    else
+    {
+        AppendMenuW(menu, MF_STRING, kMenuAdd, L"添加应用");
+        AppendMenuW(menu, MF_STRING, kMenuSettings, L"Dock 设置…");
+    }
+
+    menuIndex_ = index;
+
+    const RECT bounds = window_.GetBounds();
+    POINT screen{};
+    screen.x = bounds.left + static_cast<LONG>(std::lround(x));
+    screen.y = bounds.top + static_cast<LONG>(std::lround(y));
+
+    SetForegroundWindow(window_.Handle());
+
+    const UINT command = TrackPopupMenuEx(
+        menu,
+        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        screen.x,
+        screen.y,
+        window_.Handle(),
+        nullptr);
+
+    DestroyMenu(menu);
+
+    // Makes sure the menu is fully dismissed even without an active window.
+    PostMessageW(window_.Handle(), WM_NULL, 0, 0);
+
+    if (command != 0)
+    {
+        HandleMenuCommand(command);
+    }
+}
+
+void App::ShowTrayMenu()
+{
+    HMENU menu = CreatePopupMenu();
+    if (!menu)
+    {
+        return;
+    }
+
+    // Tray menu is the "home" for global actions: dock settings (which now
+    // includes the global icon backdrop), picking a display and quitting.
+    // Adding apps lives in the dock blank-area menu and drag & drop.
+    AppendMenuW(menu, MF_STRING, kMenuSettings, L"Dock 设置…");
+    AppendMonitorMenu(menu);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuExit, L"退出");
+
+    POINT cursor{};
+    GetCursorPos(&cursor);
+
+    SetForegroundWindow(window_.Handle());
+
+    const UINT command = TrackPopupMenuEx(
+        menu,
+        TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        cursor.x,
+        cursor.y,
+        window_.Handle(),
+        nullptr);
+
+    DestroyMenu(menu);
+    PostMessageW(window_.Handle(), WM_NULL, 0, 0);
+
+    if (command != 0)
+    {
+        HandleMenuCommand(command);
+    }
+}
+
+void App::HandleMenuCommand(UINT id)
+{
+    switch (id)
+    {
+    case kMenuOpen:
+        if (menuIndex_ >= 0)
+        {
+            AppLauncher::Open(items_[static_cast<size_t>(menuIndex_)]->targetPath);
+        }
+
+        break;
+
+    case kMenuRemove:
+        if (menuIndex_ >= 0)
+        {
+            RemoveApplication(static_cast<size_t>(menuIndex_));
+        }
+
+        break;
+
+    case kMenuEdit:
+        if (menuIndex_ >= 0
+            && EditItem(static_cast<size_t>(menuIndex_)))
+        {
+            SaveConfiguration();
+            UpdateSurfaceAndGeometry();
+            WakeAnimation();
+        }
+
+        break;
+
+    case kMenuSettings:
+        if (ShowSettings())
+        {
+            ApplySettings();
+        }
+
+        break;
+
+    case kMenuAdd:
+    {
+        const std::wstring path = PickApplicationFile();
+        if (!path.empty())
+        {
+            AddApplication(path);
+        }
+
+        break;
+    }
+
+    case kMenuExit:
+        if (window_.Handle())
+        {
+            PostMessageW(window_.Handle(), WM_CLOSE, 0, 0);
+        }
+
+        break;
+
+    default:
+        if (id >= kMenuMonitorBase)
+        {
+            SelectMonitor(static_cast<int>(id - kMenuMonitorBase));
+        }
+
+        break;
+    }
+
+    menuIndex_ = -1;
+}
+
+std::wstring App::PickFile(const wchar_t* title,
+                            const COMDLG_FILTERSPEC* filters,
+                            UINT filterCount)
+{
+    ComPtr<IFileOpenDialog> dialog;
+
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL,
+                                IID_PPV_ARGS(dialog.AddressOf()))))
+    {
+        return {};
+    }
+
+    DWORD options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options)))
+    {
+        dialog->SetOptions(options
+                           | FOS_FORCEFILESYSTEM
+                           | FOS_FILEMUSTEXIST
+                           | FOS_PATHMUSTEXIST
+                           | FOS_NOCHANGEDIR
+                           | FOS_DONTADDTORECENT);
+    }
+
+    dialog->SetFileTypes(filterCount, filters);
+    dialog->SetFileTypeIndex(1);
+    dialog->SetTitle(title);
+
+    if (FAILED(dialog->Show(nullptr)))
+    {
+        return {};
+    }
+
+    ComPtr<IShellItem> result;
+    if (FAILED(dialog->GetResult(result.AddressOf())))
+    {
+        return {};
+    }
+
+    wchar_t* path = nullptr;
+    if (FAILED(result->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path)
+    {
+        return {};
+    }
+
+    std::wstring selected(path);
+    CoTaskMemFree(path);
+
+    return selected;
+}
+
+std::wstring App::PickApplicationFile()
+{
+    const COMDLG_FILTERSPEC filters[] =
+    {
+        {L"应用程序 (*.exe; *.lnk)", L"*.exe;*.lnk"},
+        {L"所有文件 (*.*)", L"*.*"},
+    };
+
+    return PickFile(L"添加应用到 LightDock", filters, ARRAYSIZE(filters));
+}
+
+bool App::EditItem(size_t index)
+{
+    if (index >= items_.size() || !window_.Handle())
+    {
+        return false;
+    }
+
+    editor_ = ItemEditor{};
+    editor_.item = items_[index].get();
+
+    constexpr wchar_t kEditorClass[] = L"LightDock_ItemEditor";
+
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.lpfnWndProc = &App::EditorProc;
+    windowClass.hInstance = instance_;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    windowClass.lpszClassName = kEditorClass;
+
+    RegisterClassExW(&windowClass);
+
+    constexpr int width = 470;
+    constexpr int height = 420;
+
+    // The title names the app being configured so the user always knows
+    // which entry they are editing.
+    const std::wstring title =
+        L"图标配置 — " + items_[index]->name;
+
+    const int scaledWidth = static_cast<int>(std::lround(width * dpiScale_));
+    const int scaledHeight = static_cast<int>(std::lround(height * dpiScale_));
+
+    const RECT work = CurrentWorkArea();
+    const int x = work.left + ((work.right - work.left) - scaledWidth) / 2;
+    const int y = work.top + ((work.bottom - work.top) - scaledHeight) / 2;
+
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kEditorClass,
+        title.c_str(),
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        x, y, scaledWidth, scaledHeight,
+        window_.Handle(),
+        nullptr,
+        instance_,
+        this);
+
+    if (!dialog)
+    {
+        editor_ = ItemEditor{};
+        return false;
+    }
+
+    editor_.dialog = dialog;
+    ShowWindow(dialog, SW_SHOW);
+    SetForegroundWindow(dialog);
+
+    // Modal: the dock keeps painting but stops reacting to the mouse.
+    RunModal(dialog, editor_.closed);
+
+    if (editor_.dialog)
+    {
+        DestroyWindow(editor_.dialog);
+        editor_.dialog = nullptr;
+    }
+
+    const bool saved = editor_.saved;
+    editor_.item = nullptr;
+
+    return saved;
+}
+
+void App::RunModal(HWND window, const bool& closed)
+{
+    // Keep the dock non-interactive, but continue its frame clock while the
+    // dialog owns the nested message loop. This lets the dock glide closed
+    // instead of freezing in its hovered state.
+    modal_ = true;
+    mouseActive_ = false;
+    WakeAnimation();
+
+    MSG message{};
+    auto lastModalFrame = std::chrono::steady_clock::now();
+    while (!closed && running_)
+    {
+        MsgWaitForMultipleObjectsEx(
+            0, nullptr, static_cast<DWORD>(frameIntervalMs_),
+            QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+        {
+            if (message.message == WM_QUIT)
+            {
+                running_ = false;
+                break;
+            }
+
+            if (!IsDialogMessageW(window, &message))
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+
+        if (!running_)
+        {
+            break;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = std::min(
+            std::chrono::duration<double>(now - lastModalFrame).count(),
+            0.05);
+        lastModalFrame = now;
+
+        if (animating_ || needsRender_)
+        {
+            needsRender_ = false;
+            Tick(dt);
+        }
+    }
+
+    modal_ = false;
+    needsRender_ = true;
+}
+
+void App::ApplySettings()
+{
+    SaveConfiguration();
+    RebuildMetrics();
+    WakeAnimation();
+}
+
+bool App::ShowSettings()
+{
+    settings_ = SettingsEditor{};
+
+    INITCOMMONCONTROLSEX controls{};
+    controls.dwSize = sizeof(controls);
+    controls.dwICC = ICC_BAR_CLASSES | ICC_TAB_CLASSES;
+    InitCommonControlsEx(&controls);
+
+    constexpr wchar_t kSettingsClass[] = L"LightDock_Settings";
+
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.lpfnWndProc = &App::SettingsProc;
+    windowClass.hInstance = instance_;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    windowClass.lpszClassName = kSettingsClass;
+
+    RegisterClassExW(&windowClass);
+
+    constexpr int width = 400;
+    constexpr int height = 390;
+
+    // Scale the dialog for the monitor it will appear on.
+    const int scaledWidth = static_cast<int>(std::lround(width * dpiScale_));
+    const int scaledHeight = static_cast<int>(std::lround(height * dpiScale_));
+
+    const RECT work = CurrentWorkArea();
+    const int x = work.left + ((work.right - work.left) - scaledWidth) / 2;
+    const int y = work.top + ((work.bottom - work.top) - scaledHeight) / 2;
+
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kSettingsClass,
+        L"Dock 设置",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        x, y, scaledWidth, scaledHeight,
+        window_.Handle(),
+        nullptr,
+        instance_,
+        this);
+
+    if (!dialog)
+    {
+        return false;
+    }
+
+    settings_.dialog = dialog;
+    ShowWindow(dialog, SW_SHOW);
+    SetForegroundWindow(dialog);
+
+    RunModal(dialog, settings_.closed);
+
+    if (settings_.dialog)
+    {
+        DestroyWindow(settings_.dialog);
+        settings_.dialog = nullptr;
+    }
+
+    return settings_.saved;
+}
+
+LRESULT CALLBACK App::SettingsProc(HWND hwnd, UINT message,
+                                   WPARAM wParam, LPARAM lParam)
+{
+    App* self = nullptr;
+
+    if (message == WM_NCCREATE)
+    {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        self = static_cast<App*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    else
+    {
+        self = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    }
+
+    if (!self)
+    {
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    return self->HandleSettingsMessage(hwnd, message, wParam, lParam);
+}
+
+LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
+                                   WPARAM wParam, LPARAM lParam)
+{
+    enum : int
+    {
+        kIdMode = 201,
+        kIdSize,
+        kIdSpacing,
+        kIdMagnify,
+        kIdAutoHide = 205,
+        kIdFullscreenHideDelay,
+        kIdFullscreenHideSpeed,
+
+        kIdCorner = 221,
+        kIdScale,
+        kIdOpacity,
+
+        kIdBgCustom = 231,
+        kIdBgTop,
+        kIdBgBottom,
+        kIdBgOpacity,
+        kIdTooltipOpacity = 252,
+        kIdTooltipFade,
+        kIdSettingsTabs = 254,
+        kIdDockCorner = 255,
+        kIdTooltipScale,
+        kIdStrokeWidth,
+        kIdStrokeOpacity,
+        kIdOverallScale,
+
+        kIdSave = 241,
+        kIdCancel,
+    };
+
+    auto sliderValue = [](HWND slider) -> int
+    {
+        return slider ? static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0))
+                      : 0;
+    };
+
+    auto hexOf = [](COLORREF color) -> std::wstring
+    {
+        wchar_t text[16];
+        swprintf(text, 16, L"#%02X%02X%02X",
+                 GetRValue(color), GetGValue(color), GetBValue(color));
+        return std::wstring(text);
+    };
+
+    auto backgroundChecked = [&]() -> bool
+    {
+        return settings_.customBox
+            && SendMessageW(settings_.customBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
+    };
+
+    /// The top swatch is always active because it is also the solid panel
+    /// colour. The bottom swatch is only active for the optional gradient.
+    auto syncBackgroundControls = [&]()
+    {
+        const bool on = backgroundChecked();
+
+        if (settings_.topSwatch)
+        {
+            EnableWindow(settings_.topSwatch, TRUE);
+        }
+
+        if (settings_.bottomSwatch)
+        {
+            EnableWindow(settings_.bottomSwatch, on ? TRUE : FALSE);
+        }
+
+        const std::wstring top = hexOf(settings_.topColor);
+        SetWindowTextW(settings_.topHex, top.c_str());
+
+        const std::wstring bottom = on
+            ? hexOf(settings_.bottomColor) : L"（渐变关闭）";
+        SetWindowTextW(settings_.bottomHex, bottom.c_str());
+    };
+
+    /// Live preview: pushes every control into the running config, rebuilds
+    /// the layout and repaints the dock. Cancelling rolls back to the
+    /// snapshot taken in WM_CREATE.
+    auto previewSettings = [&]()
+    {
+        DockSettings& s = config_.settings;
+
+        if (settings_.modeCombo)
+        {
+            const LRESULT selection =
+                SendMessageW(settings_.modeCombo, CB_GETCURSEL, 0, 0);
+
+            s.panelMode = selection == 1 ? PanelMode::Elastic
+                : selection == 2 ? PanelMode::Static : PanelMode::Fixed;
+        }
+
+        s.iconSize = sliderValue(settings_.sizeSlider);
+        s.iconSpacing = sliderValue(settings_.spacingSlider);
+        s.overallScale = static_cast<float>(
+            sliderValue(settings_.overallScaleSlider)) / 100.0f;
+        s.autoHide = settings_.autoHideBox
+            && SendMessageW(settings_.autoHideBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
+        s.autoHideDelayMs = sliderValue(settings_.autoHideDelaySlider);
+        s.autoHideSpeed = static_cast<float>(sliderValue(
+            settings_.autoHideSpeedSlider)) / 100.0f;
+        s.magnification =
+            static_cast<float>(sliderValue(settings_.magnifySlider)) / 10.0f;
+        s.cornerRadius = static_cast<float>(sliderValue(settings_.dockCornerSlider));
+        s.tooltipScale = static_cast<float>(sliderValue(settings_.tooltipScaleSlider))
+            / 100.0f;
+
+        IconBackdrop& backdrop = s.backdrop;
+
+        backdrop.cornerRadius =
+            static_cast<float>(sliderValue(settings_.cornerSlider));
+        backdrop.iconScale =
+            static_cast<float>(sliderValue(settings_.scaleSlider)) / 100.0f;
+        backdrop.opacity =
+            static_cast<float>(sliderValue(settings_.opacitySlider)) / 100.0f;
+        backdrop.strokeWidth = static_cast<float>(sliderValue(
+            settings_.strokeWidthSlider)) / 10.0f;
+        backdrop.strokeOpacity = static_cast<float>(sliderValue(
+            settings_.strokeOpacitySlider)) / 100.0f;
+
+        // The first colour is the solid panel colour even when the gradient
+        // switch is off. Only the second stop is cleared in solid mode.
+        s.backgroundTop = hexOf(settings_.topColor);
+        s.backgroundBottom = backgroundChecked()
+            ? hexOf(settings_.bottomColor)
+            : std::wstring();
+
+        s.backgroundOpacity =
+            static_cast<float>(sliderValue(settings_.bgOpacitySlider))
+            / 100.0f;
+        s.tooltipOpacity =
+            static_cast<float>(sliderValue(settings_.tooltipOpacitySlider))
+            / 100.0f;
+        s.tooltipFadeSeconds =
+            static_cast<float>(sliderValue(settings_.tooltipFadeSlider))
+            / 1000.0f;
+
+        RebuildMetrics();
+        CheckFullscreen();
+
+        // The settings dialog runs its own modal loop, so the dock's frame
+        // loop is parked: `needsRender_` alone would not repaint until the
+        // dialog closes. Paint synchronously, exactly like the per-icon
+        // editor does.
+        Render();
+        WakeAnimation();
+    };
+
+    /// Puts back the settings the dock had before the dialog opened.
+    auto restoreSettings = [&]()
+    {
+        config_.settings = settings_.original;
+        RebuildMetrics();
+        Render();
+        WakeAnimation();
+    };
+
+    auto refreshLabels = [&]()
+    {
+        wchar_t text[48];
+
+        swprintf(text, 48, L"%d px", sliderValue(settings_.sizeSlider));
+        SetWindowTextW(settings_.sizeLabel, text);
+
+        swprintf(text, 48, L"%d px", sliderValue(settings_.spacingSlider));
+        SetWindowTextW(settings_.spacingLabel, text);
+
+        swprintf(text, 48, L"%.1fx",
+                 static_cast<double>(sliderValue(settings_.magnifySlider))
+                     / 10.0);
+        SetWindowTextW(settings_.magnifyLabel, text);
+
+        swprintf(text, 48, L"%d px", sliderValue(settings_.cornerSlider));
+        SetWindowTextW(settings_.cornerLabel, text);
+
+        swprintf(text, 48, L"%d px", sliderValue(settings_.dockCornerSlider));
+        SetWindowTextW(settings_.dockCornerLabel, text);
+
+        swprintf(text, 48, L"%d%%", sliderValue(settings_.scaleSlider));
+        SetWindowTextW(settings_.scaleLabel, text);
+
+        swprintf(text, 48, L"%d%%", sliderValue(settings_.opacitySlider));
+        SetWindowTextW(settings_.opacityLabel, text);
+
+        swprintf(text, 48, L"%d%%", sliderValue(settings_.bgOpacitySlider));
+        SetWindowTextW(settings_.bgOpacityLabel, text);
+
+        swprintf(text, 48, L"%d%%", sliderValue(settings_.tooltipOpacitySlider));
+        SetWindowTextW(settings_.tooltipOpacityLabel, text);
+
+        swprintf(text, 48, L"%d ms", sliderValue(settings_.tooltipFadeSlider));
+        SetWindowTextW(settings_.tooltipFadeLabel, text);
+
+        swprintf(text, 48, L"%d%%", sliderValue(settings_.tooltipScaleSlider));
+        SetWindowTextW(settings_.tooltipScaleLabel, text);
+
+        swprintf(text, 48, L"%.1f px",
+                 static_cast<double>(sliderValue(settings_.strokeWidthSlider)) / 10.0);
+        SetWindowTextW(settings_.strokeWidthLabel, text);
+
+        swprintf(text, 48, L"%d%%",
+                 sliderValue(settings_.strokeOpacitySlider));
+        SetWindowTextW(settings_.strokeOpacityLabel, text);
+
+        swprintf(text, 48, L"%d%%", sliderValue(settings_.overallScaleSlider));
+        SetWindowTextW(settings_.overallScaleLabel, text);
+
+        swprintf(text, 48, L"%d ms",
+                 sliderValue(settings_.autoHideDelaySlider));
+        SetWindowTextW(settings_.autoHideDelayLabel, text);
+
+        swprintf(text, 48, L"%.1fx",
+                 static_cast<double>(sliderValue(
+                     settings_.autoHideSpeedSlider)) / 100.0);
+        SetWindowTextW(settings_.autoHideSpeedLabel, text);
+    };
+
+    switch (message)
+    {
+    case WM_NCCREATE:
+        // Must fall through to DefWindowProc, otherwise the window title
+        // passed to CreateWindowExW is never stored and the caption is blank.
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+
+    case WM_CREATE:
+    {
+        if (!hwnd)
+        {
+            return -1;
+        }
+
+        // Scale every coordinate for the dialog's monitor DPI.
+        const float scale = DialogDpi(hwnd) / 96.0f;
+
+        auto S = [scale](int value) -> int
+        {
+            return static_cast<int>(std::lround(value * scale));
+        };
+
+        auto setFont = [](HWND control, bool bold = false)
+        {
+            HFONT font = DialogFont(bold);
+            if (control && font)
+            {
+                SendMessageW(control, WM_SETFONT,
+                             reinterpret_cast<WPARAM>(font), TRUE);
+            }
+        };
+
+        auto makeLabel = [&](const wchar_t* text, int x, int y, int w,
+                             bool bold = false)
+        {
+            HWND control = CreateWindowExW(
+                0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                S(x), S(y), S(w), S(20), hwnd, nullptr, instance_, nullptr);
+            setFont(control, bold);
+            return control;
+        };
+
+        auto makeSlider = [&](int id, int x, int y, int w,
+                              int lo, int hi, int value)
+        {
+            HWND control = CreateWindowExW(
+                0, TRACKBAR_CLASSW, nullptr,
+                WS_CHILD | WS_VISIBLE | TBS_HORZ | WS_TABSTOP,
+                S(x), S(y), S(w), S(28), hwnd,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                instance_, nullptr);
+
+            if (control)
+            {
+                SendMessageW(control, TBM_SETRANGE, TRUE, MAKELPARAM(lo, hi));
+                SendMessageW(control, TBM_SETPOS, TRUE, value);
+                setFont(control);
+            }
+
+            return control;
+        };
+
+        auto makeButton = [&](const wchar_t* text, int id, int x, int y)
+        {
+            HWND control = CreateWindowExW(
+                0, L"BUTTON", text,
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+                S(x), S(y), S(84), S(28), hwnd,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                instance_, nullptr);
+            setFont(control);
+            return control;
+        };
+
+        auto makeCheck = [&](const wchar_t* text, bool checked, int id,
+                             int x, int y, int w)
+        {
+            HWND control = CreateWindowExW(
+                0, L"BUTTON", text,
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+                S(x), S(y), S(w), S(22), hwnd,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                instance_, nullptr);
+
+            if (control)
+            {
+                SendMessageW(control, BM_SETCHECK,
+                             checked ? BST_CHECKED : BST_UNCHECKED, 0);
+                setFont(control);
+            }
+
+            return control;
+        };
+
+        // Snapshot for the live preview rollback on cancel.
+        settings_.original = config_.settings;
+
+        // --- dock behaviour -------------------------------------------------
+        makeLabel(L"背景栏模式", 22, 22, 90);
+        makeLabel(L"图标大小", 22, 62, 90);
+        makeLabel(L"图标间距", 22, 96, 90);
+        makeLabel(L"放大倍率", 22, 130, 90);
+
+        settings_.modeCombo = CreateWindowExW(
+            0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
+            S(118), S(18), S(260), S(140), hwnd,
+            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdMode)),
+            instance_, nullptr);
+
+        if (settings_.modeCombo)
+        {
+            SendMessageW(settings_.modeCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(L"固定宽度（进入时展开）"));
+            SendMessageW(settings_.modeCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(L"弹性跟随图标"));
+
+            SendMessageW(settings_.modeCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(L"无动画（名称气泡正常）"));
+
+            SendMessageW(settings_.modeCombo, CB_SETCURSEL,
+                         config_.settings.panelMode == PanelMode::Fixed ? 0
+                         : config_.settings.panelMode == PanelMode::Elastic ? 1 : 2,
+                         0);
+
+            setFont(settings_.modeCombo);
+        }
+
+        settings_.sizeSlider = makeSlider(
+            kIdSize, 118, 54, 180, 32, 96, config_.settings.iconSize);
+        settings_.spacingSlider = makeSlider(
+            kIdSpacing, 118, 88, 180, 0, 32, config_.settings.iconSpacing);
+        settings_.magnifySlider = makeSlider(
+            kIdMagnify, 118, 122, 180, 10, 25,
+            static_cast<int>(std::lround(config_.settings.magnification
+                                         * 10.0f)));
+
+        settings_.sizeLabel = makeLabel(L"", 306, 62, 60);
+        settings_.spacingLabel = makeLabel(L"", 306, 96, 60);
+        settings_.magnifyLabel = makeLabel(L"", 306, 130, 60);
+
+        settings_.autoHideBox = makeCheck(
+            L"自动隐藏/覆盖模式（不占用桌面下方空间）",
+            config_.settings.autoHide, kIdAutoHide, 22, 154, 340);
+        makeLabel(L"自动隐藏延迟", 22, 222, 120);
+        settings_.autoHideDelaySlider = makeSlider(
+            kIdFullscreenHideDelay, 158, 218, 140, 0, 5000,
+            config_.settings.autoHideDelayMs);
+        settings_.autoHideDelayLabel = makeLabel(L"", 306, 222, 65);
+        makeLabel(L"自动隐藏动画速度", 22, 260, 130);
+        settings_.autoHideSpeedSlider = makeSlider(
+            kIdFullscreenHideSpeed, 158, 256, 140, 50, 200,
+            static_cast<int>(std::lround(
+                config_.settings.autoHideSpeed * 100.0f)));
+        settings_.autoHideSpeedLabel = makeLabel(L"", 306, 260, 65);
+        makeLabel(L"整体大小", 22, 294, 100);
+        settings_.overallScaleSlider = makeSlider(
+            kIdOverallScale, 158, 290, 140, 50, 150,
+            static_cast<int>(std::lround(
+                config_.settings.overallScale * 100.0f)));
+        settings_.overallScaleLabel = makeLabel(L"", 306, 294, 60);
+
+        // --- panel background ------------------------------------------------
+        CreateWindowExW(
+            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+            S(22), S(170), S(356), S(2), hwnd, nullptr, instance_, nullptr);
+
+        makeLabel(L"背景栏外观", 22, 182, 300, true);
+
+        settings_.customBox = makeCheck(L"自定义背景渐变",
+                                        !config_.settings.backgroundBottom.empty(),
+                                        kIdBgCustom, 22, 212, 240);
+
+        makeLabel(L"背景栏不透明度", 22, 246, 130);
+        settings_.bgOpacitySlider = makeSlider(
+            kIdBgOpacity, 158, 242, 140, 10, 100,
+            static_cast<int>(std::lround(config_.settings.backgroundOpacity
+                                         * 100.0f)));
+        settings_.bgOpacityLabel = makeLabel(L"", 306, 246, 60);
+
+        auto colorRefOf = [](const std::wstring& hex,
+                             COLORREF fallback) -> COLORREF
+        {
+            float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
+            if (ParseHexColor(hex, r, g, b, a))
+            {
+                return RGB(static_cast<int>(r * 255.0f + 0.5f),
+                           static_cast<int>(g * 255.0f + 0.5f),
+                           static_cast<int>(b * 255.0f + 0.5f));
+            }
+
+            return fallback;
+        };
+
+        // Built-in white, only shown while the gradient is off. If the user
+        // enables the gradient, start from a clean white pair of stops.
+        settings_.topColor = colorRefOf(config_.settings.backgroundTop,
+                                        RGB(255, 255, 255));
+        settings_.bottomColor = colorRefOf(config_.settings.backgroundBottom,
+                                           RGB(255, 255, 255));
+
+        auto makeSwatch = [&](int id, int x, int y)
+        {
+            return CreateWindowExW(
+                0, L"BUTTON", nullptr,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
+                S(x), S(y), S(64), S(24),
+                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                instance_, nullptr);
+        };
+
+        makeLabel(L"背景栏圆角", 22, 282, 110);
+        settings_.dockCornerSlider = makeSlider(
+            kIdDockCorner, 158, 278, 140, 0, 48,
+            static_cast<int>(std::lround(config_.settings.cornerRadius)));
+        settings_.dockCornerLabel = makeLabel(L"", 306, 282, 60);
+
+        makeLabel(L"顶部颜色", 22, 314, 90);
+        settings_.topSwatch = makeSwatch(kIdBgTop, 118, 310);
+        settings_.topHex = makeLabel(L"", 194, 314, 130);
+
+        makeLabel(L"底部颜色", 22, 346, 90);
+        settings_.bottomSwatch = makeSwatch(kIdBgBottom, 118, 342);
+        settings_.bottomHex = makeLabel(L"", 194, 346, 130);
+
+        // --- global plate defaults ------------------------------------------
+        CreateWindowExW(
+            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+            S(22), S(380), S(356), S(2), hwnd, nullptr, instance_, nullptr);
+
+        makeLabel(L"全局图标设置", 22, 392, 300, true);
+
+        const IconBackdrop& backdrop = config_.settings.backdrop;
+
+        makeLabel(L"圆角半径", 22, 424, 90);
+        makeLabel(L"图标在底板内的比例", 22, 462, 130);
+        makeLabel(L"不透明度", 22, 500, 90);
+        makeLabel(L"内描边粗细", 22, 538, 100);
+        makeLabel(L"描边不透明度", 22, 576, 110);
+
+        settings_.cornerSlider = makeSlider(
+            kIdCorner, 118, 416, 180, 0, 28,
+            static_cast<int>(std::lround(backdrop.cornerRadius)));
+        settings_.scaleSlider = makeSlider(
+            kIdScale, 158, 454, 140, 50, 100,
+            static_cast<int>(std::lround(backdrop.iconScale * 100.0f)));
+        settings_.opacitySlider = makeSlider(
+            kIdOpacity, 118, 492, 180, 10, 100,
+            static_cast<int>(std::lround(backdrop.opacity * 100.0f)));
+
+        settings_.strokeWidthSlider = makeSlider(
+            kIdStrokeWidth, 158, 530, 140, 0, 40,
+            static_cast<int>(std::lround(backdrop.strokeWidth * 10.0f)));
+        settings_.cornerLabel = makeLabel(L"", 306, 424, 60);
+        settings_.scaleLabel = makeLabel(L"", 306, 462, 60);
+        settings_.opacityLabel = makeLabel(L"", 306, 500, 60);
+        settings_.strokeWidthLabel = makeLabel(L"", 306, 538, 60);
+
+        settings_.strokeOpacitySlider = makeSlider(
+            kIdStrokeOpacity, 158, 568, 140, 0, 100,
+            static_cast<int>(std::lround(backdrop.strokeOpacity * 100.0f)));
+        settings_.strokeOpacityLabel = makeLabel(L"", 306, 576, 60);
+
+        // --- tooltip bubble -------------------------------------------------
+        makeLabel(L"名称气泡", 22, 54, 300, true);
+        makeLabel(L"气泡不透明度", 22, 80, 120);
+        settings_.tooltipOpacitySlider = makeSlider(
+            kIdTooltipOpacity, 158, 76, 140, 10, 100,
+            static_cast<int>(std::lround(config_.settings.tooltipOpacity
+                                         * 100.0f)));
+        settings_.tooltipOpacityLabel = makeLabel(L"", 306, 80, 60);
+        makeLabel(L"淡入淡出时长", 22, 108, 120);
+        settings_.tooltipFadeSlider = makeSlider(
+            kIdTooltipFade, 158, 104, 140, 50, 1000,
+            static_cast<int>(std::lround(
+                config_.settings.tooltipFadeSeconds * 1000.0f)));
+        settings_.tooltipFadeLabel = makeLabel(L"", 306, 108, 70);
+        makeLabel(L"气泡比例", 22, 136, 120);
+        settings_.tooltipScaleSlider = makeSlider(
+            kIdTooltipScale, 158, 132, 140, 50, 150,
+            static_cast<int>(std::lround(config_.settings.tooltipScale * 100.0f)));
+        settings_.tooltipScaleLabel = makeLabel(L"", 306, 136, 60);
+
+        refreshLabels();
+        syncBackgroundControls();
+
+        HWND save = makeButton(L"保存", kIdSave, 212, 330);
+        makeButton(L"取消", kIdCancel, 304, 330);
+
+        settings_.tabControl = CreateWindowExW(
+            0, WC_TABCONTROLW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
+            S(22), S(8), S(356), S(34), hwnd,
+            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdSettingsTabs)),
+            instance_, nullptr);
+        setFont(settings_.tabControl);
+        if (settings_.tabControl)
+        {
+            TCITEMW tab{};
+            tab.mask = TCIF_TEXT;
+            tab.pszText = const_cast<wchar_t*>(L"行为");
+            TabCtrl_InsertItem(settings_.tabControl, 0, &tab);
+            tab.pszText = const_cast<wchar_t*>(L"背景栏");
+            TabCtrl_InsertItem(settings_.tabControl, 1, &tab);
+            tab.pszText = const_cast<wchar_t*>(L"图标");
+            TabCtrl_InsertItem(settings_.tabControl, 2, &tab);
+            tab.pszText = const_cast<wchar_t*>(L"气泡");
+            TabCtrl_InsertItem(settings_.tabControl, 3, &tab);
+            TabCtrl_SetCurSel(settings_.tabControl, 0);
+
+            // These controls are laid out in the behavior page's final
+            // coordinates, below the original compact interaction rows.
+            MarkDialogTabPage(settings_.autoHideDelaySlider, 0);
+            MarkDialogTabPage(settings_.autoHideDelayLabel, 0);
+            MarkDialogTabPage(settings_.autoHideSpeedSlider, 0);
+            MarkDialogTabPage(settings_.autoHideSpeedLabel, 0);
+            MarkDialogTabPage(settings_.overallScaleSlider, 0);
+            MarkDialogTabPage(settings_.overallScaleLabel, 0);
+
+            TagDialogChildrenContext tagContext{
+                hwnd, kIdSettingsTabs, kIdSave, kIdCancel,
+                S(160), S(382), 2, S(38), -S(120), -S(338)};
+            EnumChildWindows(hwnd, TagDialogChildren,
+                             reinterpret_cast<LPARAM>(&tagContext));
+            MarkDialogTabPage(settings_.tooltipOpacitySlider, 3);
+            MarkDialogTabPage(settings_.tooltipOpacityLabel, 3);
+            MarkDialogTabPage(settings_.tooltipFadeSlider, 3);
+            MarkDialogTabPage(settings_.tooltipFadeLabel, 3);
+            MarkDialogTabPage(settings_.tooltipScaleSlider, 3);
+            MarkDialogTabPage(settings_.tooltipScaleLabel, 3);
+            // The two bubble captions also live in the behavior page's
+            // original coordinates; tag them explicitly by their rectangles.
+            EnumChildWindows(hwnd, [](HWND child, LPARAM) -> BOOL
+            {
+                wchar_t caption[64]{};
+                GetWindowTextW(child, caption, ARRAYSIZE(caption));
+                if (wcscmp(caption, L"名称气泡") == 0
+                    || wcscmp(caption, L"气泡不透明度") == 0
+                    || wcscmp(caption, L"淡入淡出时长") == 0
+                    || wcscmp(caption, L"气泡比例") == 0)
+                {
+                    MarkDialogTabPage(child, 3);
+                }
+                return TRUE;
+            }, 0);
+            EnumChildWindows(hwnd, [](HWND child, LPARAM amount) -> BOOL
+            {
+                HANDLE tag = GetPropW(child, kDialogTabPageProperty);
+                if (tag
+                    && static_cast<int>(reinterpret_cast<INT_PTR>(tag)) - 1 == 3)
+                {
+                    RECT rect{};
+                    GetWindowRect(child, &rect);
+                    MapWindowPoints(nullptr, GetParent(child),
+                                    reinterpret_cast<POINT*>(&rect), 2);
+                    SetWindowPos(child, nullptr, rect.left,
+                        rect.top - static_cast<int>(amount), 0, 0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+                return TRUE;
+            }, S(38));
+            ShowDialogTabPage(hwnd, 0);
+        }
+
+        SetFocus(save);
+
+        return 0;
+    }
+
+    case WM_NOTIFY:
+    {
+        const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+        if (header && header->idFrom == kIdSettingsTabs
+            && header->code == TCN_SELCHANGE)
+        {
+            ShowDialogTabPage(hwnd,
+                TabCtrl_GetCurSel(settings_.tabControl));
+            return 0;
+        }
+        break;
+    }
+
+    case WM_HSCROLL:
+        refreshLabels();
+        previewSettings();
+        return 0;
+
+    case WM_DRAWITEM:
+    {
+        const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+
+        if (draw->CtlID != kIdBgTop && draw->CtlID != kIdBgBottom)
+        {
+            break;
+        }
+
+        const COLORREF fill = draw->CtlID == kIdBgTop
+            ? settings_.topColor
+            : settings_.bottomColor;
+
+        HBRUSH brush = CreateSolidBrush(fill);
+        FillRect(draw->hDC, &draw->rcItem, brush);
+        DeleteObject(brush);
+
+        FrameRect(draw->hDC, &draw->rcItem, GetSysColorBrush(COLOR_3DDKSHADOW));
+
+        if ((draw->itemState & ODS_FOCUS) != 0)
+        {
+            DrawFocusRect(draw->hDC, &draw->rcItem);
+        }
+
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case kIdMode:
+            if (HIWORD(wParam) == CBN_SELCHANGE)
+            {
+                previewSettings();
+            }
+            return 0;
+
+        case kIdAutoHide:
+            previewSettings();
+            return 0;
+
+        case kIdBgCustom:
+            syncBackgroundControls();
+            previewSettings();
+            return 0;
+
+        case kIdBgTop:
+        case kIdBgBottom:
+        {
+            static COLORREF customColors[16] = {};
+
+            CHOOSECOLORW chooser{};
+            chooser.lStructSize = sizeof(chooser);
+            chooser.hwndOwner = hwnd;
+            chooser.rgbResult = (LOWORD(wParam) == kIdBgTop)
+                ? settings_.topColor
+                : settings_.bottomColor;
+            chooser.lpCustColors = customColors;
+            chooser.Flags = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR;
+
+            if (ChooseColorW(&chooser))
+            {
+                if (LOWORD(wParam) == kIdBgTop)
+                {
+                    settings_.topColor = chooser.rgbResult;
+                }
+                else
+                {
+                    settings_.bottomColor = chooser.rgbResult;
+                }
+
+                syncBackgroundControls();
+                previewSettings();
+            }
+
+            return 0;
+        }
+
+        case kIdSave:
+        {
+            // The live preview already wrote every control into the config;
+            // persist it and close.
+            previewSettings();
+            settings_.saved = true;
+            settings_.closed = true;
+            return 0;
+        }
+
+        case kIdCancel:
+            // Roll back whatever the live preview already applied.
+            if (!settings_.saved)
+            {
+                restoreSettings();
+            }
+
+            settings_.closed = true;
+            return 0;
+        }
+
+        return 0;
+
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    {
+        // Blend labels and edits into the white dialog background instead of
+        // the themed control's gray filler.
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(dc, TRANSPARENT);
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+    }
+
+    case WM_CLOSE:
+        if (!settings_.saved)
+        {
+            restoreSettings();
+        }
+
+        settings_.closed = true;
+        return 0;
+
+    case WM_DESTROY:
+        if (!settings_.saved)
+        {
+            restoreSettings();
+        }
+
+        settings_.closed = true;
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK App::EditorProc(HWND hwnd, UINT message,
+                                 WPARAM wParam, LPARAM lParam)
+{
+    App* self = nullptr;
+
+    if (message == WM_NCCREATE)
+    {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        self = static_cast<App*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    else
+    {
+        self = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    }
+
+    if (!self)
+    {
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    return self->HandleEditorMessage(hwnd, message, wParam, lParam);
+}
+
+LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
+                                 WPARAM wParam, LPARAM lParam)
+{
+    enum : int
+    {
+        kIdName = 101,
+        kIdPath,
+        kIdArguments,
+        kIdIcon,
+        kIdBrowsePath,
+        kIdBrowseIcon,
+
+        kIdEnable = 111,
+        kIdScale,
+        kIdSecond,
+        kIdTop,
+        kIdBottom,
+        kIdStrokeOverride = 116,
+        kIdStrokeColor,
+        kIdStrokeOpacityOverride,
+        kIdStrokeOpacitySlider,
+
+        kIdSave = 121,
+        kIdCancel,
+        kIdEditorTabs = 131,
+    };
+
+    auto sliderValue = [](HWND slider) -> int
+    {
+        return slider ? static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0))
+                      : 0;
+    };
+
+    auto windowText = [](HWND control) -> std::wstring
+    {
+        if (!control)
+        {
+            return {};
+        }
+
+        const int length = GetWindowTextLengthW(control);
+        std::wstring value(static_cast<size_t>(length) + 1, L'\0');
+        const int written = GetWindowTextW(control, value.data(), length + 1);
+        value.resize(written > 0 ? static_cast<size_t>(written) : 0);
+        return value;
+    };
+
+    auto hexOf = [](COLORREF color) -> std::wstring
+    {
+        wchar_t text[16];
+        swprintf(text, 16, L"#%02X%02X%02X",
+                 GetRValue(color), GetGValue(color), GetBValue(color));
+        return std::wstring(text);
+    };
+
+    /// The automatically derived gradient partner of a picked colour.
+    auto derivedColor = [](COLORREF top) -> COLORREF
+    {
+        return RGB(GetRValue(top) * 72 / 100,
+                   GetGValue(top) * 72 / 100,
+                   GetBValue(top) * 72 / 100);
+    };
+
+    /// Repaints the two swatches and their hex captions.
+    auto refreshSwatches = [&]()
+    {
+        SetWindowTextW(editor_.topHex, hexOf(editor_.topColor).c_str());
+
+        const std::wstring bottomHex = editor_.secondBox
+            && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0) == BST_CHECKED
+            ? hexOf(editor_.bottomColor)
+            : hexOf(derivedColor(editor_.topColor)) + L"（自动）";
+        SetWindowTextW(editor_.bottomHex, bottomHex.c_str());
+        SetWindowTextW(editor_.strokeHex,
+            editor_.strokeOverrideBox
+                && SendMessageW(editor_.strokeOverrideBox, BM_GETCHECK, 0, 0)
+                   == BST_CHECKED
+                ? hexOf(editor_.strokeColor).c_str() : L"#FFFFFF（默认）");
+
+        if (editor_.topSwatch)
+        {
+            InvalidateRect(editor_.topSwatch, nullptr, TRUE);
+        }
+
+        if (editor_.bottomSwatch)
+        {
+            InvalidateRect(editor_.bottomSwatch, nullptr, TRUE);
+        }
+        if (editor_.strokeSwatch)
+        {
+            InvalidateRect(editor_.strokeSwatch, nullptr, TRUE);
+        }
+    };
+
+    /// Plate controls only make sense while the plate is enabled, and the
+    /// second colour picker only while the user opted out of the automatic
+    /// gradient partner.
+    auto syncAppearance = [&]()
+    {
+        const bool on = editor_.enableBox
+            && SendMessageW(editor_.enableBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const bool second = editor_.secondBox
+            && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const bool stroke = editor_.strokeOverrideBox
+            && SendMessageW(editor_.strokeOverrideBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
+        const bool strokeOpacity = editor_.strokeOpacityBox
+            && SendMessageW(editor_.strokeOpacityBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
+
+        HWND plateControls[] =
+        {
+            editor_.scaleSlider,
+            editor_.topSwatch,
+            editor_.secondBox,
+        };
+
+        for (HWND control : plateControls)
+        {
+            if (control)
+            {
+                EnableWindow(control, on ? TRUE : FALSE);
+            }
+        }
+
+        if (editor_.bottomSwatch)
+        {
+            EnableWindow(editor_.bottomSwatch, on && second ? TRUE : FALSE);
+        }
+        if (editor_.strokeOverrideBox)
+        {
+            EnableWindow(editor_.strokeOverrideBox, TRUE);
+        }
+        if (editor_.strokeSwatch)
+        {
+            EnableWindow(editor_.strokeSwatch, stroke ? TRUE : FALSE);
+        }
+        if (editor_.strokeOpacityBox)
+        {
+            EnableWindow(editor_.strokeOpacityBox, TRUE);
+        }
+        if (editor_.strokeOpacitySlider)
+        {
+            EnableWindow(editor_.strokeOpacitySlider,
+                         strokeOpacity ? TRUE : FALSE);
+        }
+    };
+
+    auto refreshLabels = [&]()
+    {
+        wchar_t text[48];
+
+        swprintf(text, 48, L"%d%%", sliderValue(editor_.scaleSlider));
+        SetWindowTextW(editor_.scaleLabel, text);
+        swprintf(text, 48, L"%d%%",
+                 sliderValue(editor_.strokeOpacitySlider));
+        SetWindowTextW(editor_.strokeOpacityLabel, text);
+    };
+
+    /// Live preview: pushes the current control values straight into the item
+    /// being edited and repaints the dock, so colour and ratio changes show
+    /// up immediately instead of only after pressing 保存. Cancelling rolls
+    /// back to the snapshot taken in WM_CREATE.
+    auto previewPlate = [&]()
+    {
+        if (!editor_.item)
+        {
+            return;
+        }
+
+        PlateStyle& plate = editor_.item->plate;
+
+        plate.enabled = editor_.enableBox
+            && SendMessageW(editor_.enableBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
+
+        plate.iconScale =
+            static_cast<float>(sliderValue(editor_.scaleSlider)) / 100.0f;
+
+        plate.customBottom = editor_.secondBox
+            && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
+
+        plate.top = hexOf(editor_.topColor);
+        plate.bottom = hexOf(editor_.bottomColor);
+        const bool strokeOverride = editor_.strokeOverrideBox
+            && SendMessageW(editor_.strokeOverrideBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
+        plate.strokeColor = strokeOverride ? hexOf(editor_.strokeColor)
+                                           : std::wstring();
+        const bool strokeOpacityOverride = editor_.strokeOpacityBox
+            && SendMessageW(editor_.strokeOpacityBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
+        plate.strokeOpacity = strokeOpacityOverride
+            ? static_cast<float>(sliderValue(editor_.strokeOpacitySlider)) / 100.0f
+            : -1.0f;
+
+        Render();
+    };
+
+    /// Puts back the plate the icon had before the dialog opened.
+    auto restorePlate = [&]()
+    {
+        if (editor_.item)
+        {
+            editor_.item->plate = editor_.originalPlate;
+        }
+    };
+
+    switch (message)
+    {
+    case WM_NCCREATE:
+        // Must fall through to DefWindowProc, otherwise the window title
+        // passed to CreateWindowExW is never stored and the caption is blank.
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+
+    case WM_CREATE:
+    {
+        if (!hwnd || !editor_.item)
+        {
+            return -1;
+        }
+
+        // Snapshot for the live preview rollback on cancel.
+        editor_.originalPlate = editor_.item->plate;
+
+        INITCOMMONCONTROLSEX controls{};
+        controls.dwSize = sizeof(controls);
+        controls.dwICC = ICC_BAR_CLASSES | ICC_TAB_CLASSES;
+        InitCommonControlsEx(&controls);
+
+        // Scale every coordinate for the dialog's monitor DPI.
+        const float scale = DialogDpi(hwnd) / 96.0f;
+
+        auto S = [scale](int value) -> int
+        {
+            return static_cast<int>(std::lround(value * scale));
+        };
+
+        auto setFont = [](HWND control, bool bold = false)
+        {
+            HFONT font = DialogFont(bold);
+            if (control && font)
+            {
+                SendMessageW(control, WM_SETFONT,
+                             reinterpret_cast<WPARAM>(font), TRUE);
+            }
+        };
+
+        const int rows[] = {22, 60, 98, 136};
+
+        auto makeLabel = [&](const wchar_t* text, int x, int y, int w,
+                             bool bold = false)
+        {
+            HWND control = CreateWindowExW(
+                0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                S(x), S(y + 5), S(w), S(20), hwnd, nullptr, instance_, nullptr);
+            setFont(control, bold);
+            return control;
+        };
+
+        auto makeEdit = [&](const std::wstring& value, int id, int x, int y, int w)
+        {
+            HWND control = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", value.c_str(),
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+                S(x), S(y), S(w), S(24),
+                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                instance_, nullptr);
+            setFont(control);
+            return control;
+        };
+
+        auto makeButton = [&](const wchar_t* text, int id, int x, int y, int w)
+        {
+            HWND control = CreateWindowExW(
+                0, L"BUTTON", text,
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+                S(x), S(y), S(w), S(27),
+                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                instance_, nullptr);
+            setFont(control);
+            return control;
+        };
+
+        auto makeCheck = [&](const wchar_t* text, bool checked, int id,
+                             int x, int y, int w)
+        {
+            HWND control = CreateWindowExW(
+                0, L"BUTTON", text,
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+                S(x), S(y), S(w), S(22),
+                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                instance_, nullptr);
+
+            if (control)
+            {
+                SendMessageW(control, BM_SETCHECK,
+                             checked ? BST_CHECKED : BST_UNCHECKED, 0);
+                setFont(control);
+            }
+
+            return control;
+        };
+
+        auto makeSlider = [&](int id, int x, int y, int w,
+                              int lo, int hi, int value)
+        {
+            HWND control = CreateWindowExW(
+                0, TRACKBAR_CLASSW, nullptr,
+                WS_CHILD | WS_VISIBLE | TBS_HORZ | WS_TABSTOP,
+                S(x), S(y), S(w), S(28),
+                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                instance_, nullptr);
+
+            if (control)
+            {
+                SendMessageW(control, TBM_SETRANGE, TRUE, MAKELPARAM(lo, hi));
+                SendMessageW(control, TBM_SETPOS, TRUE, value);
+                setFont(control);
+            }
+
+            return control;
+        };
+
+        // --- shortcut properties ------------------------------------------
+        makeLabel(L"名称", 20, rows[0], 70);
+        makeLabel(L"程序", 20, rows[1], 70);
+        makeLabel(L"附加命令", 20, rows[2], 70);
+        makeLabel(L"图标文件", 20, rows[3], 70);
+
+        editor_.nameEdit = makeEdit(editor_.item->name, kIdName, 96, rows[0], 248);
+        editor_.pathEdit = makeEdit(editor_.item->targetPath, kIdPath, 96, rows[1], 248);
+        editor_.argumentsEdit = makeEdit(editor_.item->arguments, kIdArguments,
+                                         96, rows[2], 248);
+        editor_.iconEdit = makeEdit(editor_.item->iconFile, kIdIcon, 96, rows[3], 248);
+
+        makeButton(L"浏览...", kIdBrowsePath, 356, rows[1] - 2, 90);
+        makeButton(L"浏览...", kIdBrowseIcon, 356, rows[3] - 2, 90);
+
+        // --- per icon plate -------------------------------------------------
+        CreateWindowExW(
+            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+            S(20), S(176), S(414), S(2), hwnd, nullptr, instance_, nullptr);
+
+        const PlateStyle& own = editor_.item->plate;
+        const IconBackdrop& globalBackdrop = config_.settings.backdrop;
+
+        editor_.enableBox = makeCheck(L"启用圆角底板", own.enabled,
+                                      kIdEnable, 20, 190, 200);
+
+        makeLabel(L"图标在底板内的比例", 20, 228, 130);
+
+        const float effectiveScale = own.iconScale > 0.0f
+            ? own.iconScale
+            : globalBackdrop.iconScale;
+
+        editor_.scaleSlider = makeSlider(
+            kIdScale, 158, 224, 140, 50, 100,
+            static_cast<int>(std::lround(effectiveScale * 100.0f)));
+        editor_.scaleLabel = makeLabel(L"", 306, 228, 60);
+
+        // --- colour picks ----------------------------------------------------
+        // Owner drawn swatches: the control itself previews the colour and
+        // clicking it opens the system colour picker.
+        auto makeSwatch = [&](int id, int x, int y)
+        {
+            return CreateWindowExW(
+                0, L"BUTTON", nullptr,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
+                S(x), S(y), S(64), S(24),
+                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                instance_, nullptr);
+        };
+
+        auto colorRefOf = [](const std::wstring& hex,
+                             COLORREF fallback) -> COLORREF
+        {
+            float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
+            if (ParseHexColor(hex, r, g, b, a))
+            {
+                return RGB(static_cast<int>(r * 255.0f + 0.5f),
+                           static_cast<int>(g * 255.0f + 0.5f),
+                           static_cast<int>(b * 255.0f + 0.5f));
+            }
+
+            return fallback;
+        };
+
+        editor_.topColor = colorRefOf(own.top, RGB(59, 66, 82));
+        editor_.bottomColor = own.customBottom
+            ? colorRefOf(own.bottom, derivedColor(editor_.topColor))
+            : derivedColor(editor_.topColor);
+        editor_.strokeColor = colorRefOf(own.strokeColor, RGB(255, 255, 255));
+
+        makeLabel(L"顶部颜色", 20, 262, 90);
+        editor_.topSwatch = makeSwatch(kIdTop, 158, 258);
+        editor_.topHex = makeLabel(L"", 234, 262, 120);
+
+        editor_.secondBox = makeCheck(L"自定义第二颜色（渐变）", own.customBottom,
+                                      kIdSecond, 20, 294, 240);
+
+        makeLabel(L"底部颜色", 20, 328, 90);
+        editor_.bottomSwatch = makeSwatch(kIdBottom, 158, 324);
+        editor_.bottomHex = makeLabel(L"", 234, 328, 160);
+
+        editor_.strokeOverrideBox = makeCheck(
+            L"自定义描边颜色", !own.strokeColor.empty(),
+            kIdStrokeOverride, 20, 358, 130);
+        editor_.strokeSwatch = makeSwatch(kIdStrokeColor, 158, 356);
+        editor_.strokeHex = makeLabel(L"", 234, 360, 160);
+
+        editor_.strokeOpacityBox = makeCheck(
+            L"自定义描边透明度", own.strokeOpacity >= 0.0f,
+            kIdStrokeOpacityOverride, 20, 390, 145);
+        makeLabel(L"描边不透明度", 20, 426, 110);
+        const float strokeOpacity = own.strokeOpacity >= 0.0f
+            ? own.strokeOpacity : config_.settings.backdrop.strokeOpacity;
+        editor_.strokeOpacitySlider = makeSlider(
+            kIdStrokeOpacitySlider, 158, 422, 140, 0, 100,
+            static_cast<int>(std::lround(strokeOpacity * 100.0f)));
+        editor_.strokeOpacityLabel = makeLabel(L"", 306, 426, 60);
+
+        refreshLabels();
+        syncAppearance();
+        refreshSwatches();
+
+        // --- buttons --------------------------------------------------------
+        makeButton(L"保存", kIdSave, 272, 368, 84);
+        makeButton(L"取消", kIdCancel, 362, 368, 84);
+
+        HWND tabs = CreateWindowExW(
+            0, WC_TABCONTROLW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
+            S(20), S(6), S(414), S(34), hwnd,
+            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdEditorTabs)),
+            instance_, nullptr);
+        setFont(tabs);
+        if (tabs)
+        {
+            TCITEMW tab{};
+            tab.mask = TCIF_TEXT;
+            tab.pszText = const_cast<wchar_t*>(L"快捷方式");
+            TabCtrl_InsertItem(tabs, 0, &tab);
+            tab.pszText = const_cast<wchar_t*>(L"图标外观");
+            TabCtrl_InsertItem(tabs, 1, &tab);
+            TabCtrl_SetCurSel(tabs, 0);
+
+            TagDialogChildrenContext tagContext{
+                hwnd, kIdEditorTabs, kIdSave, kIdCancel,
+                S(176), S(500), 1, S(38), -S(126), 0};
+            EnumChildWindows(hwnd, TagDialogChildren,
+                             reinterpret_cast<LPARAM>(&tagContext));
+            ShowDialogTabPage(hwnd, 0);
+        }
+
+        SetFocus(editor_.nameEdit);
+
+        return 0;
+    }
+
+    case WM_HSCROLL:
+        refreshLabels();
+        previewPlate();
+        return 0;
+
+    case WM_NOTIFY:
+    {
+        const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+        if (header && header->idFrom == kIdEditorTabs
+            && header->code == TCN_SELCHANGE)
+        {
+            ShowDialogTabPage(hwnd, TabCtrl_GetCurSel(header->hwndFrom));
+            return 0;
+        }
+        break;
+    }
+
+    case WM_DRAWITEM:
+    {
+        const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+
+        if (draw->CtlID != kIdTop && draw->CtlID != kIdBottom
+            && draw->CtlID != kIdStrokeColor)
+        {
+            break;
+        }
+
+        const bool disabled = (draw->itemState & ODS_DISABLED) != 0;
+        const COLORREF fill = disabled
+            ? GetSysColor(COLOR_BTNFACE)
+            : (draw->CtlID == kIdTop ? editor_.topColor
+               : draw->CtlID == kIdBottom ? editor_.bottomColor
+                                          : editor_.strokeColor);
+
+        HBRUSH brush = CreateSolidBrush(fill);
+        FillRect(draw->hDC, &draw->rcItem, brush);
+        DeleteObject(brush);
+
+        FrameRect(draw->hDC, &draw->rcItem,
+                  GetSysColorBrush(disabled ? COLOR_GRAYTEXT : COLOR_3DDKSHADOW));
+
+        if ((draw->itemState & ODS_FOCUS) != 0)
+        {
+            DrawFocusRect(draw->hDC, &draw->rcItem);
+        }
+
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case kIdEnable:
+        case kIdSecond:
+        case kIdStrokeOverride:
+        case kIdStrokeOpacityOverride:
+            syncAppearance();
+            refreshSwatches();
+            previewPlate();
+            return 0;
+
+        case kIdTop:
+        case kIdBottom:
+        case kIdStrokeColor:
+        {
+            // System colour picker, seeded with the current colour.
+            static COLORREF customColors[16] = {};
+
+            CHOOSECOLORW chooser{};
+            chooser.lStructSize = sizeof(chooser);
+            chooser.hwndOwner = hwnd;
+            chooser.rgbResult = LOWORD(wParam) == kIdTop ? editor_.topColor
+                : LOWORD(wParam) == kIdBottom ? editor_.bottomColor
+                                              : editor_.strokeColor;
+            chooser.lpCustColors = customColors;
+            chooser.Flags = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR;
+
+            if (ChooseColorW(&chooser))
+            {
+                if (LOWORD(wParam) == kIdTop)
+                {
+                    editor_.topColor = chooser.rgbResult;
+
+                    // While the automatic partner is active the bottom
+                    // colour follows the top pick.
+                    if (!editor_.secondBox
+                        || SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0)
+                           != BST_CHECKED)
+                    {
+                        editor_.bottomColor = derivedColor(editor_.topColor);
+                    }
+                }
+                else if (LOWORD(wParam) == kIdBottom)
+                {
+                    editor_.bottomColor = chooser.rgbResult;
+                }
+                else
+                {
+                    editor_.strokeColor = chooser.rgbResult;
+                }
+
+                refreshSwatches();
+                previewPlate();
+            }
+
+            return 0;
+        }
+
+        case kIdBrowsePath:
+        {
+            const COMDLG_FILTERSPEC filters[] =
+            {
+                {L"应用程序 (*.exe; *.lnk)", L"*.exe;*.lnk"},
+                {L"所有文件 (*.*)", L"*.*"},
+            };
+
+            const std::wstring path =
+                PickFile(L"选择程序", filters, ARRAYSIZE(filters));
+
+            if (path.empty())
+            {
+                return 0;
+            }
+
+            SetWindowTextW(editor_.pathEdit, path.c_str());
+
+            // Refresh name and icon from the new target, like a shortcut.
+            AppInfo info = icons_.Inspect(path, 256);
+
+            if (!info.name.empty())
+            {
+                SetWindowTextW(editor_.nameEdit, info.name.c_str());
+            }
+
+            if (info.icon)
+            {
+                editor_.pendingIcon = info.icon;
+                editor_.pendingIconPath.clear();
+                SetWindowTextW(editor_.iconEdit, L"(来自所选程序)");
+            }
+
+            return 0;
+        }
+
+        case kIdBrowseIcon:
+        {
+            const COMDLG_FILTERSPEC filters[] =
+            {
+                {L"图片或程序 (*.png; *.exe; *.lnk)", L"*.png;*.exe;*.lnk"},
+                {L"图片 (*.png)", L"*.png"},
+                {L"所有文件 (*.*)", L"*.*"},
+            };
+
+            const std::wstring path =
+                PickFile(L"选择图标", filters, ARRAYSIZE(filters));
+
+            if (path.empty())
+            {
+                return 0;
+            }
+
+            ComPtr<IWICBitmap> icon;
+
+            if (GetFileExtension(path) == L".png")
+            {
+                icon = icons_.LoadFromCache(path);
+            }
+            else
+            {
+                AppInfo info = icons_.Inspect(path, 256);
+                icon = info.icon;
+            }
+
+            if (icon)
+            {
+                editor_.pendingIcon = icon;
+                editor_.pendingIconPath = path;
+                SetWindowTextW(editor_.iconEdit, GetFileName(path).c_str());
+            }
+
+            return 0;
+        }
+
+        case kIdSave:
+        {
+            if (!editor_.item)
+            {
+                editor_.closed = true;
+                return 0;
+            }
+
+            DockItem& item = *editor_.item;
+
+            std::wstring name = windowText(editor_.nameEdit);
+            std::wstring path = windowText(editor_.pathEdit);
+            std::wstring arguments = windowText(editor_.argumentsEdit);
+
+            if (!path.empty() && path != item.targetPath)
+            {
+                AppInfo info = icons_.Inspect(path, 256);
+
+                item.targetPath = path;
+                item.resolvedPath =
+                    info.resolvedPath.empty() ? path : info.resolvedPath;
+                item.processName = GetFileName(item.resolvedPath);
+
+                if (name.empty())
+                {
+                    name = info.name;
+                }
+
+                // A shortcut already carries its own arguments.
+                if (GetFileExtension(path) == L".lnk")
+                {
+                    arguments.clear();
+                }
+
+                if (!editor_.pendingIcon && info.icon)
+                {
+                    editor_.pendingIcon = info.icon;
+                }
+            }
+
+            if (name.empty())
+            {
+                name = GetFileStem(item.resolvedPath);
+            }
+
+            item.name = name;
+            item.arguments = arguments;
+
+            if (editor_.pendingIcon)
+            {
+                item.iconSource = editor_.pendingIcon;
+                item.icon.Reset();
+
+                const bool fromPng =
+                    !editor_.pendingIconPath.empty()
+                    && GetFileExtension(editor_.pendingIconPath) == L".png";
+
+                if (!fromPng)
+                {
+                    icons_.SaveToCache(
+                        editor_.pendingIcon.Get(),
+                        GetIconCacheDir() + L"\\" + item.iconFile);
+                }
+            }
+
+            // --- plate look --------------------------------------------------
+            PlateStyle& plate = item.plate;
+
+            plate.enabled = editor_.enableBox
+                && SendMessageW(editor_.enableBox, BM_GETCHECK, 0, 0)
+                   == BST_CHECKED;
+
+            // Pin the ratio only when it deviates from the global default;
+            // matching values stay unpinned so global changes keep working.
+            const float chosen =
+                static_cast<float>(sliderValue(editor_.scaleSlider)) / 100.0f;
+            const float globalScale = config_.settings.backdrop.iconScale;
+
+            plate.iconScale =
+                std::abs(chosen - globalScale) < 0.005f ? 0.0f : chosen;
+
+            plate.customBottom = editor_.secondBox
+                && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0)
+                   == BST_CHECKED;
+
+            wchar_t hex[16];
+
+            swprintf(hex, 16, L"#%02X%02X%02X", GetRValue(editor_.topColor),
+                     GetGValue(editor_.topColor), GetBValue(editor_.topColor));
+            plate.top = hex;
+
+            swprintf(hex, 16, L"#%02X%02X%02X",
+                     GetRValue(editor_.bottomColor),
+                     GetGValue(editor_.bottomColor),
+                     GetBValue(editor_.bottomColor));
+            plate.bottom = hex;
+
+            plate.strokeColor = editor_.strokeOverrideBox
+                && SendMessageW(editor_.strokeOverrideBox, BM_GETCHECK, 0, 0)
+                   == BST_CHECKED
+                ? hexOf(editor_.strokeColor) : std::wstring();
+            plate.strokeOpacity = editor_.strokeOpacityBox
+                && SendMessageW(editor_.strokeOpacityBox, BM_GETCHECK, 0, 0)
+                   == BST_CHECKED
+                ? static_cast<float>(sliderValue(
+                    editor_.strokeOpacitySlider)) / 100.0f
+                : -1.0f;
+
+            editor_.saved = true;
+            editor_.closed = true;
+            return 0;
+        }
+
+        case kIdCancel:
+            restorePlate();
+            editor_.closed = true;
+            return 0;
+        }
+
+        return 0;
+
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    {
+        // Blend labels and edits into the white dialog background instead of
+        // the themed control's gray filler.
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(dc, TRANSPARENT);
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+    }
+
+    case WM_CLOSE:
+        // Rolling back the live preview: the dock goes back to how it looked
+        // before the dialog opened.
+        if (!editor_.saved)
+        {
+            restorePlate();
+        }
+
+        editor_.closed = true;
+        return 0;
+
+    case WM_DESTROY:
+        if (!editor_.saved)
+        {
+            restorePlate();
+        }
+
+        editor_.closed = true;
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+} // namespace ld
