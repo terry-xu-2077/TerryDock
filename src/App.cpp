@@ -1612,25 +1612,16 @@ void App::Render()
         // ratio means "follow the global default".
         const float iconFill = plateOn
             ? ClampF(own.iconScale > 0.0f ? own.iconScale : backdrop.iconScale,
-                     0.4f, 1.0f)
+                     0.4f, 1.5f)
             : 1.0f;
 
-        // The corner radius is expressed relative to the icon so the plate
-        // keeps the same look at every magnification step. The rounded clip
-        // exists to make a full bleed icon follow the tile shape; an icon
-        // that sits inside a border must stay untouched, otherwise the clip
-        // shrinks together with the icon and eats into the artwork.
+        // Clip against the plate, independent of the artwork's fill ratio.
+        // The artwork itself stays unmasked so shrinking it does not shrink
+        // the clipping boundary along with it.
         const float baseRadius = backdrop.cornerRadius * dockScale_;
 
-        const bool fullBleed = iconFill >= 0.999f;
-
-        const float cornerFraction =
-            fullBleed && metrics_.iconSize > 0.0f
-                ? baseRadius / metrics_.iconSize
-                : 0.0f;
-
         if (!item->EnsureIconBitmap(renderer_.Target(), renderer_.Wic(),
-                                    displaySize, cornerFraction))
+                                    displaySize, 0.0f, iconFill))
         {
             continue;
         }
@@ -1665,24 +1656,20 @@ void App::Render()
                 bottomColor);
         }
 
-        if (iconFill >= 0.999f)
+        const float iconSize = size * iconFill;
+        const float iconTop = plate.top + (size - iconSize) * 0.5f;
+        if (!renderer_.PushRoundedClip(D2D1::RoundedRect(
+            plate, baseRadius * item->scale,
+            baseRadius * item->scale)))
         {
-            renderer_.DrawIcon(item->icon.Get(), plate);
+            continue;
         }
-        else
-        {
-            // Sit the icon in the middle of its plate so the plate reads as
-            // a border rather than the icon being cropped.
-            const float iconSize = size * iconFill;
-            const float iconTop = plate.top + (size - iconSize) * 0.5f;
-
-            renderer_.DrawIcon(
-                item->icon.Get(),
-                D2D1::RectF(item->centerX - iconSize * 0.5f,
-                            iconTop,
-                            item->centerX + iconSize * 0.5f,
-                            iconTop + iconSize));
-        }
+        renderer_.DrawIcon(item->icon.Get(),
+            D2D1::RectF(item->centerX - iconSize * 0.5f,
+                        iconTop,
+                        item->centerX + iconSize * 0.5f,
+                        iconTop + iconSize));
+        renderer_.PopClip();
 
         // The rim is independent of the optional coloured plate. It is
         // always drawn over the icon, with global defaults and per-icon
@@ -3000,8 +2987,8 @@ void App::HandleMenuCommand(UINT id)
 
     case kMenuAdd:
     {
-        const std::wstring path = PickApplicationFile();
-        if (!path.empty())
+        const std::vector<std::wstring> paths = PickApplicationFiles();
+        for (const std::wstring& path : paths)
         {
             AddApplication(path);
         }
@@ -3135,12 +3122,22 @@ std::wstring App::PickFile(const wchar_t* title,
                             const COMDLG_FILTERSPEC* filters,
                             UINT filterCount)
 {
+    const std::vector<std::wstring> paths =
+        PickFiles(title, filters, filterCount, false);
+    return paths.empty() ? std::wstring() : paths.front();
+}
+
+std::vector<std::wstring> App::PickFiles(
+    const wchar_t* title, const COMDLG_FILTERSPEC* filters,
+    UINT filterCount, bool allowMultiSelect)
+{
+    std::vector<std::wstring> paths;
     ComPtr<IFileOpenDialog> dialog;
 
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL,
                                 IID_PPV_ARGS(dialog.AddressOf()))))
     {
-        return {};
+        return paths;
     }
 
     DWORD options = 0;
@@ -3151,7 +3148,10 @@ std::wstring App::PickFile(const wchar_t* title,
                            | FOS_FILEMUSTEXIST
                            | FOS_PATHMUSTEXIST
                            | FOS_NOCHANGEDIR
-                           | FOS_DONTADDTORECENT);
+                           | FOS_DONTADDTORECENT
+                           | (allowMultiSelect
+                                  ? static_cast<DWORD>(FOS_ALLOWMULTISELECT)
+                                  : 0u));
     }
 
     dialog->SetFileTypes(filterCount, filters);
@@ -3160,28 +3160,44 @@ std::wstring App::PickFile(const wchar_t* title,
 
     if (FAILED(dialog->Show(nullptr)))
     {
-        return {};
+        return paths;
     }
 
-    ComPtr<IShellItem> result;
-    if (FAILED(dialog->GetResult(result.AddressOf())))
+    ComPtr<IShellItemArray> results;
+    if (FAILED(dialog->GetResults(results.AddressOf())))
     {
-        return {};
+        return paths;
     }
 
-    wchar_t* path = nullptr;
-    if (FAILED(result->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path)
+    DWORD count = 0;
+    if (FAILED(results->GetCount(&count)))
     {
-        return {};
+        return paths;
     }
 
-    std::wstring selected(path);
-    CoTaskMemFree(path);
+    paths.reserve(count);
+    for (DWORD i = 0; i < count; ++i)
+    {
+        ComPtr<IShellItem> result;
+        if (FAILED(results->GetItemAt(i, result.AddressOf())))
+        {
+            continue;
+        }
 
-    return selected;
+        wchar_t* path = nullptr;
+        if (FAILED(result->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path)
+        {
+            continue;
+        }
+
+        paths.emplace_back(path);
+        CoTaskMemFree(path);
+    }
+
+    return paths;
 }
 
-std::wstring App::PickApplicationFile()
+std::vector<std::wstring> App::PickApplicationFiles()
 {
     const COMDLG_FILTERSPEC filters[] =
     {
@@ -3189,7 +3205,8 @@ std::wstring App::PickApplicationFile()
         {L"所有文件 (*.*)", L"*.*"},
     };
 
-    return PickFile(L"添加应用到 LightDock", filters, ARRAYSIZE(filters));
+    return PickFiles(L"添加应用到 LightDock", filters,
+                     ARRAYSIZE(filters), true);
 }
 
 bool App::EditItem(size_t index)
@@ -3540,7 +3557,9 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                 : selection == 3 ? DockEdge::Right : DockEdge::Bottom;
         }
 
-        s.iconSize = sliderValue(settings_.sizeSlider);
+        // Keep the legacy base icon size fixed. Overall size is now the only
+        // dock-wide sizing control exposed to users.
+        s.iconSize = 50;
         s.iconSpacing = sliderValue(settings_.spacingSlider);
         s.overallScale = static_cast<float>(
             sliderValue(settings_.overallScaleSlider)) / 100.0f;
@@ -3610,9 +3629,6 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
     auto refreshLabels = [&]()
     {
         wchar_t text[48];
-
-        swprintf(text, 48, L"%d px", sliderValue(settings_.sizeSlider));
-        SetWindowTextW(settings_.sizeLabel, text);
 
         swprintf(text, 48, L"%d px", sliderValue(settings_.spacingSlider));
         SetWindowTextW(settings_.spacingLabel, text);
@@ -3822,8 +3838,12 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             setFont(settings_.edgeCombo);
         }
 
-        settings_.sizeSlider = makeSlider(
-            kIdSize, 118, 80, 180, 32, 96, config_.settings.iconSize);
+        HWND overallScaleCaption = makeLabel(L"整体大小", 22, 88, 100);
+        settings_.overallScaleSlider = makeSlider(
+            kIdOverallScale, 118, 80, 180, 50, 150,
+            static_cast<int>(std::lround(
+                config_.settings.overallScale * 100.0f)));
+        settings_.overallScaleLabel = makeLabel(L"", 306, 88, 60);
         settings_.spacingSlider = makeSlider(
             kIdSpacing, 118, 108, 180, 0, 32, config_.settings.iconSpacing);
         settings_.magnifySlider = makeSlider(
@@ -3831,10 +3851,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             static_cast<int>(std::lround(config_.settings.magnification
                                          * 10.0f)));
 
-        HWND sizeCaption = makeLabel(L"图标大小", 22, 88, 90);
         HWND spacingCaption = makeLabel(L"图标间距", 22, 116, 90);
         HWND magnifyCaption = makeLabel(L"放大倍率", 22, 144, 90);
-        settings_.sizeLabel = makeLabel(L"", 306, 88, 60);
         settings_.spacingLabel = makeLabel(L"", 306, 116, 60);
         settings_.magnifyLabel = makeLabel(L"", 306, 144, 60);
 
@@ -3853,13 +3871,6 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             kIdFullscreenHideSpeed, 158, 240, 140, 0, 1000,
             config_.settings.autoHideAnimationMs);
         settings_.autoHideSpeedLabel = makeLabel(L"", 306, 244, 65);
-        HWND overallScaleCaption = makeLabel(L"整体大小", 22, 276, 100);
-        settings_.overallScaleSlider = makeSlider(
-            kIdOverallScale, 158, 272, 140, 50, 150,
-            static_cast<int>(std::lround(
-                config_.settings.overallScale * 100.0f)));
-        settings_.overallScaleLabel = makeLabel(L"", 306, 276, 60);
-
         // --- panel background ------------------------------------------------
         CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
@@ -3942,10 +3953,10 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             kIdCorner, 118, 416, 180, 0, 28,
             static_cast<int>(std::lround(backdrop.cornerRadius)));
         settings_.scaleSlider = makeSlider(
-            kIdScale, 158, 454, 140, 50, 100,
+            kIdScale, 158, 454, 140, 50, 150,
             static_cast<int>(std::lround(backdrop.iconScale * 100.0f)));
         settings_.opacitySlider = makeSlider(
-            kIdOpacity, 118, 492, 180, 10, 100,
+            kIdOpacity, 118, 492, 180, 0, 100,
             static_cast<int>(std::lround(backdrop.opacity * 100.0f)));
 
         settings_.strokeWidthSlider = makeSlider(
@@ -4023,28 +4034,25 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             MarkDialogTabPage(settings_.autoHideDelayLabel, 0);
             MarkDialogTabPage(settings_.autoHideSpeedSlider, 0);
             MarkDialogTabPage(settings_.autoHideSpeedLabel, 0);
-            MarkDialogTabPage(settings_.overallScaleSlider, 0);
-            MarkDialogTabPage(settings_.overallScaleLabel, 0);
             // These captions share their controls' final behavior-page
             // coordinates; keep them on page 0 instead of letting the
             // generic coordinate pass classify them as background-page
             // labels and shift them out of view.
             MarkDialogTabPage(autoHideDelayCaption, 0);
             MarkDialogTabPage(autoHideSpeedCaption, 0);
-            MarkDialogTabPage(overallScaleCaption, 0);
             // Keep every behavior-page control on its authored row. The
             // generic page classifier shifts untagged controls down to make
             // room for another page; that would collide with the newly added
             // dock-edge selector and the auto-hide rows.
             MarkDialogTabPage(modeCaption, 0);
             MarkDialogTabPage(settings_.modeCombo, 0);
-            MarkDialogTabPage(sizeCaption, 0);
+            MarkDialogTabPage(overallScaleCaption, 0);
             MarkDialogTabPage(spacingCaption, 0);
             MarkDialogTabPage(magnifyCaption, 0);
-            MarkDialogTabPage(settings_.sizeSlider, 0);
+            MarkDialogTabPage(settings_.overallScaleSlider, 0);
             MarkDialogTabPage(settings_.spacingSlider, 0);
             MarkDialogTabPage(settings_.magnifySlider, 0);
-            MarkDialogTabPage(settings_.sizeLabel, 0);
+            MarkDialogTabPage(settings_.overallScaleLabel, 0);
             MarkDialogTabPage(settings_.spacingLabel, 0);
             MarkDialogTabPage(settings_.magnifyLabel, 0);
             // These controls are already positioned in the bubble page's
@@ -4306,7 +4314,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                          defaults.dockEdge == DockEdge::Top ? 1
                          : defaults.dockEdge == DockEdge::Left ? 2
                          : defaults.dockEdge == DockEdge::Right ? 3 : 0, 0);
-            setSlider(settings_.sizeSlider, defaults.iconSize);
+            setSlider(settings_.overallScaleSlider,
+                      static_cast<int>(std::lround(defaults.overallScale * 100.0f)));
             setSlider(settings_.spacingSlider, defaults.iconSpacing);
             setSlider(settings_.magnifySlider,
                       static_cast<int>(std::lround(defaults.magnification * 10.0f)));
@@ -4315,8 +4324,6 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             setSlider(settings_.autoHideDelaySlider, defaults.autoHideDelayMs);
             setSlider(settings_.autoHideSpeedSlider,
                       defaults.autoHideAnimationMs);
-            setSlider(settings_.overallScaleSlider,
-                      static_cast<int>(std::lround(defaults.overallScale * 100.0f)));
             setSlider(settings_.dockCornerSlider,
                       static_cast<int>(std::lround(defaults.cornerRadius)));
             setSlider(settings_.tooltipOpacitySlider,
@@ -4984,7 +4991,7 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             : globalBackdrop.iconScale;
 
         editor_.scaleSlider = makeSlider(
-            kIdScale, 158, 224, 140, 50, 100,
+            kIdScale, 158, 224, 140, 50, 150,
             static_cast<int>(std::lround(effectiveScale * 100.0f)));
         editor_.scaleLabel = makeLabel(L"", 306, 228, 60);
 
@@ -5371,10 +5378,9 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             // matching values stay unpinned so global changes keep working.
             const float chosen =
                 static_cast<float>(sliderValue(editor_.scaleSlider)) / 100.0f;
-            const float globalScale = config_.settings.backdrop.iconScale;
 
-            plate.iconScale =
-                std::abs(chosen - globalScale) < 0.005f ? 0.0f : chosen;
+            plate.iconScale = std::abs(chosen - config_.settings.backdrop.iconScale)
+                < 0.005f ? 0.0f : chosen;
 
             plate.customBottom = editor_.secondBox
                 && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0)

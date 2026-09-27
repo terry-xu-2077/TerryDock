@@ -123,7 +123,7 @@ private:
     const wchar_t* UiText(const wchar_t* chinese) const;
     std::vector<std::wstring> FindRunningTaskbarApplications() const;
     void AddRunningApplication(size_t index);
-    std::wstring PickApplicationFile();
+    std::vector<std::wstring> PickApplicationFiles();
     void FinishIconDrag(float x, float y);
 
     /// Draws a small "dock" glyph at runtime: no .ico resource to maintain.
@@ -140,6 +140,10 @@ private:
     std::wstring PickFile(const wchar_t* title,
                           const COMDLG_FILTERSPEC* filters,
                           UINT filterCount);
+    std::vector<std::wstring> PickFiles(const wchar_t* title,
+                                        const COMDLG_FILTERSPEC* filters,
+                                        UINT filterCount,
+                                        bool allowMultiSelect);
 
     HINSTANCE instance_ = nullptr;
 
@@ -210,8 +214,6 @@ private:
         std::vector<ScrollChild> scrollChildren;
         int pageContentBottom[5]{};
         int pageScrollPosition = 0;
-        HWND sizeSlider = nullptr;
-        HWND sizeLabel = nullptr;
         HWND spacingSlider = nullptr;
         HWND spacingLabel = nullptr;
         HWND magnifySlider = nullptr;

@@ -110,7 +110,8 @@ ComPtr<IWICBitmap> ApplyRoundedMask(IWICImagingFactory* wic,
 bool DockItem::EnsureIconBitmap(ID2D1RenderTarget* target,
                                 IWICImagingFactory* wic,
                                 unsigned int displaySize,
-                                float cornerFraction)
+                                float cornerFraction,
+                                float bitmapScale)
 {
     if (!iconSource || !target || !wic || displaySize == 0)
     {
@@ -125,14 +126,16 @@ bool DockItem::EnsureIconBitmap(ID2D1RenderTarget* target,
     }
 
     // Never upscale: a 256px source stays 256px, a tiny source stays tiny.
-    const unsigned int wanted =
-        (displaySize < sourceWidth) ? displaySize : sourceWidth;
+    bitmapScale = ClampF(bitmapScale, 0.4f, 1.5f);
+    const unsigned int wanted = (std::min)(sourceWidth,
+        static_cast<unsigned int>(std::lround(displaySize * bitmapScale)));
 
     if (icon)
     {
         const D2D1_SIZE_F current = icon->GetSize();
         if (std::fabs(current.width - static_cast<float>(wanted)) < 0.5f
-            && std::fabs(iconCornerFraction - cornerFraction) < 0.0005f)
+            && std::fabs(iconCornerFraction - cornerFraction) < 0.0005f
+            && std::fabs(iconBitmapScale - bitmapScale) < 0.0005f)
         {
             return true;
         }
@@ -141,6 +144,7 @@ bool DockItem::EnsureIconBitmap(ID2D1RenderTarget* target,
     }
 
     iconCornerFraction = cornerFraction;
+    iconBitmapScale = bitmapScale;
 
     ComPtr<IWICBitmap> upload;
 
@@ -152,8 +156,8 @@ bool DockItem::EnsureIconBitmap(ID2D1RenderTarget* target,
         if (SUCCEEDED(wic->CreateBitmapScaler(scaler.AddressOf()))
             && SUCCEEDED(scaler->Initialize(
                 iconSource.Get(),
-                static_cast<UINT>(displaySize),
-                static_cast<UINT>(displaySize),
+                static_cast<UINT>(wanted),
+                static_cast<UINT>(wanted),
                 WICBitmapInterpolationModeCubic)))
         {
             wic->CreateBitmapFromSource(

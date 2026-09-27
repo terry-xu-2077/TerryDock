@@ -811,6 +811,62 @@ void DockRenderer::DrawIcon(ID2D1Bitmap* bitmap, const D2D1_RECT_F& destination)
     rt_->SetTransform(previous);
 }
 
+bool DockRenderer::PushRoundedClip(const D2D1_ROUNDED_RECT& clip)
+{
+    if (!rt_ || !d2d_)
+    {
+        return false;
+    }
+
+    ComPtr<ID2D1PathGeometry> geometry;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(d2d_->CreatePathGeometry(geometry.AddressOf()))
+        || FAILED(geometry->Open(sink.AddressOf())))
+    {
+        return false;
+    }
+
+    const D2D1_RECT_F& r = clip.rect;
+    const float rx = (std::max)(0.0f, (std::min)(clip.radiusX,
+                                                  (r.right - r.left) * 0.5f));
+    const float ry = (std::max)(0.0f, (std::min)(clip.radiusY,
+                                                  (r.bottom - r.top) * 0.5f));
+    sink->BeginFigure(D2D1::Point2F(r.left + rx, r.top),
+                      D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLine(D2D1::Point2F(r.right - rx, r.top));
+    sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.right, r.top + ry),
+        D2D1::SizeF(rx, ry), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+        D2D1_ARC_SIZE_SMALL));
+    sink->AddLine(D2D1::Point2F(r.right, r.bottom - ry));
+    sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.right - rx, r.bottom),
+        D2D1::SizeF(rx, ry), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+        D2D1_ARC_SIZE_SMALL));
+    sink->AddLine(D2D1::Point2F(r.left + rx, r.bottom));
+    sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.left, r.bottom - ry),
+        D2D1::SizeF(rx, ry), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+        D2D1_ARC_SIZE_SMALL));
+    sink->AddLine(D2D1::Point2F(r.left, r.top + ry));
+    sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.left + rx, r.top),
+        D2D1::SizeF(rx, ry), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+        D2D1_ARC_SIZE_SMALL));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (SUCCEEDED(sink->Close()))
+    {
+        rt_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), geometry.Get()),
+                       nullptr);
+        return true;
+    }
+    return false;
+}
+
+void DockRenderer::PopClip()
+{
+    if (rt_)
+    {
+        rt_->PopLayer();
+    }
+}
+
 void DockRenderer::DrawTooltip(const std::wstring& text,
                                float centerX,
                                float bottom,

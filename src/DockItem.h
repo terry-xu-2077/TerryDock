@@ -48,6 +48,7 @@ struct DockItem
     /// The corner fraction the cached bitmap was masked with. Part of the
     /// cache key: two items can sit at the same size but different radii.
     float iconCornerFraction = -1.0f;
+    float iconBitmapScale = 0.0f;
 
     // --- state -------------------------------------------------------------
     bool running = false;
@@ -95,7 +96,8 @@ struct DockItem
     bool EnsureIconBitmap(ID2D1RenderTarget* target,
                           IWICImagingFactory* wic,
                           unsigned int displaySize,
-                          float cornerFraction);
+                          float cornerFraction,
+                          float bitmapScale = 1.0f);
 };
 
 } // namespace ld

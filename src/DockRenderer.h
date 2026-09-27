@@ -71,6 +71,8 @@ public:
                             bool custom);
     void DrawIndicator(float x, float y, float diameter);
     void DrawIcon(ID2D1Bitmap* bitmap, const D2D1_RECT_F& destination);
+    bool PushRoundedClip(const D2D1_ROUNDED_RECT& clip);
+    void PopClip();
 
     void DrawTooltip(const std::wstring& text,
                      float centerX,
