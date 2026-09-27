@@ -1,6 +1,7 @@
 # Build output
 build/
 build_mingw/
+build_orientation*/
 out/
 cmake-build-*/
 CMakeFiles/

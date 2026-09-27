@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Common.h"
+#include "DockTransform.h"
 
 #include <vector>
 
@@ -26,6 +27,7 @@ public:
 
     /// Recreates the DIB + Direct2D render target for a new surface size.
     bool Resize(int width, int height);
+    void SetOrientation(DockEdge edge, float logicalWidth, float logicalHeight);
 
     bool BeginDraw();
     bool EndDraw();
@@ -76,7 +78,8 @@ public:
                       float scale,
                       float dpiScale,
                       float cornerRadius,
-                      float opacity);
+                      float opacity,
+                      bool arrowUp = false);
 
     /// Thin inner highlight rim along a plate's rounded edge. Drawn on top
     /// of the icon so full bleed tiles (clipped by the same radius) get the
@@ -152,6 +155,9 @@ private:
     bool brushDirty_ = true;
     bool shadowDirty_ = true;
     bool drawing_ = false;
+    DockEdge edge_ = DockEdge::Bottom;
+    float logicalWidth_ = 0.0f;
+    float logicalHeight_ = 0.0f;
 };
 
 } // namespace ld

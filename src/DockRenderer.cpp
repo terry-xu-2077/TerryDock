@@ -288,6 +288,15 @@ bool DockRenderer::Resize(int width, int height)
     return true;
 }
 
+void DockRenderer::SetOrientation(DockEdge edge,
+                                  float logicalWidth,
+                                  float logicalHeight)
+{
+    edge_ = edge;
+    logicalWidth_ = logicalWidth;
+    logicalHeight_ = logicalHeight;
+}
+
 bool DockRenderer::BeginDraw()
 {
     if (!rt_)
@@ -297,6 +306,8 @@ bool DockRenderer::BeginDraw()
 
     rt_->BeginDraw();
     rt_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    const DockTransform transform(edge_, logicalWidth_, logicalHeight_);
+    rt_->SetTransform(transform.Matrix());
 
     drawing_ = true;
 
@@ -792,8 +803,12 @@ void DockRenderer::DrawIcon(ID2D1Bitmap* bitmap, const D2D1_RECT_F& destination)
         return;
     }
 
-    rt_->DrawBitmap(bitmap, destination, 1.0f,
+    const DockTransform transform(edge_, logicalWidth_, logicalHeight_);
+    const D2D1_MATRIX_3X2_F previous = transform.Matrix();
+    rt_->SetTransform(D2D1::Matrix3x2F::Identity());
+    rt_->DrawBitmap(bitmap, transform.ToPhysical(destination), 1.0f,
                     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    rt_->SetTransform(previous);
 }
 
 void DockRenderer::DrawTooltip(const std::wstring& text,
@@ -802,7 +817,8 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
                                float scale,
                                float dpiScale,
                                float cornerRadius,
-                               float opacity)
+                               float opacity,
+                               bool arrowUp)
 {
     if (!rt_ || !dwrite_ || text.empty())
     {
@@ -814,6 +830,8 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
     const float padX = 12.0f * dpiScale * safeScale;
     const float padY = 7.0f * dpiScale * safeScale;
     const float tail = 8.0f * dpiScale * safeScale;
+    const float sideTail = 9.0f * dpiScale * safeScale;
+    const float sideGap = 10.0f * dpiScale * safeScale;
 
     ComPtr<IDWriteTextFormat> format;
     if (FAILED(dwrite_->CreateTextFormat(
@@ -841,9 +859,8 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
         return;
     }
 
-    // The first layout is only used to measure the text. Constrain the
-    // drawable layout to that measured width; otherwise its 1600px alignment
-    // box centres the text far outside the visible bubble.
+    // Constrain the drawable layout to the measured width; otherwise its
+    // 1600px alignment box centres the text far outside the visible bubble.
     const float textWidth = (std::max)(metrics.width, 1.0f);
     const float textHeight = (std::max)(metrics.height, 1.0f);
     layout->SetMaxWidth(textWidth);
@@ -851,12 +868,38 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
 
     const float width = textWidth + padX * 2.0f;
     const float height = textHeight + padY * 2.0f;
-    const float bodyBottom = bottom - tail;
-    const D2D1_RECT_F body = D2D1::RectF(
-        centerX - width * 0.5f,
-        bodyBottom - height,
-        centerX + width * 0.5f,
-        bodyBottom);
+    const bool vertical = edge_ == DockEdge::Left || edge_ == DockEdge::Right;
+    const float bodyBottom = arrowUp ? bottom : bottom - tail;
+    D2D1_RECT_F body{};
+    float bubbleCenterX = centerX;
+    float bubbleCenterY = bodyBottom - height * 0.5f;
+    if (vertical)
+    {
+        const float anchorX = edge_ == DockEdge::Left
+            ? bottom + sideGap : logicalHeight_ - bottom - sideGap;
+        bubbleCenterX = edge_ == DockEdge::Left
+            ? anchorX + sideTail + width * 0.5f
+            : anchorX - sideTail - width * 0.5f;
+        bubbleCenterY = centerX;
+        body = D2D1::RectF(bubbleCenterX - width * 0.5f,
+                           bubbleCenterY - height * 0.5f,
+                           bubbleCenterX + width * 0.5f,
+                           bubbleCenterY + height * 0.5f);
+    }
+    else if (arrowUp)
+    {
+        body = D2D1::RectF(centerX - width * 0.5f,
+                           bottom + tail,
+                           centerX + width * 0.5f,
+                           bottom + tail + height);
+    }
+    else
+    {
+        body = D2D1::RectF(centerX - width * 0.5f,
+                           bodyBottom - height,
+                           centerX + width * 0.5f,
+                           bodyBottom);
+    }
 
     ComPtr<ID2D1SolidColorBrush> fill;
     ComPtr<ID2D1SolidColorBrush> border;
@@ -872,6 +915,11 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
     if (!fill || !border || !ink)
     {
         return;
+    }
+
+    if (vertical)
+    {
+        rt_->SetTransform(D2D1::Matrix3x2F::Identity());
     }
 
     // Match the dock panel's global corner radius rather than using an
@@ -890,11 +938,45 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
         ComPtr<ID2D1GeometrySink> sink;
         if (SUCCEEDED(tailGeometry->Open(sink.AddressOf())))
         {
-            sink->BeginFigure(
-                D2D1::Point2F(centerX - tail, bodyBottom),
-                D2D1_FIGURE_BEGIN_FILLED);
-            sink->AddLine(D2D1::Point2F(centerX, bodyBottom + tail));
-            sink->AddLine(D2D1::Point2F(centerX + tail, bodyBottom));
+            if (!vertical)
+            {
+                if (arrowUp)
+                {
+                    sink->BeginFigure(
+                        D2D1::Point2F(centerX - tail, body.top),
+                        D2D1_FIGURE_BEGIN_FILLED);
+                    sink->AddLine(D2D1::Point2F(centerX, bottom));
+                    sink->AddLine(D2D1::Point2F(centerX + tail, body.top));
+                }
+                else
+                {
+                    sink->BeginFigure(
+                        D2D1::Point2F(centerX - tail, bodyBottom),
+                        D2D1_FIGURE_BEGIN_FILLED);
+                    sink->AddLine(D2D1::Point2F(centerX, bodyBottom + tail));
+                    sink->AddLine(D2D1::Point2F(centerX + tail, bodyBottom));
+                }
+            }
+            else if (edge_ == DockEdge::Left)
+            {
+                sink->BeginFigure(
+                    D2D1::Point2F(body.left, bubbleCenterY - sideTail),
+                    D2D1_FIGURE_BEGIN_FILLED);
+                sink->AddLine(D2D1::Point2F(bottom + sideGap, bubbleCenterY));
+                sink->AddLine(D2D1::Point2F(
+                    body.left, bubbleCenterY + sideTail));
+            }
+            else
+            {
+                sink->BeginFigure(
+                    D2D1::Point2F(body.right, bubbleCenterY - sideTail),
+                    D2D1_FIGURE_BEGIN_FILLED);
+                sink->AddLine(D2D1::Point2F(
+                                            logicalHeight_ - bottom - sideGap,
+                                            bubbleCenterY));
+                sink->AddLine(D2D1::Point2F(body.right,
+                                            bubbleCenterY + sideTail));
+            }
             sink->EndFigure(D2D1_FIGURE_END_CLOSED);
             sink->Close();
             rt_->FillGeometry(tailGeometry.Get(), fill.Get());
@@ -907,6 +989,12 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
     rt_->DrawTextLayout(
         D2D1::Point2F(textRect.left, textRect.top), layout.Get(), ink.Get(),
         D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+    if (vertical)
+    {
+        rt_->SetTransform(DockTransform(edge_, logicalWidth_, logicalHeight_)
+                              .Matrix());
+    }
 }
 
 void DockRenderer::DrawPlateRim(const D2D1_RECT_F& rect,

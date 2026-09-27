@@ -35,6 +35,10 @@ LayoutMetrics MakeMetrics(const DockSettings& settings, float dpiScale)
 {
     LayoutMetrics metrics;
     metrics.dpiScale = dpiScale;
+    // All edges except the bottom expand away from their screen edge.
+    // For vertical docks, the logical top maps to the outer (screen-facing)
+    // icon edge after rotation, keeping magnification anchored correctly.
+    metrics.anchorIconsAtTop = settings.dockEdge != DockEdge::Bottom;
 
     metrics.iconSize = static_cast<float>(settings.iconSize) * dpiScale;
     metrics.spacing = static_cast<float>(settings.iconSpacing) * dpiScale;
@@ -55,7 +59,7 @@ LayoutMetrics MakeMetrics(const DockSettings& settings, float dpiScale)
     return metrics;
 }
 
-SurfaceMargins ComputeMargins(const LayoutMetrics& metrics)
+SurfaceMargins ComputeMargins(const LayoutMetrics& metrics, DockEdge edge)
 {
     // Room above the panel: a magnified icon grows upwards and a launching
     // icon additionally jumps. Horizontal room is only needed for the shadow,
@@ -63,19 +67,36 @@ SurfaceMargins ComputeMargins(const LayoutMetrics& metrics)
     const float scaleOverflow = (metrics.magnification - 1.0f) * metrics.iconSize;
     const float jumpRoom = 30.0f * metrics.dpiScale;
     const float shadowExtent = 26.0f * metrics.dpiScale;
-    const float tooltipRoom = 48.0f * metrics.dpiScale;
+    const bool verticalDock = edge == DockEdge::Left || edge == DockEdge::Right;
+    const float tooltipRoom = (verticalDock ? 500.0f : 48.0f)
+        * metrics.dpiScale;
 
     SurfaceMargins margins;
-    margins.left = shadowExtent;
-    margins.right = shadowExtent;
-    margins.top = scaleOverflow + jumpRoom + shadowExtent * 0.6f
-        + tooltipRoom;
-    margins.bottom = shadowExtent;
+    // Keep enough horizontal canvas for the name bubble above either outer
+    // icon. The dock panel remains centred; only transparent surface space
+    // grows so natural one-line labels are not clipped at the HWND edges.
+    const float tooltipSideRoom = 200.0f * metrics.dpiScale;
+    margins.left = (std::max)(shadowExtent, tooltipSideRoom);
+    margins.right = (std::max)(shadowExtent, tooltipSideRoom);
+    if (edge == DockEdge::Top || edge == DockEdge::Left
+        || edge == DockEdge::Right)
+    {
+        margins.top = shadowExtent;
+        margins.bottom = scaleOverflow + jumpRoom + shadowExtent * 0.6f
+            + tooltipRoom;
+    }
+    else
+    {
+        margins.top = scaleOverflow + jumpRoom + shadowExtent * 0.6f
+            + tooltipRoom;
+        margins.bottom = shadowExtent;
+    }
 
     return margins;
 }
 
-DockGeometry ComputeGeometry(int itemCount, const LayoutMetrics& metrics)
+DockGeometry ComputeGeometry(int itemCount, const LayoutMetrics& metrics,
+                             DockEdge edge)
 {
     const int safeCount = (itemCount > 0) ? itemCount : 1;
     const float count = static_cast<float>(safeCount);
@@ -96,7 +117,7 @@ DockGeometry ComputeGeometry(int itemCount, const LayoutMetrics& metrics)
     // reserve no space of their own.
     geometry.panelHeight = metrics.paddingY * 2.0f + metrics.iconSize;
 
-    const SurfaceMargins margins = ComputeMargins(metrics);
+    const SurfaceMargins margins = ComputeMargins(metrics, edge);
 
     geometry.surfaceWidth = static_cast<int>(
         std::ceil(geometry.maxPanelWidth + margins.left + margins.right));
@@ -315,7 +336,9 @@ LayoutFrame ApplyLayout(std::vector<DockItem*>& items,
         item->baseCenterX =
             baseContentLeft + metrics.iconSize * 0.5f
             + static_cast<float>(i) * cell;
-        item->baselineBottom = geometry.iconBaselineBottom;
+        item->baselineBottom = metrics.anchorIconsAtTop
+            ? geometry.panelY + metrics.paddingY + size
+            : geometry.iconBaselineBottom;
 
         cursor += size + gap;
     }

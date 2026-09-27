@@ -24,6 +24,7 @@ const BounceParams kBounce;
 /// Panel width in macOS mode: quick, essentially critically damped.
 const SpringParams kPanelSpring{3.4f, 0.92f, 0.05f, 1.0f};
 const SpringParams kFullscreenSlideSpring{5.2f, 0.92f, 0.001f, 0.03f};
+constexpr float kTooltipScaleBaseline = 0.8f;
 
     /// Release timing for the magnification driven away from 1.0. Lower is
     /// snappier; too low and the row snaps back instead of gliding home.
@@ -40,6 +41,57 @@ constexpr double kPollIntervalSeconds = 1.0;
 /// Gap between the bottom of the dock and the bottom of the work area.
 constexpr float kBottomGap = 4.0f;
 constexpr wchar_t kDialogTabPageProperty[] = L"LightDock.DialogTabPage";
+
+HBITMAP CreateMenuIconBitmap(IWICImagingFactory* factory, IWICBitmap* source)
+{
+    if (!factory || !source)
+    {
+        return nullptr;
+    }
+
+    ComPtr<IWICBitmapScaler> scaler;
+    ComPtr<IWICFormatConverter> converter;
+    if (FAILED(factory->CreateBitmapScaler(scaler.AddressOf()))
+        || FAILED(scaler->Initialize(source, 16, 16,
+                                     WICBitmapInterpolationModeFant))
+        || FAILED(factory->CreateFormatConverter(converter.AddressOf()))
+        || FAILED(converter->Initialize(
+            scaler.Get(), GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone, nullptr, 0.0,
+            WICBitmapPaletteTypeCustom)))
+    {
+        return nullptr;
+    }
+
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = 16;
+    info.bmiHeader.biHeight = -16;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* pixels = nullptr;
+    HBITMAP bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS,
+                                     &pixels, nullptr, 0);
+    if (!bitmap || !pixels)
+    {
+        if (bitmap)
+        {
+            DeleteObject(bitmap);
+        }
+        return nullptr;
+    }
+
+    if (FAILED(converter->CopyPixels(nullptr, 16 * 4, 16 * 16 * 4,
+                                     static_cast<BYTE*>(pixels))))
+    {
+        DeleteObject(bitmap);
+        return nullptr;
+    }
+
+    return bitmap;
+}
 
 void MarkDialogTabPage(HWND control, int page)
 {
@@ -134,17 +186,15 @@ void ArmTimer(HANDLE timer, int milliseconds)
 
 // --- dialog appearance helpers --------------------------------------------
 
-/// Default plate colour: the classic dark slate tile. The global settings
-/// no longer own plate colours, so this constant is what a fresh icon gets.
-const D2D1_COLOR_F kDefaultPlateTop{0.231f, 0.259f, 0.322f, 1.0f};
+/// Default plate colour for a new icon.
+const D2D1_COLOR_F kDefaultPlateTop{1.0f, 1.0f, 1.0f, 1.0f};
 
-/// The automatically derived gradient partner: the same hue, darkened
-/// towards the bottom, so a single colour pick still produces the subtle
-/// vertical blend every macOS tile has.
+/// The automatically derived gradient partner stays close to the selected
+/// colour; white therefore fades to #EBEBEB instead of a dark gray.
 D2D1_COLOR_F DerivedPlateBottom(const D2D1_COLOR_F& top)
 {
     return D2D1::ColorF(
-        top.r * 0.72f, top.g * 0.72f, top.b * 0.72f, 1.0f);
+        top.r * 0.92f, top.g * 0.92f, top.b * 0.92f, 1.0f);
 }
 
 /// DPI of the monitor a dialog lives on (falls back to the system DPI).
@@ -341,6 +391,9 @@ bool App::Initialize(HINSTANCE instance)
 
     config_ = Config::Load();
     fullscreenVisibility_.Reset(config_.settings.autoHide ? 0.0f : 1.0f);
+    hideAnimationStart_ = fullscreenVisibility_.value;
+    hideAnimationTarget_ = fullscreenVisibility_.value;
+    hideIndicatorVisibility_.Reset(0.0f);
 
     EnsureDirectoryExists(Config::Directory());
     EnsureDirectoryExists(GetIconCacheDir());
@@ -597,6 +650,12 @@ void App::LaunchApplication(size_t index)
 
     DockItem& item = *items_[index];
 
+    if (item.running
+        && AppLauncher::ActivateRunningWindow(item.processName))
+    {
+        return;
+    }
+
     item.launching = true;
     item.launchElapsed = 0.0;
     item.bounceTimer = 0.0f;
@@ -628,9 +687,22 @@ void App::RebuildMetrics()
 
 void App::UpdateSurfaceAndGeometry()
 {
-    geometry_ = ComputeGeometry(static_cast<int>(items_.size()), metrics_);
+    geometry_ = ComputeGeometry(static_cast<int>(items_.size()), metrics_,
+                                config_.settings.dockEdge);
+    dockTransform_ = DockTransform(config_.settings.dockEdge,
+        static_cast<float>(geometry_.surfaceWidth),
+        static_cast<float>(geometry_.surfaceHeight));
+    renderer_.SetOrientation(config_.settings.dockEdge,
+        static_cast<float>(geometry_.surfaceWidth),
+        static_cast<float>(geometry_.surfaceHeight));
 
-    if (!renderer_.Resize(geometry_.surfaceWidth, geometry_.surfaceHeight))
+    const int physicalWidth = config_.settings.dockEdge == DockEdge::Left
+            || config_.settings.dockEdge == DockEdge::Right
+        ? geometry_.surfaceHeight : geometry_.surfaceWidth;
+    const int physicalHeight = config_.settings.dockEdge == DockEdge::Left
+            || config_.settings.dockEdge == DockEdge::Right
+        ? geometry_.surfaceWidth : geometry_.surfaceHeight;
+    if (!renderer_.Resize(physicalWidth, physicalHeight))
     {
         return;
     }
@@ -690,15 +762,20 @@ void App::RepositionWindow()
         const int reservation = static_cast<int>(
             std::round(geometry_.panelHeight)) + gap;
         window_.SetAppBarReservation(
-            monitors_[static_cast<size_t>(monitorIndex_)].rect, reservation);
+            monitors_[static_cast<size_t>(monitorIndex_)].rect,
+            config_.settings.dockEdge, reservation);
     }
     UpdateDockWindowPosition();
 }
 
 void App::UpdateDockWindowPosition()
 {
-    const int width = geometry_.surfaceWidth;
-    const int height = geometry_.surfaceHeight;
+    const bool vertical = config_.settings.dockEdge == DockEdge::Left
+        || config_.settings.dockEdge == DockEdge::Right;
+    const int width = vertical ? geometry_.surfaceHeight
+                               : geometry_.surfaceWidth;
+    const int height = vertical ? geometry_.surfaceWidth
+                                : geometry_.surfaceHeight;
     if (width <= 0 || height <= 0)
     {
         return;
@@ -706,21 +783,43 @@ void App::UpdateDockWindowPosition()
 
     const RECT work = CurrentWorkArea();
     lastWorkArea_ = work;
-    const int x = work.left + ((work.right - work.left) - width) / 2;
     const int gap = static_cast<int>(std::round(kBottomGap * dockScale_));
-    int y = 0;
+    int x = work.left + ((work.right - work.left) - width) / 2;
+    int y = work.bottom - static_cast<int>(std::round(geometry_.panelY));
 
-    if (config_.settings.autoHide)
+    switch (config_.settings.dockEdge)
     {
-        const int panelBottom = static_cast<int>(
-            std::round(geometry_.panelY + geometry_.panelHeight));
-        y = work.bottom - gap - panelBottom;
-    }
-    else
-    {
-        // The reserved work-area edge is the panel's top. The canvas extends
-        // above it for icons and shadow, so offset by panelY.
-        y = work.bottom - static_cast<int>(std::round(geometry_.panelY));
+    case DockEdge::Top:
+        y = config_.settings.autoHide
+            ? work.top + gap - static_cast<int>(std::round(geometry_.panelY))
+            : work.top - static_cast<int>(std::round(
+                geometry_.panelY + geometry_.panelHeight));
+        break;
+    case DockEdge::Left:
+        x = config_.settings.autoHide
+            ? work.left + gap - static_cast<int>(std::round(geometry_.panelY))
+            : work.left - static_cast<int>(std::round(
+                geometry_.panelY + geometry_.panelHeight));
+        y = work.top + ((work.bottom - work.top) - height) / 2;
+        break;
+    case DockEdge::Right:
+        x = config_.settings.autoHide
+            ? work.right - gap - width
+                + static_cast<int>(std::round(geometry_.panelY))
+            : work.right - width
+                + static_cast<int>(std::round(geometry_.panelY
+                                               + geometry_.panelHeight));
+        y = work.top + ((work.bottom - work.top) - height) / 2;
+        break;
+    case DockEdge::Bottom:
+    default:
+        if (config_.settings.autoHide)
+        {
+            const int panelBottom = static_cast<int>(
+                std::round(geometry_.panelY + geometry_.panelHeight));
+            y = work.bottom - gap - panelBottom;
+        }
+        break;
     }
 
     RECT monitorRect = work;
@@ -728,11 +827,20 @@ void App::UpdateDockWindowPosition()
     {
         monitorRect = monitors_[static_cast<size_t>(monitorIndex_)].rect;
     }
-    const int hiddenY = monitorRect.bottom;
     const float hiddenProgress =
         1.0f - ClampF(fullscreenVisibility_.value, 0.0f, 1.0f);
-    y += static_cast<int>(std::lround(
-        static_cast<float>(hiddenY - y) * hiddenProgress));
+    int hiddenX = x;
+    int hiddenY = y;
+    switch (config_.settings.dockEdge)
+    {
+    case DockEdge::Top: hiddenY = monitorRect.top - height; break;
+    case DockEdge::Left: hiddenX = monitorRect.left - width; break;
+    case DockEdge::Right: hiddenX = monitorRect.right; break;
+    case DockEdge::Bottom:
+    default: hiddenY = monitorRect.bottom; break;
+    }
+    x += static_cast<int>(std::lround((hiddenX - x) * hiddenProgress));
+    y += static_cast<int>(std::lround((hiddenY - y) * hiddenProgress));
 
     window_.SetBounds(x, y, width, height);
 }
@@ -742,8 +850,28 @@ void App::OnAppBarChanged()
     RepositionWindow();
 }
 
+void App::SetFullscreenVisibilityTarget(float target)
+{
+    target = ClampF(target, 0.0f, 1.0f);
+    if (std::fabs(fullscreenVisibility_.target - target) < 0.0001f)
+    {
+        return;
+    }
+
+    hideAnimationStart_ = fullscreenVisibility_.value;
+    hideAnimationTarget_ = target;
+    hideAnimationElapsed_ = 0.0;
+    hideAnimationActive_ = true;
+    fullscreenVisibility_.target = target;
+}
+
 void App::CheckFullscreen()
 {
+    if (exitRequested_)
+    {
+        return;
+    }
+
     bool fullscreen = false;
     if (monitorIndex_ >= 0 && monitorIndex_ < static_cast<int>(monitors_.size()))
     {
@@ -792,7 +920,7 @@ void App::CheckFullscreen()
             autoHideHidePending_ = false;
             if (!config_.settings.autoHide)
             {
-                fullscreenVisibility_.target = 1.0f;
+                SetFullscreenVisibilityTarget(1.0f);
             }
         }
         WakeAnimation();
@@ -803,7 +931,7 @@ void App::CheckFullscreen()
     if (fullscreen && fullscreenVisibility_.target > 0.0f
         && now >= hideDeadline_)
     {
-        fullscreenVisibility_.target = 0.0f;
+        SetFullscreenVisibilityTarget(0.0f);
         WakeAnimation();
     }
 }
@@ -1133,13 +1261,15 @@ void App::Tick(double dt)
         // of the current scales, so the icons always stay inside the panel.
         // Driven by the same eased presence value as the icons, so leaving
         // the dock never pops.
-        // Keep the fixed panel's expanded width a little more restrained:
-        // only 70% of the available stretch is used, while the resting
-        // width and the icon layout remain unchanged.
-        constexpr float kFixedPanelStretch = 0.70f;
+        // Fixed-panel expansion is independent of the magnification setting.
+        // Its extra width is derived only from the unscaled icon dimensions;
+        // 0.42 preserves the previous default look (1.6x magnification with
+        // 70% of its available stretch) without coupling the two controls.
+        constexpr float kFixedPanelStretchPerIcon = 0.42f;
+        const float fixedStretch = static_cast<float>(items_.size())
+            * metrics_.iconSize * kFixedPanelStretchPerIcon;
         panelWidth_.target = geometry_.basePanelWidth
-            + (geometry_.maxPanelWidth - geometry_.basePanelWidth)
-              * kFixedPanelStretch * hoverPresence_;
+            + fixedStretch * hoverPresence_;
 
         panelWidth_.Update(dt, kPanelSpring);
 
@@ -1252,22 +1382,126 @@ void App::Tick(double dt)
         moving = true;
     }
 
-    const float previousFullscreenVisibility = fullscreenVisibility_.value;
     SpringParams fullscreenSpring = kFullscreenSlideSpring;
-    fullscreenSpring.frequency *= ClampF(
-        config_.settings.autoHideSpeed, 0.5f, 2.0f);
-    fullscreenVisibility_.Update(dt, fullscreenSpring);
+    const float previousFullscreenVisibility = fullscreenVisibility_.value;
+    if (hideAnimationActive_)
+    {
+        hideAnimationElapsed_ += dt;
+        const int durationMs = std::clamp(
+            config_.settings.autoHideAnimationMs, 0, 1000);
+        if (durationMs == 0)
+        {
+            fullscreenVisibility_.value = hideAnimationTarget_;
+            hideAnimationActive_ = false;
+        }
+        else
+        {
+            const double duration = durationMs / 1000.0;
+            const float t = static_cast<float>(std::clamp(
+                hideAnimationElapsed_ / duration, 0.0, 1.0));
+            // Ease in/out so both reveal and retract remain visibly smooth.
+            const float eased = t * t * (3.0f - 2.0f * t);
+            fullscreenVisibility_.value = hideAnimationStart_
+                + (hideAnimationTarget_ - hideAnimationStart_) * eased;
+            if (t >= 1.0f)
+            {
+                fullscreenVisibility_.value = hideAnimationTarget_;
+                hideAnimationActive_ = false;
+            }
+        }
+        fullscreenVisibility_.target = hideAnimationTarget_;
+    }
+    else
+    {
+        fullscreenVisibility_.Update(dt, fullscreenSpring);
+    }
     if (std::fabs(fullscreenVisibility_.value - previousFullscreenVisibility)
         > 0.0001f)
     {
         UpdateDockWindowPosition();
     }
-    if (!fullscreenVisibility_.Settled(fullscreenSpring))
+    if (hideAnimationActive_ || !fullscreenVisibility_.Settled(fullscreenSpring))
     {
         moving = true;
     }
 
+    const bool indicatorAllowed = config_.settings.autoHide
+        && !fullscreenActive_ && !exitRequested_ && !settingsWindowOpen_;
+    // Drive the status indicator from the dock's own progress. Independent
+    // springs made the bar appear/disappear a beat before the dock moved.
+    hideIndicatorVisibility_.target = indicatorAllowed
+        ? 1.0f - ClampF(fullscreenVisibility_.value, 0.0f, 1.0f)
+        : 0.0f;
+    hideIndicatorVisibility_.value = hideIndicatorVisibility_.target;
+
+    if (hideIndicatorVisibility_.value > 0.001f)
+    {
+        const RECT dockBounds = window_.GetBounds();
+        const RECT work = CurrentWorkArea();
+        const int indicatorHeight = (std::max)(
+            1, static_cast<int>(std::lround(5.0f * dockScale_)));
+        const int fullIndicatorWidth = (std::max)(
+            1, static_cast<int>(std::lround(frame_.panelWidth)));
+        const float indicatorStretch = 0.88f
+            + 0.12f * ClampF(hideIndicatorVisibility_.value, 0.0f, 1.0f);
+        const int indicatorLength = (std::max)(
+            1, static_cast<int>(std::lround(
+                fullIndicatorWidth * indicatorStretch)));
+        int indicatorX = dockBounds.left
+            + static_cast<int>(std::lround(frame_.panelX
+                + (fullIndicatorWidth - indicatorLength) * 0.5f));
+        int indicatorY = work.bottom - indicatorHeight;
+        int indicatorWidth = indicatorLength;
+        int actualIndicatorHeight = indicatorHeight;
+        if (config_.settings.dockEdge == DockEdge::Top)
+        {
+            indicatorY = work.top;
+        }
+        else if (config_.settings.dockEdge == DockEdge::Left
+                 || config_.settings.dockEdge == DockEdge::Right)
+        {
+            indicatorWidth = indicatorHeight;
+            actualIndicatorHeight = indicatorLength;
+            indicatorX = config_.settings.dockEdge == DockEdge::Left
+                ? work.left : work.right - indicatorWidth;
+            indicatorY = dockBounds.top + static_cast<int>(std::lround(
+                frame_.panelX + (fullIndicatorWidth - indicatorLength) * 0.5f));
+        }
+
+        float red = 1.0f, green = 1.0f, blue = 1.0f, colorAlpha = 1.0f;
+        const std::wstring& edgeColor =
+            config_.settings.backgroundBottom.empty()
+                ? config_.settings.backgroundTop
+                : config_.settings.backgroundBottom;
+        ParseHexColor(edgeColor, red, green, blue, colorAlpha);
+        const COLORREF indicatorColor = RGB(
+            static_cast<BYTE>(std::lround(ClampF(red, 0.0f, 1.0f) * 255.0f)),
+            static_cast<BYTE>(std::lround(ClampF(green, 0.0f, 1.0f) * 255.0f)),
+            static_cast<BYTE>(std::lround(ClampF(blue, 0.0f, 1.0f) * 255.0f)));
+        const BYTE indicatorOpacity = static_cast<BYTE>(std::lround(
+            255.0f * ClampF(config_.settings.backgroundOpacity, 0.0f, 1.0f)
+            * ClampF(colorAlpha, 0.0f, 1.0f)
+            * ClampF(hideIndicatorVisibility_.value, 0.0f, 1.0f)));
+        window_.UpdateHideIndicator(
+            true, indicatorX, indicatorY, indicatorWidth,
+            actualIndicatorHeight,
+            indicatorOpacity, indicatorColor);
+    }
+    else
+    {
+        window_.UpdateHideIndicator(false, 0, 0, 0, 0, 0, RGB(255, 255, 255));
+    }
+
     Render();
+
+    if (exitRequested_ && !hideAnimationActive_
+        && fullscreenVisibility_.Settled(fullscreenSpring))
+    {
+        // Finish the slide before destroying the layered window and
+        // releasing its work-area reservation.
+        window_.Destroy();
+        return;
+    }
 
     animating_ = moving;
 }
@@ -1481,20 +1715,27 @@ void App::Render()
                 || tooltipItem->get() != draggedVisual))
         {
             const DockItem& item = **tooltipItem;
+            const bool verticalDock = config_.settings.dockEdge == DockEdge::Left
+                || config_.settings.dockEdge == DockEdge::Right;
+            const bool topDock = config_.settings.dockEdge == DockEdge::Top;
             renderer_.DrawTooltip(
                 item.name,
                 item.centerX,
-                item.baselineBottom - item.size - 7.0f * dockScale_,
-                item.scale * config_.settings.tooltipScale,
+                verticalDock ? item.baselineBottom
+                    : topDock ? item.baselineBottom + 7.0f * dockScale_
+                    : item.baselineBottom - item.size - 7.0f * dockScale_,
+                item.scale * config_.settings.tooltipScale
+                    * kTooltipScaleBaseline,
                 dockScale_,
-                metrics_.cornerRadius * item.scale
-                    * config_.settings.tooltipScale,
-                tooltipOpacity_);
+                config_.settings.tooltipCornerRadius * dockScale_ * item.scale
+                    * config_.settings.tooltipScale
+                    * kTooltipScaleBaseline,
+                tooltipOpacity_, topDock);
         }
     }
 
-    // Running indicator: a small dot under the icon, inside the bottom
-    // padding strip. It follows the icon horizontally but never scales.
+    // Running indicator: keep it in the panel padding, tracking the growing
+    // edge for top-anchored icons and the fixed baseline on other edges.
     const float dot = metrics_.indicatorHeight;
 
     for (const auto& item : items_)
@@ -1504,9 +1745,16 @@ void App::Render()
             continue;
         }
 
+        const bool verticalDock = config_.settings.dockEdge == DockEdge::Left
+            || config_.settings.dockEdge == DockEdge::Right;
+        const float indicatorY = config_.settings.dockEdge == DockEdge::Top
+            ? item->baselineBottom + metrics_.paddingY * 0.5f
+            : verticalDock
+                ? item->baselineBottom - item->size
+                    - metrics_.paddingY * 0.5f
+                : geometry_.indicatorCenterY;
         renderer_.DrawIndicator(item->centerX - dot * 0.5f,
-                                geometry_.indicatorCenterY - dot * 0.5f,
-                                dot);
+                                indicatorY - dot * 0.5f, dot);
     }
 
     if (draggedVisual)
@@ -1563,6 +1811,12 @@ void App::PollProcesses()
 
 void App::CheckPointer()
 {
+    if (exitRequested_)
+    {
+        mouseActive_ = false;
+        return;
+    }
+
     // TEMP-DIAG-BEGIN
     if (diagMouseX_ >= 0.0f)
     {
@@ -1580,35 +1834,75 @@ void App::CheckPointer()
     }
 
     const RECT bounds = window_.GetBounds();
-    const float x = static_cast<float>(cursor.x - bounds.left);
-    const float y = static_cast<float>(cursor.y - bounds.top);
+    const float physicalX = static_cast<float>(cursor.x - bounds.left);
+    const float physicalY = static_cast<float>(cursor.y - bounds.top);
+    const D2D1_POINT_2F logical = dockTransform_.ToLogical(physicalX, physicalY);
+    const float x = logical.x;
+    const float y = logical.y;
 
-    const bool inside = HitTest(x, y);
+    const bool inside = HitTest(physicalX, physicalY);
 
     if (!fullscreenActive_)
     {
         const float previousTarget = fullscreenVisibility_.target;
         const auto now = std::chrono::steady_clock::now();
 
-        if (config_.settings.autoHide)
+        if (settingsWindowOpen_)
+        {
+            autoHideHidePending_ = false;
+            SetFullscreenVisibilityTarget(1.0f);
+        }
+        else if (config_.settings.autoHide)
         {
             const RECT monitorRect = monitorIndex_ >= 0
                     && monitorIndex_ < static_cast<int>(monitors_.size())
                 ? monitors_[static_cast<size_t>(monitorIndex_)].rect
                 : RECT{0, 0, GetSystemMetrics(SM_CXSCREEN),
                        GetSystemMetrics(SM_CYSCREEN)};
-            const RECT work = CurrentWorkArea();
             const LONG revealBand = (std::max)(2L, static_cast<LONG>(
                 std::lround(4.0f * dockScale_)));
-            const bool atRevealEdge = cursor.x >= monitorRect.left
-                && cursor.x < monitorRect.right
-                && cursor.y >= work.bottom - revealBand
-                && cursor.y < monitorRect.bottom;
+            const RECT dockBounds = window_.GetBounds();
+            const bool verticalDock = config_.settings.dockEdge == DockEdge::Left
+                || config_.settings.dockEdge == DockEdge::Right;
+            const LONG dockSpanStart = static_cast<LONG>(std::lround(
+                (verticalDock ? dockBounds.top : dockBounds.left)
+                + frame_.panelX));
+            const LONG dockSpanEnd = static_cast<LONG>(std::lround(
+                (verticalDock ? dockBounds.top : dockBounds.left)
+                + frame_.panelX + frame_.panelWidth));
+            const bool alongDock = verticalDock
+                ? cursor.y >= dockSpanStart && cursor.y < dockSpanEnd
+                : cursor.x >= dockSpanStart && cursor.x < dockSpanEnd;
+            bool atRevealEdge = false;
+            switch (config_.settings.dockEdge)
+            {
+            case DockEdge::Top:
+                atRevealEdge = alongDock
+                    && cursor.y >= monitorRect.top
+                    && cursor.y < monitorRect.top + revealBand;
+                break;
+            case DockEdge::Left:
+                atRevealEdge = alongDock
+                    && cursor.x >= monitorRect.left
+                    && cursor.x < monitorRect.left + revealBand;
+                break;
+            case DockEdge::Right:
+                atRevealEdge = alongDock
+                    && cursor.x < monitorRect.right
+                    && cursor.x >= monitorRect.right - revealBand;
+                break;
+            case DockEdge::Bottom:
+            default:
+                atRevealEdge = alongDock
+                    && cursor.y >= monitorRect.bottom - revealBand
+                    && cursor.y < monitorRect.bottom;
+                break;
+            }
 
             if (inside || atRevealEdge)
             {
                 autoHideHidePending_ = false;
-                fullscreenVisibility_.target = 1.0f;
+                SetFullscreenVisibilityTarget(1.0f);
             }
             else
             {
@@ -1622,7 +1916,7 @@ void App::CheckPointer()
 
                 if (now >= hideDeadline_)
                 {
-                    fullscreenVisibility_.target = 0.0f;
+                    SetFullscreenVisibilityTarget(0.0f);
                     autoHideHidePending_ = false;
                 }
             }
@@ -1630,7 +1924,7 @@ void App::CheckPointer()
         else
         {
             autoHideHidePending_ = false;
-            fullscreenVisibility_.target = 1.0f;
+            SetFullscreenVisibilityTarget(1.0f);
         }
 
         if (fullscreenVisibility_.target != previousTarget)
@@ -1673,7 +1967,10 @@ void App::WakeAnimation()
 
 bool App::HitTest(float x, float y)
 {
-    if (modal_ || fullscreenActive_)
+    const D2D1_POINT_2F logical = dockTransform_.ToLogical(x, y);
+    x = logical.x;
+    y = logical.y;
+    if (modal_ || fullscreenActive_ || exitRequested_)
     {
         return false;
     }
@@ -1790,6 +2087,9 @@ void App::OnMouseMove(float x, float y)
         return;
     }
 
+    const D2D1_POINT_2F logical = dockTransform_.ToLogical(x, y);
+    x = logical.x;
+    y = logical.y;
     mouseX_ = x;
     mouseY_ = y;
 
@@ -1832,6 +2132,10 @@ void App::OnMouseButton(int button, bool down, float x, float y)
     {
         return;
     }
+
+    const D2D1_POINT_2F logical = dockTransform_.ToLogical(x, y);
+    x = logical.x;
+    y = logical.y;
 
     if (button == 0 && down)
     {
@@ -1915,7 +2219,8 @@ void App::FinishIconDrag(float x, float y)
     // A dragged icon released outside the dock is a request to remove it.
     // Ask every time, including an ordinary drag that simply leaves the
     // detection area, so an accidental flick cannot delete an entry.
-    if (!HitTest(x, y))
+    const D2D1_POINT_2F physical = dockTransform_.ToPhysical(x, y);
+    if (!HitTest(physical.x, physical.y))
     {
         const std::wstring message =
             L"确定要将“" + items_[static_cast<size_t>(from)]->name
@@ -2028,6 +2333,10 @@ void App::OnExternalDragEnter(const std::vector<std::wstring>& paths,
         return;
     }
 
+    const D2D1_POINT_2F logical = dockTransform_.ToLogical(x, y);
+    x = logical.x;
+    y = logical.y;
+
     if (externalDragActive_)
     {
         FinishExternalDrag(false, x, y);
@@ -2089,8 +2398,9 @@ void App::OnExternalDragMove(float x, float y)
         return;
     }
 
-    mouseX_ = x;
-    mouseY_ = y;
+    const D2D1_POINT_2F logical = dockTransform_.ToLogical(x, y);
+    mouseX_ = logical.x;
+    mouseY_ = logical.y;
     mouseActive_ = true;
     WakeAnimation();
     // Some OLE drag loops do not dispatch the dock window's timer messages
@@ -2115,7 +2425,7 @@ void App::OnExternalDrop(float x, float y)
     }
 
     OnExternalDragMove(x, y);
-    FinishExternalDrag(true, x, y);
+    FinishExternalDrag(true, mouseX_, mouseY_);
 }
 
 void App::FinishExternalDrag(bool commit, float x, float y)
@@ -2313,6 +2623,35 @@ void App::OnDestroy()
     PostQuitMessage(0);
 }
 
+void App::OnCloseRequested()
+{
+    RequestExit();
+}
+
+void App::RequestExit()
+{
+    if (exitRequested_)
+    {
+        return;
+    }
+
+    exitRequested_ = true;
+    mouseActive_ = false;
+    tooltipItemId_.clear();
+    tooltipPresence_ = 0.0f;
+    autoHideHidePending_ = false;
+    SetFullscreenVisibilityTarget(0.0f);
+    if (settings_.dialog)
+    {
+        PostMessageW(settings_.dialog, WM_CLOSE, 0, 0);
+    }
+    if (editor_.dialog)
+    {
+        PostMessageW(editor_.dialog, WM_CLOSE, 0, 0);
+    }
+    WakeAnimation();
+}
+
 void App::ShowContextMenu(int index, float x, float y)
 {
     HMENU menu = CreatePopupMenu();
@@ -2331,15 +2670,74 @@ void App::ShowContextMenu(int index, float x, float y)
     else
     {
         AppendMenuW(menu, MF_STRING, kMenuAdd, L"添加应用");
+
+        HMENU runningMenu = CreatePopupMenu();
+        const std::vector<std::wstring> runningApps =
+            FindRunningTaskbarApplications();
+        menuRunningCandidates_ = runningApps;
+        menuRunningBitmaps_.clear();
+        if (runningMenu)
+        {
+            if (runningApps.empty())
+            {
+                AppendMenuW(runningMenu, MF_STRING | MF_GRAYED,
+                            kMenuAddRunningBase, L"没有可添加的运行应用");
+            }
+            else
+            {
+                for (size_t i = 0; i < runningApps.size(); ++i)
+                {
+                    AppInfo info = icons_.Inspect(runningApps[i], 32);
+                    const std::wstring label = info.name.empty()
+                        ? GetShellDisplayName(runningApps[i]) : info.name;
+                    const UINT itemId = kMenuAddRunningBase
+                        + static_cast<UINT>(i);
+                    AppendMenuW(runningMenu, MF_STRING,
+                                itemId, label.empty()
+                                    ? runningApps[i].c_str() : label.c_str());
+
+                    HBITMAP bitmap = CreateMenuIconBitmap(
+                        icons_.Factory(), info.icon.Get());
+                    if (bitmap)
+                    {
+                        MENUITEMINFOW itemInfo{};
+                        itemInfo.cbSize = sizeof(itemInfo);
+                        itemInfo.fMask = MIIM_BITMAP;
+                        itemInfo.hbmpItem = bitmap;
+                        if (SetMenuItemInfoW(runningMenu, itemId, FALSE,
+                                             &itemInfo))
+                        {
+                            menuRunningBitmaps_.push_back(bitmap);
+                        }
+                        else
+                        {
+                            DeleteObject(bitmap);
+                        }
+                    }
+                }
+            }
+            AppendMenuW(menu, MF_POPUP,
+                        reinterpret_cast<UINT_PTR>(runningMenu),
+                        L"添加正在运行的应用");
+        }
+        else
+        {
+            AppendMenuW(menu, MF_STRING | MF_GRAYED,
+                        kMenuAddRunningBase, L"添加正在运行的应用");
+        }
+
         AppendMenuW(menu, MF_STRING, kMenuSettings, L"Dock 设置…");
+
+        // TrackPopupMenuEx owns the submenu once attached to the parent menu.
     }
 
     menuIndex_ = index;
 
     const RECT bounds = window_.GetBounds();
+    const D2D1_POINT_2F physical = dockTransform_.ToPhysical(x, y);
     POINT screen{};
-    screen.x = bounds.left + static_cast<LONG>(std::lround(x));
-    screen.y = bounds.top + static_cast<LONG>(std::lround(y));
+    screen.x = bounds.left + static_cast<LONG>(std::lround(physical.x));
+    screen.y = bounds.top + static_cast<LONG>(std::lround(physical.y));
 
     SetForegroundWindow(window_.Handle());
 
@@ -2353,6 +2751,12 @@ void App::ShowContextMenu(int index, float x, float y)
 
     DestroyMenu(menu);
 
+    for (HBITMAP bitmap : menuRunningBitmaps_)
+    {
+        DeleteObject(bitmap);
+    }
+    menuRunningBitmaps_.clear();
+
     // Makes sure the menu is fully dismissed even without an active window.
     PostMessageW(window_.Handle(), WM_NULL, 0, 0);
 
@@ -2360,6 +2764,7 @@ void App::ShowContextMenu(int index, float x, float y)
     {
         HandleMenuCommand(command);
     }
+    menuRunningCandidates_.clear();
 }
 
 void App::ShowTrayMenu()
@@ -2402,6 +2807,15 @@ void App::ShowTrayMenu()
 
 void App::HandleMenuCommand(UINT id)
 {
+    if (id >= kMenuAddRunningBase
+        && id < kMenuMonitorBase)
+    {
+        AddRunningApplication(static_cast<size_t>(id - kMenuAddRunningBase));
+        menuRunningCandidates_.clear();
+        menuIndex_ = -1;
+        return;
+    }
+
     switch (id)
     {
     case kMenuOpen:
@@ -2468,6 +2882,108 @@ void App::HandleMenuCommand(UINT id)
     }
 
     menuIndex_ = -1;
+}
+
+namespace
+{
+
+struct TaskbarWindowContext
+{
+    HWND dock = nullptr;
+    std::vector<std::wstring> paths;
+};
+
+BOOL CALLBACK CollectTaskbarWindow(HWND hwnd, LPARAM parameter)
+{
+    auto* context = reinterpret_cast<TaskbarWindowContext*>(parameter);
+    if (!context || !IsWindowVisible(hwnd) || hwnd == context->dock
+        || GetWindow(hwnd, GW_OWNER) != nullptr)
+    {
+        return TRUE;
+    }
+
+    const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if ((exStyle & WS_EX_TOOLWINDOW) != 0)
+    {
+        return TRUE;
+    }
+
+    wchar_t title[512]{};
+    if (GetWindowTextW(hwnd, title, ARRAYSIZE(title)) <= 0)
+    {
+        return TRUE;
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (processId == 0 || processId == GetCurrentProcessId())
+    {
+        return TRUE;
+    }
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                 FALSE, processId);
+    if (!process)
+    {
+        return TRUE;
+    }
+
+    wchar_t path[32768]{};
+    DWORD pathLength = ARRAYSIZE(path);
+    const BOOL gotPath = QueryFullProcessImageNameW(
+        process, 0, path, &pathLength);
+    CloseHandle(process);
+    if (!gotPath || pathLength == 0)
+    {
+        return TRUE;
+    }
+
+    std::wstring candidate(path, pathLength);
+    for (const auto& existing : context->paths)
+    {
+        if (EqualsIgnoreCase(existing, candidate))
+        {
+            return TRUE;
+        }
+    }
+
+    context->paths.push_back(std::move(candidate));
+    return TRUE;
+}
+
+} // namespace
+
+std::vector<std::wstring> App::FindRunningTaskbarApplications() const
+{
+    TaskbarWindowContext context;
+    context.dock = window_.Handle();
+    EnumWindows(CollectTaskbarWindow, reinterpret_cast<LPARAM>(&context));
+
+    std::vector<std::wstring> filtered;
+    for (const auto& path : context.paths)
+    {
+        const std::wstring id = MakeStableId(path);
+        const bool alreadyAdded = std::any_of(
+            items_.begin(), items_.end(), [&path, &id](const auto& item)
+            {
+                return item->id == id
+                    || EqualsIgnoreCase(item->targetPath, path)
+                    || EqualsIgnoreCase(item->resolvedPath, path);
+            });
+        if (!alreadyAdded)
+        {
+            filtered.push_back(path);
+        }
+    }
+    return filtered;
+}
+
+void App::AddRunningApplication(size_t index)
+{
+    if (index < menuRunningCandidates_.size())
+    {
+        AddApplication(menuRunningCandidates_[index]);
+    }
 }
 
 std::wstring App::PickFile(const wchar_t* title,
@@ -2675,6 +3191,7 @@ bool App::ShowSettings()
     InitCommonControlsEx(&controls);
 
     constexpr wchar_t kSettingsClass[] = L"LightDock_Settings";
+    constexpr wchar_t kSettingsPageClass[] = L"LightDock_SettingsPage";
 
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
@@ -2686,7 +3203,16 @@ bool App::ShowSettings()
 
     RegisterClassExW(&windowClass);
 
-    constexpr int width = 400;
+    WNDCLASSEXW pageClass{};
+    pageClass.cbSize = sizeof(pageClass);
+    pageClass.lpfnWndProc = &App::SettingsViewportProc;
+    pageClass.hInstance = instance_;
+    pageClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    pageClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    pageClass.lpszClassName = kSettingsPageClass;
+    RegisterClassExW(&pageClass);
+
+    constexpr int width = 424;
     constexpr int height = 390;
 
     // Scale the dialog for the monitor it will appear on.
@@ -2714,10 +3240,21 @@ bool App::ShowSettings()
     }
 
     settings_.dialog = dialog;
+    settingsWindowOpen_ = true;
+    autoHideHidePending_ = false;
+    if (!fullscreenActive_)
+    {
+        SetFullscreenVisibilityTarget(1.0f);
+    }
+    WakeAnimation();
     ShowWindow(dialog, SW_SHOW);
     SetForegroundWindow(dialog);
 
     RunModal(dialog, settings_.closed);
+
+    settingsWindowOpen_ = false;
+    autoHideHidePending_ = false;
+    WakeAnimation();
 
     if (settings_.dialog)
     {
@@ -2758,6 +3295,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
     enum : int
     {
         kIdMode = 201,
+        kIdDockEdge = 2200,
         kIdSize,
         kIdSpacing,
         kIdMagnify,
@@ -2778,12 +3316,14 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         kIdSettingsTabs = 254,
         kIdDockCorner = 255,
         kIdTooltipScale,
+        kIdTooltipCorner,
         kIdStrokeWidth,
         kIdStrokeOpacity,
         kIdOverallScale,
 
         kIdSave = 241,
         kIdCancel,
+        kIdRestoreDefaults,
     };
 
     auto sliderValue = [](HWND slider) -> int
@@ -2846,6 +3386,14 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             s.panelMode = selection == 1 ? PanelMode::Elastic
                 : selection == 2 ? PanelMode::Static : PanelMode::Fixed;
         }
+        if (settings_.edgeCombo)
+        {
+            const LRESULT selection = SendMessageW(
+                settings_.edgeCombo, CB_GETCURSEL, 0, 0);
+            s.dockEdge = selection == 1 ? DockEdge::Top
+                : selection == 2 ? DockEdge::Left
+                : selection == 3 ? DockEdge::Right : DockEdge::Bottom;
+        }
 
         s.iconSize = sliderValue(settings_.sizeSlider);
         s.iconSpacing = sliderValue(settings_.spacingSlider);
@@ -2855,13 +3403,14 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             && SendMessageW(settings_.autoHideBox, BM_GETCHECK, 0, 0)
                == BST_CHECKED;
         s.autoHideDelayMs = sliderValue(settings_.autoHideDelaySlider);
-        s.autoHideSpeed = static_cast<float>(sliderValue(
-            settings_.autoHideSpeedSlider)) / 100.0f;
+        s.autoHideAnimationMs = sliderValue(settings_.autoHideSpeedSlider);
         s.magnification =
             static_cast<float>(sliderValue(settings_.magnifySlider)) / 10.0f;
         s.cornerRadius = static_cast<float>(sliderValue(settings_.dockCornerSlider));
         s.tooltipScale = static_cast<float>(sliderValue(settings_.tooltipScaleSlider))
             / 100.0f;
+        s.tooltipCornerRadius = static_cast<float>(sliderValue(
+            settings_.tooltipCornerSlider));
 
         IconBackdrop& backdrop = s.backdrop;
 
@@ -2952,6 +3501,10 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         swprintf(text, 48, L"%d%%", sliderValue(settings_.tooltipScaleSlider));
         SetWindowTextW(settings_.tooltipScaleLabel, text);
 
+        swprintf(text, 48, L"%d px",
+                 sliderValue(settings_.tooltipCornerSlider));
+        SetWindowTextW(settings_.tooltipCornerLabel, text);
+
         swprintf(text, 48, L"%.1f px",
                  static_cast<double>(sliderValue(settings_.strokeWidthSlider)) / 10.0);
         SetWindowTextW(settings_.strokeWidthLabel, text);
@@ -2967,9 +3520,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                  sliderValue(settings_.autoHideDelaySlider));
         SetWindowTextW(settings_.autoHideDelayLabel, text);
 
-        swprintf(text, 48, L"%.1fx",
-                 static_cast<double>(sliderValue(
-                     settings_.autoHideSpeedSlider)) / 100.0);
+        swprintf(text, 48, L"%d ms",
+                 sliderValue(settings_.autoHideSpeedSlider));
         SetWindowTextW(settings_.autoHideSpeedLabel, text);
     };
 
@@ -3071,10 +3623,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         settings_.original = config_.settings;
 
         // --- dock behaviour -------------------------------------------------
-        makeLabel(L"背景栏模式", 22, 22, 90);
-        makeLabel(L"图标大小", 22, 62, 90);
-        makeLabel(L"图标间距", 22, 96, 90);
-        makeLabel(L"放大倍率", 22, 130, 90);
+        HWND modeCaption = makeLabel(L"背景栏模式", 22, 22, 90);
 
         settings_.modeCombo = CreateWindowExW(
             0, L"COMBOBOX", nullptr,
@@ -3101,39 +3650,67 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             setFont(settings_.modeCombo);
         }
 
+        HWND dockEdgeCaption = makeLabel(L"停靠位置", 22, 56, 90);
+        settings_.edgeCombo = CreateWindowExW(
+            0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
+            S(118), S(52), S(260), S(120), hwnd,
+            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdDockEdge)),
+            instance_, nullptr);
+        if (settings_.edgeCombo)
+        {
+            SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(L"底部"));
+            SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(L"顶部"));
+            SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(L"左侧（竖排）"));
+            SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(L"右侧（竖排）"));
+            SendMessageW(settings_.edgeCombo, CB_SETCURSEL,
+                config_.settings.dockEdge == DockEdge::Top ? 1
+                : config_.settings.dockEdge == DockEdge::Left ? 2
+                : config_.settings.dockEdge == DockEdge::Right ? 3 : 0, 0);
+            setFont(settings_.edgeCombo);
+        }
+
         settings_.sizeSlider = makeSlider(
-            kIdSize, 118, 54, 180, 32, 96, config_.settings.iconSize);
+            kIdSize, 118, 80, 180, 32, 96, config_.settings.iconSize);
         settings_.spacingSlider = makeSlider(
-            kIdSpacing, 118, 88, 180, 0, 32, config_.settings.iconSpacing);
+            kIdSpacing, 118, 108, 180, 0, 32, config_.settings.iconSpacing);
         settings_.magnifySlider = makeSlider(
-            kIdMagnify, 118, 122, 180, 10, 25,
+            kIdMagnify, 118, 136, 180, 10, 25,
             static_cast<int>(std::lround(config_.settings.magnification
                                          * 10.0f)));
 
-        settings_.sizeLabel = makeLabel(L"", 306, 62, 60);
-        settings_.spacingLabel = makeLabel(L"", 306, 96, 60);
-        settings_.magnifyLabel = makeLabel(L"", 306, 130, 60);
+        HWND sizeCaption = makeLabel(L"图标大小", 22, 88, 90);
+        HWND spacingCaption = makeLabel(L"图标间距", 22, 116, 90);
+        HWND magnifyCaption = makeLabel(L"放大倍率", 22, 144, 90);
+        settings_.sizeLabel = makeLabel(L"", 306, 88, 60);
+        settings_.spacingLabel = makeLabel(L"", 306, 116, 60);
+        settings_.magnifyLabel = makeLabel(L"", 306, 144, 60);
 
         settings_.autoHideBox = makeCheck(
-            L"自动隐藏/覆盖模式（不占用桌面下方空间）",
-            config_.settings.autoHide, kIdAutoHide, 22, 154, 340);
-        makeLabel(L"自动隐藏延迟", 22, 222, 120);
+            L"自动隐藏/覆盖模式（不占用停靠边空间）",
+            config_.settings.autoHide, kIdAutoHide, 22, 172, 340);
+        HWND autoHideDelayCaption =
+            makeLabel(L"收回延迟", 22, 212, 120);
         settings_.autoHideDelaySlider = makeSlider(
-            kIdFullscreenHideDelay, 158, 218, 140, 0, 5000,
+            kIdFullscreenHideDelay, 158, 208, 140, 0, 5000,
             config_.settings.autoHideDelayMs);
-        settings_.autoHideDelayLabel = makeLabel(L"", 306, 222, 65);
-        makeLabel(L"自动隐藏动画速度", 22, 260, 130);
+        settings_.autoHideDelayLabel = makeLabel(L"", 306, 212, 65);
+        HWND autoHideSpeedCaption =
+            makeLabel(L"自动隐藏动画时长", 22, 244, 130);
         settings_.autoHideSpeedSlider = makeSlider(
-            kIdFullscreenHideSpeed, 158, 256, 140, 50, 200,
-            static_cast<int>(std::lround(
-                config_.settings.autoHideSpeed * 100.0f)));
-        settings_.autoHideSpeedLabel = makeLabel(L"", 306, 260, 65);
-        makeLabel(L"整体大小", 22, 294, 100);
+            kIdFullscreenHideSpeed, 158, 240, 140, 0, 1000,
+            config_.settings.autoHideAnimationMs);
+        settings_.autoHideSpeedLabel = makeLabel(L"", 306, 244, 65);
+        HWND overallScaleCaption = makeLabel(L"整体大小", 22, 276, 100);
         settings_.overallScaleSlider = makeSlider(
-            kIdOverallScale, 158, 290, 140, 50, 150,
+            kIdOverallScale, 158, 272, 140, 50, 150,
             static_cast<int>(std::lround(
                 config_.settings.overallScale * 100.0f)));
-        settings_.overallScaleLabel = makeLabel(L"", 306, 294, 60);
+        settings_.overallScaleLabel = makeLabel(L"", 306, 276, 60);
 
         // --- panel background ------------------------------------------------
         CreateWindowExW(
@@ -3252,9 +3829,15 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         settings_.tooltipFadeLabel = makeLabel(L"", 306, 108, 70);
         makeLabel(L"气泡比例", 22, 136, 120);
         settings_.tooltipScaleSlider = makeSlider(
-            kIdTooltipScale, 158, 132, 140, 50, 150,
+            kIdTooltipScale, 158, 132, 140, 50, 188,
             static_cast<int>(std::lround(config_.settings.tooltipScale * 100.0f)));
         settings_.tooltipScaleLabel = makeLabel(L"", 306, 136, 60);
+        HWND tooltipCornerCaption = makeLabel(L"气泡圆角", 22, 202, 120);
+        settings_.tooltipCornerSlider = makeSlider(
+            kIdTooltipCorner, 158, 198, 140, 0, 40,
+            static_cast<int>(std::lround(
+                config_.settings.tooltipCornerRadius)));
+        settings_.tooltipCornerLabel = makeLabel(L"", 306, 202, 60);
 
         refreshLabels();
         syncBackgroundControls();
@@ -3265,7 +3848,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         settings_.tabControl = CreateWindowExW(
             0, WC_TABCONTROLW, L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
-            S(22), S(8), S(356), S(34), hwnd,
+            S(12), S(8), S(400), S(300), hwnd,
             reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdSettingsTabs)),
             instance_, nullptr);
         setFont(settings_.tabControl);
@@ -3286,11 +3869,42 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             // These controls are laid out in the behavior page's final
             // coordinates, below the original compact interaction rows.
             MarkDialogTabPage(settings_.autoHideDelaySlider, 0);
+            MarkDialogTabPage(settings_.autoHideBox, 0);
+            MarkDialogTabPage(dockEdgeCaption, 0);
+            MarkDialogTabPage(settings_.edgeCombo, 0);
             MarkDialogTabPage(settings_.autoHideDelayLabel, 0);
             MarkDialogTabPage(settings_.autoHideSpeedSlider, 0);
             MarkDialogTabPage(settings_.autoHideSpeedLabel, 0);
             MarkDialogTabPage(settings_.overallScaleSlider, 0);
             MarkDialogTabPage(settings_.overallScaleLabel, 0);
+            // These captions share their controls' final behavior-page
+            // coordinates; keep them on page 0 instead of letting the
+            // generic coordinate pass classify them as background-page
+            // labels and shift them out of view.
+            MarkDialogTabPage(autoHideDelayCaption, 0);
+            MarkDialogTabPage(autoHideSpeedCaption, 0);
+            MarkDialogTabPage(overallScaleCaption, 0);
+            // Keep every behavior-page control on its authored row. The
+            // generic page classifier shifts untagged controls down to make
+            // room for another page; that would collide with the newly added
+            // dock-edge selector and the auto-hide rows.
+            MarkDialogTabPage(modeCaption, 0);
+            MarkDialogTabPage(settings_.modeCombo, 0);
+            MarkDialogTabPage(sizeCaption, 0);
+            MarkDialogTabPage(spacingCaption, 0);
+            MarkDialogTabPage(magnifyCaption, 0);
+            MarkDialogTabPage(settings_.sizeSlider, 0);
+            MarkDialogTabPage(settings_.spacingSlider, 0);
+            MarkDialogTabPage(settings_.magnifySlider, 0);
+            MarkDialogTabPage(settings_.sizeLabel, 0);
+            MarkDialogTabPage(settings_.spacingLabel, 0);
+            MarkDialogTabPage(settings_.magnifyLabel, 0);
+            // These controls are already positioned in the bubble page's
+            // final coordinates; pre-tag them so the generic page classifier
+            // does not shift them through another tab's coordinate range.
+            MarkDialogTabPage(tooltipCornerCaption, 3);
+            MarkDialogTabPage(settings_.tooltipCornerSlider, 3);
+            MarkDialogTabPage(settings_.tooltipCornerLabel, 3);
 
             TagDialogChildrenContext tagContext{
                 hwnd, kIdSettingsTabs, kIdSave, kIdCancel,
@@ -3312,7 +3926,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                 if (wcscmp(caption, L"名称气泡") == 0
                     || wcscmp(caption, L"气泡不透明度") == 0
                     || wcscmp(caption, L"淡入淡出时长") == 0
-                    || wcscmp(caption, L"气泡比例") == 0)
+                    || wcscmp(caption, L"气泡比例") == 0
+                    || wcscmp(caption, L"气泡圆角") == 0)
                 {
                     MarkDialogTabPage(child, 3);
                 }
@@ -3335,6 +3950,143 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                 return TRUE;
             }, S(38));
             ShowDialogTabPage(hwnd, 0);
+            // The controls remain direct dialog children so existing page
+            // visibility and layout logic stays intact. Keep the enlarged
+            // tab control behind them as the framed page surface.
+            SetWindowPos(settings_.tabControl, HWND_BOTTOM, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+            HWND restore = CreateWindowExW(
+                0, L"BUTTON", L"恢复默认值",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+                S(20), S(330), S(120), S(28), hwnd,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(
+                    kIdRestoreDefaults)), instance_, nullptr);
+            setFont(restore);
+
+            // Give each tab a real clipped page surface. Previously the
+            // controls were siblings of the tab control, so rows outside its
+            // page could paint over the tab strip and footer instead of being
+            // clipped or scrollable.
+            RECT pageRect{};
+            GetClientRect(settings_.tabControl, &pageRect);
+            TabCtrl_AdjustRect(settings_.tabControl, FALSE, &pageRect);
+            POINT pageOrigin{pageRect.left, pageRect.top};
+            MapWindowPoints(settings_.tabControl, hwnd, &pageOrigin, 1);
+            const int pageHeight = std::max(
+                S(1), static_cast<int>(pageRect.bottom - pageRect.top)
+                    - S(42));
+            settings_.pageViewport = CreateWindowExW(
+                0, L"LightDock_SettingsPage", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
+                pageOrigin.x, pageOrigin.y,
+                pageRect.right - pageRect.left,
+                pageHeight,
+                hwnd, nullptr, instance_, this);
+
+            if (settings_.pageViewport)
+            {
+                std::vector<HWND> children;
+                EnumChildWindows(hwnd,
+                    [](HWND child, LPARAM parameter) -> BOOL
+                    {
+                        auto* controls = reinterpret_cast<std::vector<HWND>*>(
+                            parameter);
+                        controls->push_back(child);
+                        return TRUE;
+                    }, reinterpret_cast<LPARAM>(&children));
+
+                // Snapshot first, then reparent only direct dialog children.
+                // Mutating the hierarchy during EnumChildWindows can skip
+                // controls, while moving nested native control internals
+                // (such as combo-box list windows) breaks those controls.
+                for (HWND child : children)
+                {
+                    if (GetParent(child) != hwnd)
+                    {
+                        continue;
+                    }
+
+                    const int id = GetDlgCtrlID(child);
+                    if (child == settings_.tabControl
+                        || child == settings_.pageViewport
+                        || id == kIdSave || id == kIdCancel
+                        || id == kIdRestoreDefaults)
+                    {
+                        continue;
+                    }
+
+                    RECT rect{};
+                    GetWindowRect(child, &rect);
+                    MapWindowPoints(nullptr, hwnd,
+                        reinterpret_cast<POINT*>(&rect), 2);
+
+                    HANDLE tag = GetPropW(child, kDialogTabPageProperty);
+                    const int page = tag
+                        ? static_cast<int>(reinterpret_cast<INT_PTR>(tag)) - 1
+                        : 0;
+                    const int x = rect.left - pageOrigin.x;
+                    const int y = rect.top - pageOrigin.y;
+
+                    SetParent(child, settings_.pageViewport);
+                    SetWindowPos(child, nullptr, x, y, 0, 0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+                    settings_.scrollChildren.push_back({child, x, y, page});
+                    RECT childRect{};
+                    GetWindowRect(child, &childRect);
+                    MapWindowPoints(nullptr, settings_.pageViewport,
+                        reinterpret_cast<POINT*>(&childRect), 2);
+                    settings_.pageContentBottom[page] = std::max(
+                        settings_.pageContentBottom[page],
+                        static_cast<int>(childRect.bottom));
+                }
+
+                int pageTop[4] = {
+                    std::numeric_limits<int>::max(),
+                    std::numeric_limits<int>::max(),
+                    std::numeric_limits<int>::max(),
+                    std::numeric_limits<int>::max()};
+                for (const SettingsEditor::ScrollChild& child
+                     : settings_.scrollChildren)
+                {
+                    pageTop[child.page] = std::min(pageTop[child.page],
+                                                   child.y);
+                }
+                for (int page = 0; page < 4; ++page)
+                {
+                    if (pageTop[page] == std::numeric_limits<int>::max())
+                    {
+                        continue;
+                    }
+
+                    // The authored coordinates start above the tab page for
+                    // the behavior and bubble tabs. Preserve a clear top
+                    // inset so their first controls are fully visible.
+                    const int offset = std::max(0, S(8) - pageTop[page]);
+                    if (offset == 0)
+                    {
+                        continue;
+                    }
+
+                    settings_.pageContentBottom[page] += offset;
+                    for (SettingsEditor::ScrollChild& child
+                         : settings_.scrollChildren)
+                    {
+                        if (child.page != page)
+                        {
+                            continue;
+                        }
+
+                        child.y += offset;
+                        SetWindowPos(child.hwnd, nullptr, child.x, child.y,
+                            0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
+                }
+
+                ShowDialogTabPage(hwnd, 0);
+                SetSettingsPageScroll(0);
+            }
         }
 
         SetFocus(save);
@@ -3350,6 +4102,15 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         {
             ShowDialogTabPage(hwnd,
                 TabCtrl_GetCurSel(settings_.tabControl));
+            SetSettingsPageScroll(0);
+            // A tab switch changes which native controls are visible inside
+            // the clipped scroll viewport. Repaint the viewport and dialog
+            // synchronously so the new page is not left blank until input.
+            RedrawWindow(settings_.pageViewport, nullptr, nullptr,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME
+                    | RDW_UPDATENOW);
+            RedrawWindow(hwnd, nullptr, nullptr,
+                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;
         }
         break;
@@ -3390,7 +4151,72 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
     case WM_COMMAND:
         switch (LOWORD(wParam))
         {
+        case kIdRestoreDefaults:
+        {
+            const DockSettings defaults;
+            auto setSlider = [](HWND control, int value)
+            {
+                if (control)
+                {
+                    SendMessageW(control, TBM_SETPOS, TRUE, value);
+                }
+            };
+
+            SendMessageW(settings_.modeCombo, CB_SETCURSEL,
+                         defaults.panelMode == PanelMode::Fixed ? 0
+                         : defaults.panelMode == PanelMode::Elastic ? 1 : 2,
+                         0);
+            SendMessageW(settings_.edgeCombo, CB_SETCURSEL,
+                         defaults.dockEdge == DockEdge::Top ? 1
+                         : defaults.dockEdge == DockEdge::Left ? 2
+                         : defaults.dockEdge == DockEdge::Right ? 3 : 0, 0);
+            setSlider(settings_.sizeSlider, defaults.iconSize);
+            setSlider(settings_.spacingSlider, defaults.iconSpacing);
+            setSlider(settings_.magnifySlider,
+                      static_cast<int>(std::lround(defaults.magnification * 10.0f)));
+            SendMessageW(settings_.autoHideBox, BM_SETCHECK,
+                         defaults.autoHide ? BST_CHECKED : BST_UNCHECKED, 0);
+            setSlider(settings_.autoHideDelaySlider, defaults.autoHideDelayMs);
+            setSlider(settings_.autoHideSpeedSlider,
+                      defaults.autoHideAnimationMs);
+            setSlider(settings_.overallScaleSlider,
+                      static_cast<int>(std::lround(defaults.overallScale * 100.0f)));
+            setSlider(settings_.dockCornerSlider,
+                      static_cast<int>(std::lround(defaults.cornerRadius)));
+            setSlider(settings_.tooltipOpacitySlider,
+                      static_cast<int>(std::lround(defaults.tooltipOpacity * 100.0f)));
+            setSlider(settings_.tooltipFadeSlider,
+                      static_cast<int>(std::lround(defaults.tooltipFadeSeconds * 1000.0f)));
+            setSlider(settings_.tooltipScaleSlider,
+                      static_cast<int>(std::lround(defaults.tooltipScale * 100.0f)));
+            setSlider(settings_.tooltipCornerSlider,
+                      static_cast<int>(std::lround(defaults.tooltipCornerRadius)));
+            setSlider(settings_.cornerSlider,
+                      static_cast<int>(std::lround(defaults.backdrop.cornerRadius)));
+            setSlider(settings_.scaleSlider,
+                      static_cast<int>(std::lround(defaults.backdrop.iconScale * 100.0f)));
+            setSlider(settings_.opacitySlider,
+                      static_cast<int>(std::lround(defaults.backdrop.opacity * 100.0f)));
+            setSlider(settings_.strokeWidthSlider,
+                      static_cast<int>(std::lround(defaults.backdrop.strokeWidth * 10.0f)));
+            setSlider(settings_.strokeOpacitySlider,
+                      static_cast<int>(std::lround(defaults.backdrop.strokeOpacity * 100.0f)));
+            setSlider(settings_.bgOpacitySlider,
+                      static_cast<int>(std::lround(defaults.backgroundOpacity * 100.0f)));
+
+            settings_.topColor = RGB(255, 255, 255);
+            settings_.bottomColor = RGB(235, 235, 235);
+            SendMessageW(settings_.customBox, BM_SETCHECK,
+                         defaults.backgroundBottom.empty()
+                             ? BST_UNCHECKED : BST_CHECKED, 0);
+            refreshLabels();
+            syncBackgroundControls();
+            previewSettings();
+            return 0;
+        }
+
         case kIdMode:
+        case kIdDockEdge:
             if (HIWORD(wParam) == CBN_SELCHANGE)
             {
                 previewSettings();
@@ -3493,6 +4319,149 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+LRESULT CALLBACK App::SettingsViewportProc(HWND hwnd, UINT message,
+                                            WPARAM wParam, LPARAM lParam)
+{
+    App* self = nullptr;
+    if (message == WM_NCCREATE)
+    {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        self = static_cast<App*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(self));
+    }
+    else
+    {
+        self = reinterpret_cast<App*>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    }
+
+    if (self)
+    {
+        const LRESULT result = self->HandleSettingsViewportMessage(
+            hwnd, message, wParam, lParam);
+        if (result != std::numeric_limits<LRESULT>::min())
+        {
+            return result;
+        }
+    }
+
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT App::HandleSettingsViewportMessage(HWND hwnd, UINT message,
+                                            WPARAM wParam, LPARAM lParam)
+{
+    if (hwnd != settings_.pageViewport)
+    {
+        return std::numeric_limits<LRESULT>::min();
+    }
+
+    switch (message)
+    {
+    case WM_COMMAND:
+    case WM_HSCROLL:
+    case WM_NOTIFY:
+    case WM_DRAWITEM:
+    case WM_MEASUREITEM:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+        return SendMessageW(settings_.dialog, message, wParam, lParam);
+    default:
+        break;
+    }
+
+    if (message == WM_MOUSEWHEEL)
+    {
+        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        SetSettingsPageScroll(settings_.pageScrollPosition
+            - (delta / WHEEL_DELTA) * 48);
+        return 0;
+    }
+
+    if (message != WM_VSCROLL)
+    {
+        return std::numeric_limits<LRESULT>::min();
+    }
+
+    int position = settings_.pageScrollPosition;
+    const int page = settings_.tabControl
+        ? std::max(0, TabCtrl_GetCurSel(settings_.tabControl)) : 0;
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    const int maxPosition = std::max(
+        0, settings_.pageContentBottom[page]
+            - static_cast<int>(client.bottom - client.top));
+
+    switch (LOWORD(wParam))
+    {
+    case SB_LINEUP:       position -= 24; break;
+    case SB_LINEDOWN:     position += 24; break;
+    case SB_PAGEUP:       position -= client.bottom - client.top; break;
+    case SB_PAGEDOWN:     position += client.bottom - client.top; break;
+    case SB_TOP:          position = 0; break;
+    case SB_BOTTOM:       position = maxPosition; break;
+    case SB_THUMBPOSITION:
+    case SB_THUMBTRACK:
+    {
+        SCROLLINFO info{};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_TRACKPOS;
+        GetScrollInfo(hwnd, SB_VERT, &info);
+        position = info.nTrackPos;
+        break;
+    }
+    default:
+        return 0;
+    }
+
+    SetSettingsPageScroll(std::clamp(position, 0, maxPosition));
+    return 0;
+}
+
+void App::SetSettingsPageScroll(int position)
+{
+    if (!settings_.pageViewport || !settings_.tabControl)
+    {
+        return;
+    }
+
+    const int page = std::clamp(TabCtrl_GetCurSel(settings_.tabControl), 0, 3);
+    RECT client{};
+    GetClientRect(settings_.pageViewport, &client);
+    const int pageHeight = static_cast<int>(client.bottom - client.top);
+    const int maximum = std::max(
+        0, settings_.pageContentBottom[page] - pageHeight);
+    settings_.pageScrollPosition = std::clamp(position, 0, maximum);
+
+    SCROLLINFO info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    info.nMin = 0;
+    info.nMax = std::max(0, settings_.pageContentBottom[page] - 1);
+    info.nPage = static_cast<UINT>(std::max(0, pageHeight));
+    info.nPos = settings_.pageScrollPosition;
+    SetScrollInfo(settings_.pageViewport, SB_VERT, &info, TRUE);
+    ShowScrollBar(settings_.pageViewport, SB_VERT, maximum > 0);
+
+    for (const SettingsEditor::ScrollChild& child : settings_.scrollChildren)
+    {
+        if (child.page == page)
+        {
+            SetWindowPos(child.hwnd, nullptr, child.x,
+                child.y - settings_.pageScrollPosition, 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+        }
+    }
+
+    // Scrolling moves many native controls at once. Suppress their individual
+    // intermediate paints above, then invalidate both the exposed background
+    // and every child so no stale glyphs or slider fragments remain behind.
+    RedrawWindow(settings_.pageViewport, nullptr, nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME
+            | RDW_UPDATENOW);
+}
+
 LRESULT CALLBACK App::EditorProc(HWND hwnd, UINT message,
                                  WPARAM wParam, LPARAM lParam)
 {
@@ -3541,6 +4510,7 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
 
         kIdSave = 121,
         kIdCancel,
+        kIdRestoreDefaults,
         kIdEditorTabs = 131,
     };
 
@@ -3575,9 +4545,9 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
     /// The automatically derived gradient partner of a picked colour.
     auto derivedColor = [](COLORREF top) -> COLORREF
     {
-        return RGB(GetRValue(top) * 72 / 100,
-                   GetGValue(top) * 72 / 100,
-                   GetBValue(top) * 72 / 100);
+        return RGB(GetRValue(top) * 92 / 100,
+                   GetGValue(top) * 92 / 100,
+                   GetBValue(top) * 92 / 100);
     };
 
     /// Repaints the two swatches and their hex captions.
@@ -3948,12 +4918,12 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         makeButton(L"保存", kIdSave, 272, 368, 84);
         makeButton(L"取消", kIdCancel, 362, 368, 84);
 
-        HWND tabs = CreateWindowExW(
-            0, WC_TABCONTROLW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
-            S(20), S(6), S(414), S(34), hwnd,
-            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdEditorTabs)),
-            instance_, nullptr);
+            HWND tabs = CreateWindowExW(
+                0, WC_TABCONTROLW, L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
+                S(12), S(6), S(430), S(350), hwnd,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdEditorTabs)),
+                instance_, nullptr);
         setFont(tabs);
         if (tabs)
         {
@@ -3971,6 +4941,9 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             EnumChildWindows(hwnd, TagDialogChildren,
                              reinterpret_cast<LPARAM>(&tagContext));
             ShowDialogTabPage(hwnd, 0);
+            SetWindowPos(tabs, HWND_BOTTOM, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            makeButton(L"恢复默认值", kIdRestoreDefaults, 20, 368, 120);
         }
 
         SetFocus(editor_.nameEdit);
@@ -4030,6 +5003,28 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
     case WM_COMMAND:
         switch (LOWORD(wParam))
         {
+        case kIdRestoreDefaults:
+            SendMessageW(editor_.enableBox, BM_SETCHECK, BST_CHECKED, 0);
+            SendMessageW(editor_.scaleSlider, TBM_SETPOS, TRUE,
+                         static_cast<LPARAM>(std::lround(
+                             config_.settings.backdrop.iconScale * 100.0f)));
+            SendMessageW(editor_.secondBox, BM_SETCHECK, BST_UNCHECKED, 0);
+            SendMessageW(editor_.strokeOverrideBox, BM_SETCHECK,
+                         BST_UNCHECKED, 0);
+            SendMessageW(editor_.strokeOpacityBox, BM_SETCHECK,
+                         BST_UNCHECKED, 0);
+            SendMessageW(editor_.strokeOpacitySlider, TBM_SETPOS, TRUE,
+                         static_cast<LPARAM>(std::lround(
+                             config_.settings.backdrop.strokeOpacity * 100.0f)));
+            editor_.topColor = RGB(255, 255, 255);
+            editor_.bottomColor = RGB(235, 235, 235);
+            editor_.strokeColor = RGB(255, 255, 255);
+            refreshLabels();
+            syncAppearance();
+            refreshSwatches();
+            previewPlate();
+            return 0;
+
         case kIdEnable:
         case kIdSecond:
         case kIdStrokeOverride:

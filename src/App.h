@@ -7,6 +7,7 @@
 #include "DockItem.h"
 #include "DockLayout.h"
 #include "DockRenderer.h"
+#include "DockTransform.h"
 #include "DockWindow.h"
 #include "IconLoader.h"
 #include "ProcessMonitor.h"
@@ -43,6 +44,7 @@ public:
     void OnExternalDrop(float x, float y) override;
     void OnAnimationTimer() override;
     void OnDestroy() override;
+    void OnCloseRequested() override;
 
 private:
     enum : UINT
@@ -53,9 +55,10 @@ private:
         kMenuExit = 4,
         kMenuEdit = 5,
         kMenuSettings = 6,
+        kMenuAddRunningBase = 1000,
 
         /// Monitor entries start here; kMenuMonitorBase + index.
-        kMenuMonitorBase = 100,
+        kMenuMonitorBase = 50000,
     };
 
     /// One entry per attached display.
@@ -90,6 +93,7 @@ private:
     void RepositionWindow();
     void UpdateDockWindowPosition();
     void CheckFullscreen();
+    void SetFullscreenVisibilityTarget(float target);
     void CheckDisplayChange();
     void DetectRefreshRate();
 
@@ -106,12 +110,15 @@ private:
     void CheckPointer();
     float HoverStrength() const;
     void WakeAnimation();
+    void RequestExit();
 
     // --- input -------------------------------------------------------------
     int IndexAtPoint(float x, float y) const;
     void ShowContextMenu(int index, float x, float y);
     void ShowTrayMenu();
     void HandleMenuCommand(UINT id);
+    std::vector<std::wstring> FindRunningTaskbarApplications() const;
+    void AddRunningApplication(size_t index);
     std::wstring PickApplicationFile();
     void FinishIconDrag(float x, float y);
 
@@ -183,9 +190,22 @@ private:
     /// plus the global plate shape defaults.
     struct SettingsEditor
     {
+        struct ScrollChild
+        {
+            HWND hwnd = nullptr;
+            int x = 0;
+            int y = 0;
+            int page = 0;
+        };
+
         HWND dialog = nullptr;
         HWND modeCombo = nullptr;
+        HWND edgeCombo = nullptr;
         HWND tabControl = nullptr;
+        HWND pageViewport = nullptr;
+        std::vector<ScrollChild> scrollChildren;
+        int pageContentBottom[4]{};
+        int pageScrollPosition = 0;
         HWND sizeSlider = nullptr;
         HWND sizeLabel = nullptr;
         HWND spacingSlider = nullptr;
@@ -228,6 +248,8 @@ private:
         HWND tooltipFadeLabel = nullptr;
         HWND tooltipScaleSlider = nullptr;
         HWND tooltipScaleLabel = nullptr;
+        HWND tooltipCornerSlider = nullptr;
+        HWND tooltipCornerLabel = nullptr;
 
         COLORREF topColor = 0;
         COLORREF bottomColor = 0;
@@ -252,6 +274,11 @@ private:
                                          WPARAM wParam, LPARAM lParam);
     LRESULT HandleSettingsMessage(HWND hwnd, UINT message,
                                   WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK SettingsViewportProc(HWND hwnd, UINT message,
+                                                 WPARAM wParam, LPARAM lParam);
+    LRESULT HandleSettingsViewportMessage(HWND hwnd, UINT message,
+                                          WPARAM wParam, LPARAM lParam);
+    void SetSettingsPageScroll(int position);
 
     /// Runs a nested modal loop for `window` until `closed` flips.
     void RunModal(HWND window, const bool& closed);
@@ -262,6 +289,7 @@ private:
     DockConfig config_;
     LayoutMetrics metrics_;
     DockGeometry geometry_;
+    DockTransform dockTransform_;
     LayoutFrame frame_;
 
     std::vector<MonitorTarget> monitors_;
@@ -269,6 +297,8 @@ private:
 
     std::vector<std::unique_ptr<DockItem>> items_;
     std::vector<DockItem*> pointers_;
+    std::vector<std::wstring> menuRunningCandidates_;
+    std::vector<HBITMAP> menuRunningBitmaps_;
 
     DockWindow window_;
     DockRenderer renderer_;
@@ -300,9 +330,15 @@ private:
     /// Width of the panel in macOS "expand once" mode, animated.
     Spring panelWidth_;
     Spring fullscreenVisibility_;
+    float hideAnimationStart_ = 1.0f;
+    float hideAnimationTarget_ = 1.0f;
+    double hideAnimationElapsed_ = 0.0;
+    bool hideAnimationActive_ = false;
+    Spring hideIndicatorVisibility_;
     bool fullscreenActive_ = false;
     std::chrono::steady_clock::time_point hideDeadline_{};
     bool autoHideHidePending_ = false;
+    bool settingsWindowOpen_ = false;
 
     /// True while a modal editor is up: the dock stops reacting to the mouse.
     bool modal_ = false;
@@ -325,6 +361,7 @@ private:
     bool animating_ = false;
     bool needsRender_ = true;
     bool running_ = false;
+    bool exitRequested_ = false;
 
     float dpiScale_ = 1.0f;
     float dockScale_ = 1.0f;

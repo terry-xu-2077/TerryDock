@@ -7,7 +7,22 @@ namespace
 {
 
 const wchar_t kWindowClassName[] = L"LightDock_Window_Class";
+const wchar_t kHideIndicatorClassName[] = L"LightDock_Hide_Indicator";
 constexpr UINT kAppBarCallback = WM_APP + 8;
+
+LRESULT CALLBACK HideIndicatorWndProc(HWND hwnd, UINT message,
+                                      WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_NCHITTEST)
+    {
+        return HTTRANSPARENT;
+    }
+    if (message == WM_MOUSEACTIVATE)
+    {
+        return MA_NOACTIVATE;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
 
 using FnSetProcessDpiAwarenessContext = BOOL(WINAPI*)(HANDLE);
 using FnGetDpiForWindow = UINT(WINAPI*)(HWND);
@@ -123,6 +138,31 @@ void DockWindow::Destroy()
     RemoveTrayIcon();
     RemoveAppBarReservation();
 
+    if (hideIndicator_)
+    {
+        DestroyWindow(hideIndicator_);
+        hideIndicator_ = nullptr;
+    }
+
+    if (hideIndicatorDC_)
+    {
+        if (hideIndicatorOldBitmap_)
+        {
+            SelectObject(hideIndicatorDC_, hideIndicatorOldBitmap_);
+        }
+        if (hideIndicatorBitmap_)
+        {
+            DeleteObject(hideIndicatorBitmap_);
+        }
+        DeleteDC(hideIndicatorDC_);
+    }
+    hideIndicatorDC_ = nullptr;
+    hideIndicatorBitmap_ = nullptr;
+    hideIndicatorOldBitmap_ = nullptr;
+    hideIndicatorPixels_ = nullptr;
+    hideIndicatorWidth_ = 0;
+    hideIndicatorHeight_ = 0;
+
     if (hwnd_)
     {
         RevokeDragDrop(hwnd_);
@@ -131,7 +171,9 @@ void DockWindow::Destroy()
     }
 }
 
-bool DockWindow::SetAppBarReservation(const RECT& monitorRect, int height)
+bool DockWindow::SetAppBarReservation(const RECT& monitorRect,
+                                     DockEdge edge,
+                                     int thickness)
 {
     if (!hwnd_ || monitorRect.right <= monitorRect.left
         || monitorRect.bottom <= monitorRect.top)
@@ -139,11 +181,14 @@ bool DockWindow::SetAppBarReservation(const RECT& monitorRect, int height)
         return false;
     }
 
-    const int maxHeight = monitorRect.bottom - monitorRect.top;
-    height = (std::clamp)(height, 1, maxHeight);
+    const int maxThickness = (edge == DockEdge::Left || edge == DockEdge::Right)
+        ? monitorRect.right - monitorRect.left
+        : monitorRect.bottom - monitorRect.top;
+    thickness = (std::clamp)(thickness, 1, maxThickness);
 
     if (appBarRegistered_
-        && appBarHeight_ == height
+        && appBarHeight_ == thickness
+        && appBarEdge_ == edge
         && appBarMonitor_.left == monitorRect.left
         && appBarMonitor_.top == monitorRect.top
         && appBarMonitor_.right == monitorRect.right
@@ -168,15 +213,31 @@ bool DockWindow::SetAppBarReservation(const RECT& monitorRect, int height)
     APPBARDATA data{};
     data.cbSize = sizeof(data);
     data.hWnd = hwnd_;
-    data.uEdge = ABE_BOTTOM;
+    switch (edge)
+    {
+    case DockEdge::Top: data.uEdge = ABE_TOP; break;
+    case DockEdge::Left: data.uEdge = ABE_LEFT; break;
+    case DockEdge::Right: data.uEdge = ABE_RIGHT; break;
+    case DockEdge::Bottom: default: data.uEdge = ABE_BOTTOM; break;
+    }
     data.rc = monitorRect;
-    data.rc.top = data.rc.bottom - height;
+    auto applyThickness = [&]()
+    {
+        switch (edge)
+        {
+        case DockEdge::Top: data.rc.bottom = data.rc.top + thickness; break;
+        case DockEdge::Left: data.rc.right = data.rc.left + thickness; break;
+        case DockEdge::Right: data.rc.left = data.rc.right - thickness; break;
+        case DockEdge::Bottom: default: data.rc.top = data.rc.bottom - thickness; break;
+        }
+    };
+    applyThickness();
 
     appBarUpdating_ = true;
     SHAppBarMessage(ABM_QUERYPOS, &data);
     // QUERYPOS may move the proposed edge around another appbar. Keep the
     // requested thickness while honoring the shell-adjusted bottom edge.
-    data.rc.top = data.rc.bottom - height;
+    applyThickness();
     if (!SHAppBarMessage(ABM_SETPOS, &data))
     {
         appBarUpdating_ = false;
@@ -185,7 +246,8 @@ bool DockWindow::SetAppBarReservation(const RECT& monitorRect, int height)
     appBarUpdating_ = false;
 
     appBarMonitor_ = monitorRect;
-    appBarHeight_ = height;
+    appBarHeight_ = thickness;
+    appBarEdge_ = edge;
     return true;
 }
 
@@ -204,7 +266,164 @@ void DockWindow::RemoveAppBarReservation()
     SHAppBarMessage(ABM_REMOVE, &data);
     appBarUpdating_ = false;
     appBarHeight_ = 0;
+    appBarEdge_ = DockEdge::Bottom;
     appBarMonitor_ = RECT{};
+}
+
+void DockWindow::UpdateHideIndicator(bool visible, int x, int y,
+                                     int width, int height, BYTE opacity,
+                                     COLORREF color)
+{
+    if (!visible || opacity == 0 || width <= 0 || height <= 0 || !hwnd_)
+    {
+        if (hideIndicator_)
+        {
+            ShowWindow(hideIndicator_, SW_HIDE);
+        }
+        return;
+    }
+
+    if (!hideIndicator_)
+    {
+        HINSTANCE instance = GetModuleHandleW(nullptr);
+        WNDCLASSEXW windowClass{};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = HideIndicatorWndProc;
+        windowClass.hInstance = instance;
+        windowClass.lpszClassName = kHideIndicatorClassName;
+        RegisterClassExW(&windowClass);
+
+        hideIndicator_ = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW
+                | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+            kHideIndicatorClassName, L"LightDock hidden indicator",
+            WS_POPUP, x, y, width, height, nullptr, nullptr, instance, nullptr);
+        if (!hideIndicator_)
+        {
+            return;
+        }
+    }
+
+    if (width != hideIndicatorWidth_ || height != hideIndicatorHeight_
+        || !hideIndicatorDC_ || !hideIndicatorBitmap_ || !hideIndicatorPixels_)
+    {
+        if (hideIndicatorDC_)
+        {
+            if (hideIndicatorOldBitmap_)
+            {
+                SelectObject(hideIndicatorDC_, hideIndicatorOldBitmap_);
+            }
+            if (hideIndicatorBitmap_)
+            {
+                DeleteObject(hideIndicatorBitmap_);
+                hideIndicatorBitmap_ = nullptr;
+            }
+        }
+
+        if (!hideIndicatorDC_)
+        {
+            hideIndicatorDC_ = CreateCompatibleDC(nullptr);
+        }
+        if (!hideIndicatorDC_)
+        {
+            ShowWindow(hideIndicator_, SW_HIDE);
+            return;
+        }
+
+        BITMAPINFO bitmapInfo{};
+        bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bitmapInfo.bmiHeader.biWidth = width;
+        bitmapInfo.bmiHeader.biHeight = -height;
+        bitmapInfo.bmiHeader.biPlanes = 1;
+        bitmapInfo.bmiHeader.biBitCount = 32;
+        bitmapInfo.bmiHeader.biCompression = BI_RGB;
+        hideIndicatorBitmap_ = CreateDIBSection(
+            hideIndicatorDC_, &bitmapInfo, DIB_RGB_COLORS,
+            &hideIndicatorPixels_, nullptr, 0);
+        if (!hideIndicatorBitmap_ || !hideIndicatorPixels_)
+        {
+            ShowWindow(hideIndicator_, SW_HIDE);
+            return;
+        }
+        hideIndicatorOldBitmap_ = SelectObject(hideIndicatorDC_,
+                                               hideIndicatorBitmap_);
+        hideIndicatorWidth_ = width;
+        hideIndicatorHeight_ = height;
+    }
+
+    // Supersample the capsule edge to get smooth, per-pixel alpha at any DPI.
+    constexpr int samplesPerAxis = 4;
+    constexpr int sampleCount = samplesPerAxis * samplesPerAxis;
+    const double radius = static_cast<double>((std::min)(width, height)) * 0.5;
+    const double leftCenter = radius;
+    const double rightCenter = static_cast<double>(width) - radius;
+    const double topCenter = radius;
+    const double bottomCenter = static_cast<double>(height) - radius;
+    const BYTE red = GetRValue(color);
+    const BYTE green = GetGValue(color);
+    const BYTE blue = GetBValue(color);
+    auto* pixels = static_cast<std::uint32_t*>(hideIndicatorPixels_);
+    for (int py = 0; py < height; ++py)
+    {
+        for (int px = 0; px < width; ++px)
+        {
+            int covered = 0;
+            for (int sy = 0; sy < samplesPerAxis; ++sy)
+            {
+                const double sampleY = py + (sy + 0.5) / samplesPerAxis;
+                for (int sx = 0; sx < samplesPerAxis; ++sx)
+                {
+                    const double sampleX = px + (sx + 0.5) / samplesPerAxis;
+                    const double centerX = (std::clamp)(
+                        sampleX, leftCenter, rightCenter);
+                    const double centerY = (std::clamp)(
+                        sampleY, topCenter, bottomCenter);
+                    const double dx = sampleX - centerX;
+                    const double dy = sampleY - centerY;
+                    if (dx * dx + dy * dy <= radius * radius)
+                    {
+                        ++covered;
+                    }
+                }
+            }
+
+            const BYTE alpha = static_cast<BYTE>(
+                (static_cast<unsigned int>(opacity) * covered + sampleCount / 2)
+                / sampleCount);
+            const BYTE premulRed = static_cast<BYTE>(
+                (static_cast<unsigned int>(red) * alpha + 127) / 255);
+            const BYTE premulGreen = static_cast<BYTE>(
+                (static_cast<unsigned int>(green) * alpha + 127) / 255);
+            const BYTE premulBlue = static_cast<BYTE>(
+                (static_cast<unsigned int>(blue) * alpha + 127) / 255);
+            pixels[static_cast<size_t>(py) * width + px]
+                = static_cast<std::uint32_t>(premulBlue)
+                | (static_cast<std::uint32_t>(premulGreen) << 8)
+                | (static_cast<std::uint32_t>(premulRed) << 16)
+                | (static_cast<std::uint32_t>(alpha) << 24);
+        }
+    }
+
+    // Insert immediately below the dock so the dock naturally covers the
+    // marker as it slides back into view. It remains click-through.
+    SetWindowPos(hideIndicator_, hwnd_, x, y, width, height,
+                 SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    POINT destination{x, y};
+    POINT source{0, 0};
+    SIZE size{width, height};
+    BLENDFUNCTION blend{};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+    if (UpdateLayeredWindow(hideIndicator_, nullptr, &destination, &size,
+                            hideIndicatorDC_, &source, 0, &blend, ULW_ALPHA))
+    {
+        ShowWindow(hideIndicator_, SW_SHOWNOACTIVATE);
+    }
+    else
+    {
+        ShowWindow(hideIndicator_, SW_HIDE);
+    }
 }
 
 void DockWindow::SetBounds(int x, int y, int width, int height)
@@ -478,7 +697,14 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return TRUE;
 
     case WM_CLOSE:
-        DestroyWindow(hwnd_);
+        if (host_)
+        {
+            host_->OnCloseRequested();
+        }
+        else
+        {
+            DestroyWindow(hwnd_);
+        }
         return 0;
 
     case WM_DESTROY:

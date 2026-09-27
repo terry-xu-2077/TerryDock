@@ -14,6 +14,7 @@ class DockItem;
 struct LayoutMetrics
 {
     float dpiScale = 1.0f;
+    bool anchorIconsAtTop = false;
 
     float iconSize = 64.0f;
     float spacing = 10.0f;
@@ -83,9 +84,11 @@ struct SurfaceMargins
 
 LayoutMetrics MakeMetrics(const DockSettings& settings, float dpiScale);
 
-DockGeometry ComputeGeometry(int itemCount, const LayoutMetrics& metrics);
+DockGeometry ComputeGeometry(int itemCount, const LayoutMetrics& metrics,
+                             DockEdge edge = DockEdge::Bottom);
 
-SurfaceMargins ComputeMargins(const LayoutMetrics& metrics);
+SurfaceMargins ComputeMargins(const LayoutMetrics& metrics,
+                              DockEdge edge = DockEdge::Bottom);
 
 /// Writes the scale target of every item from the cursor position.
 ///

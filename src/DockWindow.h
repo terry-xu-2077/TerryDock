@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Common.h"
+#include "Config.h"
 
 #include <shellapi.h>
 
@@ -40,6 +41,7 @@ public:
         virtual void OnExternalDragLeave() = 0;
         virtual void OnExternalDrop(float x, float y) = 0;
         virtual void OnAnimationTimer() = 0;
+        virtual void OnCloseRequested() = 0;
         virtual void OnDestroy() = 0;
     };
 
@@ -60,8 +62,12 @@ public:
     HWND Handle() const { return hwnd_; }
 
     void SetBounds(int x, int y, int width, int height);
-    bool SetAppBarReservation(const RECT& monitorRect, int height);
+    bool SetAppBarReservation(const RECT& monitorRect,
+                             DockEdge edge,
+                             int thickness);
     void RemoveAppBarReservation();
+    void UpdateHideIndicator(bool visible, int x, int y, int width, int height,
+                             BYTE opacity, COLORREF color);
     RECT GetBounds() const;
 
     int GetDpi() const { return dpi_; }
@@ -96,13 +102,21 @@ private:
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
 
     HWND hwnd_ = nullptr;
+    HWND hideIndicator_ = nullptr;
     Host* host_ = nullptr;
     HICON trayIcon_ = nullptr;
     bool trayAdded_ = false;
     bool appBarRegistered_ = false;
     bool appBarUpdating_ = false;
+    int hideIndicatorWidth_ = 0;
+    int hideIndicatorHeight_ = 0;
+    HDC hideIndicatorDC_ = nullptr;
+    HBITMAP hideIndicatorBitmap_ = nullptr;
+    HGDIOBJ hideIndicatorOldBitmap_ = nullptr;
+    void* hideIndicatorPixels_ = nullptr;
     RECT appBarMonitor_{};
     int appBarHeight_ = 0;
+    DockEdge appBarEdge_ = DockEdge::Bottom;
     int dpi_ = 96;
     ULONG refCount_ = 1;
 

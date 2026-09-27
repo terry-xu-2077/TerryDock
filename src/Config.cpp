@@ -3,6 +3,8 @@
 #include "Json.h"
 #include "Utils.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace ld
@@ -85,11 +87,19 @@ DockConfig Config::Load()
             v->AsInt(config.settings.autoHideDelayMs), 0, 5000);
     }
 
-    if (const json::Value* v = root.Find("autoHideSpeed"))
+    if (const json::Value* v = root.Find("autoHideAnimationMs"))
     {
-        config.settings.autoHideSpeed = ClampF(
-            static_cast<float>(v->AsDouble(config.settings.autoHideSpeed)),
-            0.5f, 2.0f);
+        config.settings.autoHideAnimationMs = std::clamp(
+            v->AsInt(config.settings.autoHideAnimationMs), 0, 1000);
+    }
+    else if (const json::Value* v = root.Find("autoHideSpeed"))
+    {
+        // Migrate the old spring-frequency multiplier to an intuitive
+        // duration while retaining the closest approximate feel.
+        const float legacy = ClampF(
+            static_cast<float>(v->AsDouble(0.64)), 0.1f, 2.0f);
+        config.settings.autoHideAnimationMs = std::clamp(
+            static_cast<int>(std::lround(60.0f / legacy)), 0, 1000);
     }
 
     if (const json::Value* v = root.Find("magnification"))
@@ -112,11 +122,25 @@ DockConfig Config::Load()
             0.05f, 1.0f);
     }
 
-    if (const json::Value* v = root.Find("tooltipScale"))
+    if (const json::Value* v = root.Find("tooltipScaleV2"))
     {
         config.settings.tooltipScale = ClampF(
             static_cast<float>(v->AsDouble(config.settings.tooltipScale)),
-            0.5f, 1.5f);
+            0.5f, 2.0f);
+    }
+    else if (const json::Value* v = root.Find("tooltipScale"))
+    {
+        // Normalize the user's previous 80% setting to the new 100% baseline.
+        config.settings.tooltipScale = ClampF(
+            static_cast<float>(v->AsDouble(0.8)) / 0.8f,
+            0.5f, 2.0f);
+    }
+
+    if (const json::Value* v = root.Find("tooltipCornerRadius"))
+    {
+        config.settings.tooltipCornerRadius = ClampF(
+            static_cast<float>(v->AsDouble(
+                config.settings.tooltipCornerRadius)), 0.0f, 40.0f);
     }
 
     if (const json::Value* background = root.Find("background"))
@@ -221,6 +245,19 @@ DockConfig Config::Load()
         {
             config.settings.panelMode = PanelMode::Fixed;
         }
+    }
+
+    if (const json::Value* v = root.Find("dockEdge"))
+    {
+        const std::wstring edge = Utf8ToWide(v->AsString("bottom"));
+        if (EqualsIgnoreCase(edge, L"top"))
+            config.settings.dockEdge = DockEdge::Top;
+        else if (EqualsIgnoreCase(edge, L"left"))
+            config.settings.dockEdge = DockEdge::Left;
+        else if (EqualsIgnoreCase(edge, L"right"))
+            config.settings.dockEdge = DockEdge::Right;
+        else
+            config.settings.dockEdge = DockEdge::Bottom;
     }
 
     if (const json::Value* v = root.Find("monitor"))
@@ -353,16 +390,19 @@ bool Config::Save(const DockConfig& config)
              json::Value(static_cast<double>(config.settings.overallScale)));
     root.Set("autoHide", json::Value(config.settings.autoHide));
     root.Set("autoHideDelayMs", json::Value(config.settings.autoHideDelayMs));
-    root.Set("autoHideSpeed",
-             json::Value(static_cast<double>(config.settings.autoHideSpeed)));
+    root.Set("autoHideAnimationMs",
+             json::Value(config.settings.autoHideAnimationMs));
     root.Set("magnification",
              json::Value(static_cast<double>(config.settings.magnification)));
     root.Set("tooltipOpacity",
              json::Value(static_cast<double>(config.settings.tooltipOpacity)));
     root.Set("tooltipFadeSeconds",
              json::Value(static_cast<double>(config.settings.tooltipFadeSeconds)));
-    root.Set("tooltipScale",
+    root.Set("tooltipScaleV2",
              json::Value(static_cast<double>(config.settings.tooltipScale)));
+    root.Set("tooltipCornerRadius",
+             json::Value(static_cast<double>(
+                 config.settings.tooltipCornerRadius)));
 
     json::Value background(json::Value::Type::Object);
     background.Set("opacity",
@@ -410,6 +450,16 @@ bool Config::Save(const DockConfig& config)
     }
 
     root.Set("panelMode", json::Value(panelMode));
+
+    const char* dockEdge = "bottom";
+    switch (config.settings.dockEdge)
+    {
+    case DockEdge::Top: dockEdge = "top"; break;
+    case DockEdge::Left: dockEdge = "left"; break;
+    case DockEdge::Right: dockEdge = "right"; break;
+    case DockEdge::Bottom: default: break;
+    }
+    root.Set("dockEdge", json::Value(dockEdge));
 
     if (!config.settings.monitor.empty())
     {

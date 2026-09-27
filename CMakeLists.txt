@@ -39,6 +39,7 @@ set(LIGHTDOCK_HEADERS
     src/DockWindow.h
     src/DockRenderer.h
     src/DockLayout.h
+    src/DockTransform.h
     src/Animation.h
     src/DockItem.h
     src/AppLauncher.h

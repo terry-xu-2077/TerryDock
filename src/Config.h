@@ -28,10 +28,10 @@ struct PlateStyle
     bool customBottom = false;
 
     /// "#RGB", "#RRGGBB" or "#RRGGBBAA".
-    std::wstring top = L"#3B4252";
+    std::wstring top = L"#FFFFFF";
 
     /// Only used while `customBottom` is true.
-    std::wstring bottom = L"#22262F";
+    std::wstring bottom = L"#EBEBEB";
 
     /// Optional per-icon override for the plate's inner rim. Empty uses white.
     std::wstring strokeColor;
@@ -76,6 +76,15 @@ enum class PanelMode
     Static,
 };
 
+/// Screen edge where the dock is anchored.
+enum class DockEdge
+{
+    Bottom,
+    Top,
+    Left,
+    Right,
+};
+
 /// Shared plate parameters. Deliberately has no colours: the plate colour
 /// belongs to each icon (the global layer only shapes the tiles), and no
 /// on/off switch either — that lives on every icon itself.
@@ -84,35 +93,37 @@ struct IconBackdrop
     /// Corner radius in design pixels (scaled by DPI like everything else).
     float cornerRadius = 12.0f;
 
-    float opacity = 0.92f;
-    float strokeWidth = 2.0f;
-    float strokeOpacity = 1.0f;
+    float opacity = 1.0f;
+    float strokeWidth = 1.5f;
+    float strokeOpacity = 0.45f;
 
     /// How much of the plate the icon itself occupies by default. Below 1.0
     /// the plate shows as a border around the icon.
-    float iconScale = 0.86f;
+    float iconScale = 0.8f;
 };
 
 struct DockSettings
 {
-    int   iconSize = 52;
-    int   iconSpacing = 14;
-    float overallScale = 1.0f;
+    int   iconSize = 50;
+    int   iconSpacing = 8;
+    float overallScale = 0.89f;
     /// When enabled, the dock overlays the desktop instead of reserving
     /// its bottom strip. Fullscreen apps hide the dock regardless.
     bool autoHide = false;
     int autoHideDelayMs = 250;
-    float autoHideSpeed = 1.0f;
+    int autoHideAnimationMs = 60;
     float magnification = 1.6f;
-    float tooltipOpacity = 0.92f;
-    float tooltipFadeSeconds = 0.18f;
+    float tooltipOpacity = 0.95f;
+    float tooltipFadeSeconds = 0.05f;
     float tooltipScale = 1.0f;
+    float tooltipCornerRadius = 10.0f;
 
     IconBackdrop backdrop;
 
     PanelMode panelMode = PanelMode::Fixed;
+    DockEdge dockEdge = DockEdge::Bottom;
 
-    float backgroundOpacity = 0.60f;
+    float backgroundOpacity = 0.39f;
     float cornerRadius = 18.0f;
     float borderOpacity = 0.45f;
     float shadowOpacity = 0.30f;
@@ -120,7 +131,7 @@ struct DockSettings
     /// Panel background. Empty colours keep the built-in white look;
     /// when both are set the panel blends vertically from `backgroundTop`
     /// to `backgroundBottom`.
-    std::wstring backgroundTop;
+    std::wstring backgroundTop = L"#FFFFFF";
     std::wstring backgroundBottom;
 
     /// Device name of the display the dock lives on. Empty = primary.
