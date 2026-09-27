@@ -190,6 +190,7 @@ void UpdateScaleTargets(std::vector<DockItem*>& items,
     // would re-introduce the very step the easing removes — a fast sideways
     // flick would collapse the row in a single frame.
     const float strength = presence;
+    constexpr float kMinimumVisibleScaleChange = 0.015f;
 
     for (DockItem* item : items)
     {
@@ -205,8 +206,13 @@ void UpdateScaleTargets(std::vector<DockItem*>& items,
         // measuring from the base would leave them unable to magnify at all.
         const float distance = mouseX - item->centerX;
         const float falloff = std::exp(-(distance * distance) / twoSigmaSq);
+        const float scaleChange = maxExtra * falloff * strength;
 
-        item->scaleSpring.target = 1.0f + maxExtra * falloff * strength;
+        // Gaussian falloff has infinite tails. Ignore changes too small to
+        // see so distant icons remain exactly at their resting scale instead
+        // of subtly moving the fixed layout on every hover frame.
+        item->scaleSpring.target = scaleChange < kMinimumVisibleScaleChange
+            ? 1.0f : 1.0f + scaleChange;
     }
 }
 

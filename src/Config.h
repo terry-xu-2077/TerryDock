@@ -116,6 +116,7 @@ struct DockSettings
     float tooltipOpacity = 0.95f;
     float tooltipFadeSeconds = 0.05f;
     float tooltipScale = 1.0f;
+    bool englishLanguage = false;
     float tooltipCornerRadius = 10.0f;
 
     IconBackdrop backdrop;

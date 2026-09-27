@@ -136,6 +136,11 @@ DockConfig Config::Load()
             0.5f, 2.0f);
     }
 
+    if (const json::Value* v = root.Find("englishLanguage"))
+    {
+        config.settings.englishLanguage = v->AsBool(false);
+    }
+
     if (const json::Value* v = root.Find("tooltipCornerRadius"))
     {
         config.settings.tooltipCornerRadius = ClampF(
@@ -400,6 +405,8 @@ bool Config::Save(const DockConfig& config)
              json::Value(static_cast<double>(config.settings.tooltipFadeSeconds)));
     root.Set("tooltipScaleV2",
              json::Value(static_cast<double>(config.settings.tooltipScale)));
+    root.Set("englishLanguage",
+             json::Value(config.settings.englishLanguage));
     root.Set("tooltipCornerRadius",
              json::Value(static_cast<double>(
                  config.settings.tooltipCornerRadius)));

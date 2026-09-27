@@ -55,6 +55,9 @@ private:
         kMenuExit = 4,
         kMenuEdit = 5,
         kMenuSettings = 6,
+        kMenuLanguageChinese = 7,
+        kMenuLanguageEnglish = 8,
+        kMenuAbout = 9,
         kMenuAddRunningBase = 1000,
 
         /// Monitor entries start here; kMenuMonitorBase + index.
@@ -117,6 +120,7 @@ private:
     void ShowContextMenu(int index, float x, float y);
     void ShowTrayMenu();
     void HandleMenuCommand(UINT id);
+    const wchar_t* UiText(const wchar_t* chinese) const;
     std::vector<std::wstring> FindRunningTaskbarApplications() const;
     void AddRunningApplication(size_t index);
     std::wstring PickApplicationFile();
@@ -204,7 +208,7 @@ private:
         HWND tabControl = nullptr;
         HWND pageViewport = nullptr;
         std::vector<ScrollChild> scrollChildren;
-        int pageContentBottom[4]{};
+        int pageContentBottom[5]{};
         int pageScrollPosition = 0;
         HWND sizeSlider = nullptr;
         HWND sizeLabel = nullptr;

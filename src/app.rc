@@ -4,3 +4,38 @@
 // 1 24  -> CREATEPROCESS_MANIFEST_RESOURCE_ID / RT_MANIFEST
 1 24 "app.manifest"
 IDI_LIGHTDOCK ICON "图标模板01.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "TerryXu and ChatGPT\0"
+            VALUE "FileDescription", "TerryDock desktop dock\0"
+            VALUE "FileVersion", "1.0.0.0\0"
+            VALUE "InternalName", "LightDock\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 TerryXu and ChatGPT\0"
+            VALUE "OriginalFilename", "LightDock.exe\0"
+            VALUE "ProductName", "TerryDock\0"
+            VALUE "ProductVersion", "1.0.0.0\0"
+            VALUE "Authors", "TerryXu and ChatGPT\0"
+            VALUE "Comments", "Contact: 851858419@.com\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

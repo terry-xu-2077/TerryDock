@@ -1261,10 +1261,8 @@ void App::Tick(double dt)
         // of the current scales, so the icons always stay inside the panel.
         // Driven by the same eased presence value as the icons, so leaving
         // the dock never pops.
-        // Fixed-panel expansion is independent of the magnification setting.
-        // Its extra width is derived only from the unscaled icon dimensions;
-        // 0.42 preserves the previous default look (1.6x magnification with
-        // 70% of its available stretch) without coupling the two controls.
+        // Fixed-panel expansion stays independent of the magnification
+        // setting. The extra width is based only on unscaled icon dimensions.
         constexpr float kFixedPanelStretchPerIcon = 0.42f;
         const float fixedStretch = static_cast<float>(items_.size())
             * metrics_.iconSize * kFixedPanelStretchPerIcon;
@@ -1354,7 +1352,14 @@ void App::Tick(double dt)
     }
 
     int tooltipIndex = -1;
-    if (draggingIndex_ < 0 && mouseActive_)
+    // During an auto-hide reveal, the dock moves underneath a stationary
+    // pointer. A transient hit on an icon must not start a tooltip that will
+    // immediately fade when the moving dock clears the pointer. Wait until
+    // the reveal has settled, then evaluate the ordinary icon hover.
+    const bool dockReadyForTooltip = !config_.settings.autoHide
+        || (fullscreenVisibility_.target >= 0.999f
+            && fullscreenVisibility_.value >= 0.98f);
+    if (draggingIndex_ < 0 && mouseActive_ && dockReadyForTooltip)
     {
         tooltipIndex = IndexAtPoint(mouseX_, mouseY_);
     }
@@ -2652,6 +2657,116 @@ void App::RequestExit()
     WakeAnimation();
 }
 
+const wchar_t* App::UiText(const wchar_t* chinese) const
+{
+    if (!chinese || !config_.settings.englishLanguage)
+    {
+        return chinese;
+    }
+
+    struct Translation { const wchar_t* zh; const wchar_t* en; };
+    static constexpr Translation translations[] =
+    {
+        {L"打开", L"Open"},
+        {L"图标配置…", L"Icon settings..."},
+        {L"图标配置 — ", L"Icon settings — "},
+        {L"从 Dock 移除", L"Remove from Dock"},
+        {L"添加应用", L"Add application"},
+        {L"没有可添加的运行应用", L"No running apps to add"},
+        {L"添加正在运行的应用", L"Add running applications"},
+        {L"Dock 设置…", L"Dock settings..."},
+        {L"退出", L"Quit"},
+        {L"显示器", L"Display"},
+        {L"Chinese", L"Chinese"},
+        {L"English", L"English"},
+        {L"行为", L"Behavior"},
+        {L"背景栏", L"Dock background"},
+        {L"图标", L"Icons"},
+        {L"气泡", L"Tooltips"},
+        {L"关于", L"About"},
+        {L"背景栏模式", L"Panel mode"},
+        {L"固定宽度（进入时展开）", L"Fixed width (expand on hover)"},
+        {L"弹性跟随图标", L"Elastic (follows icons)"},
+        {L"无动画（名称气泡正常）", L"No animation (tooltips enabled)"},
+        {L"停靠位置", L"Dock position"},
+        {L"底部", L"Bottom"},
+        {L"顶部", L"Top"},
+        {L"左侧（竖排）", L"Left (vertical)"},
+        {L"右侧（竖排）", L"Right (vertical)"},
+        {L"图标大小", L"Icon size"},
+        {L"图标间距", L"Icon spacing"},
+        {L"放大倍率", L"Magnification"},
+        {L"自动隐藏/覆盖模式（不占用桌面下方空间）", L"Auto-hide/overlay (does not reserve screen space)"},
+        {L"自动隐藏/覆盖模式", L"Auto-hide/overlay mode"},
+        {L"收回延迟", L"Hide delay"},
+        {L"自动隐藏动画时长", L"Auto-hide animation duration"},
+        {L"整体大小", L"Overall size"},
+        {L"背景栏外观", L"Dock background appearance"},
+        {L"自定义背景渐变", L"Custom background gradient"},
+        {L"背景栏不透明度", L"Background opacity"},
+        {L"背景栏圆角", L"Background corner radius"},
+        {L"顶部颜色", L"Top color"},
+        {L"底部颜色", L"Bottom color"},
+        {L"全局图标设置", L"Global icon settings"},
+        {L"圆角半径", L"Corner radius"},
+        {L"图标在底板内的比例", L"Icon scale inside plate"},
+        {L"不透明度", L"Opacity"},
+        {L"内描边粗细", L"Inner stroke width"},
+        {L"描边不透明度", L"Stroke opacity"},
+        {L"名称气泡", L"Name tooltip"},
+        {L"气泡不透明度", L"Tooltip opacity"},
+        {L"淡入淡出时长", L"Fade duration"},
+        {L"气泡比例", L"Tooltip scale"},
+        {L"气泡圆角", L"Tooltip corner radius"},
+        {L"保存", L"Save"},
+        {L"取消", L"Cancel"},
+        {L"固定宽度（进入时展开）", L"Fixed width (expand on hover)"},
+        {L"弹性跟随图标", L"Elastic (follows icons)"},
+        {L"无动画（名称气泡正常）", L"No animation (tooltips enabled)"},
+        {L"底部", L"Bottom"},
+        {L"顶部", L"Top"},
+        {L"左侧（竖排）", L"Left (vertical)"},
+        {L"右侧（竖排）", L"Right (vertical)"},
+        {L"名称", L"Name"},
+        {L"程序", L"Application"},
+        {L"附加命令", L"Arguments"},
+        {L"图标文件", L"Icon file"},
+        {L"浏览…", L"Browse..."},
+        {L"来自所选程序", L"From selected application"},
+        {L"选择程序", L"Select application"},
+        {L"选择图标", L"Select icon"},
+        {L"作者：TerryXu 和 ChatGPT", L"Authors: TerryXu and ChatGPT"},
+        {L"联系邮箱：851858419@.com", L"Contact: 851858419@.com"},
+        {L"简介：LightDock 是一款轻量、可自定义的 Windows 桌面停靠栏，让常用应用触手可及。\n支持将停靠栏放置在屏幕的上、下、左、右侧，并可设置自动隐藏、展开动画和图标悬停效果。\n你还可以调整图标大小、间距、背景渐变、圆角和透明度，打造适合自己的桌面风格。", L"About: LightDock is a lightweight, customizable Windows desktop dock that keeps your favorite apps within easy reach.\nPlace it along any screen edge and tailor its auto-hide behavior, reveal animation, and icon hover effects.\nAdjust icon size and spacing, background gradients, corner radius, and opacity to make your desktop your own."},
+        {L"语言", L"Language"},
+        {L"Dock 设置", L"Dock settings"},
+        {L"行为", L"Behavior"},
+        {L"背景栏", L"Dock background"},
+        {L"图标", L"Icons"},
+        {L"气泡", L"Tooltips"},
+        {L"快捷方式", L"Shortcut"},
+        {L"图标外观", L"Icon appearance"},
+        {L"自动隐藏/覆盖", L"Auto-hide/overlay"},
+        {L"自定义背景渐变", L"Custom background gradient"},
+        {L"启用圆角底板", L"Enable rounded icon plate"},
+        {L"自定义第二颜色（渐变）", L"Custom second color (gradient)"},
+        {L"自定义描边颜色", L"Custom stroke color"},
+        {L"自定义描边透明度", L"Custom stroke opacity"},
+        {L"浏览...", L"Browse..."},
+        {L"恢复默认值", L"Restore defaults"},
+        {L"自动隐藏/覆盖模式（不占用停靠边空间）", L"Auto-hide/overlay (does not reserve dock-edge space)"},
+    };
+
+    for (const Translation& entry : translations)
+    {
+        if (wcscmp(chinese, entry.zh) == 0)
+        {
+            return entry.en;
+        }
+    }
+    return chinese;
+}
+
 void App::ShowContextMenu(int index, float x, float y)
 {
     HMENU menu = CreatePopupMenu();
@@ -2663,13 +2778,13 @@ void App::ShowContextMenu(int index, float x, float y)
     if (index >= 0)
     {
         // Per application only: this app's shortcut properties.
-        AppendMenuW(menu, MF_STRING, kMenuOpen, L"打开");
-        AppendMenuW(menu, MF_STRING, kMenuEdit, L"图标配置…");
-        AppendMenuW(menu, MF_STRING, kMenuRemove, L"从 Dock 移除");
+        AppendMenuW(menu, MF_STRING, kMenuOpen, UiText(L"打开"));
+        AppendMenuW(menu, MF_STRING, kMenuEdit, UiText(L"图标配置…"));
+        AppendMenuW(menu, MF_STRING, kMenuRemove, UiText(L"从 Dock 移除"));
     }
     else
     {
-        AppendMenuW(menu, MF_STRING, kMenuAdd, L"添加应用");
+        AppendMenuW(menu, MF_STRING, kMenuAdd, UiText(L"添加应用"));
 
         HMENU runningMenu = CreatePopupMenu();
         const std::vector<std::wstring> runningApps =
@@ -2681,7 +2796,7 @@ void App::ShowContextMenu(int index, float x, float y)
             if (runningApps.empty())
             {
                 AppendMenuW(runningMenu, MF_STRING | MF_GRAYED,
-                            kMenuAddRunningBase, L"没有可添加的运行应用");
+                            kMenuAddRunningBase, UiText(L"没有可添加的运行应用"));
             }
             else
             {
@@ -2718,15 +2833,15 @@ void App::ShowContextMenu(int index, float x, float y)
             }
             AppendMenuW(menu, MF_POPUP,
                         reinterpret_cast<UINT_PTR>(runningMenu),
-                        L"添加正在运行的应用");
+                        UiText(L"添加正在运行的应用"));
         }
         else
         {
             AppendMenuW(menu, MF_STRING | MF_GRAYED,
-                        kMenuAddRunningBase, L"添加正在运行的应用");
+                        kMenuAddRunningBase, UiText(L"添加正在运行的应用"));
         }
 
-        AppendMenuW(menu, MF_STRING, kMenuSettings, L"Dock 设置…");
+        AppendMenuW(menu, MF_STRING, kMenuSettings, UiText(L"Dock 设置…"));
 
         // TrackPopupMenuEx owns the submenu once attached to the parent menu.
     }
@@ -2778,10 +2893,21 @@ void App::ShowTrayMenu()
     // Tray menu is the "home" for global actions: dock settings (which now
     // includes the global icon backdrop), picking a display and quitting.
     // Adding apps lives in the dock blank-area menu and drag & drop.
-    AppendMenuW(menu, MF_STRING, kMenuSettings, L"Dock 设置…");
+    AppendMenuW(menu, MF_STRING, kMenuSettings, UiText(L"Dock 设置…"));
     AppendMonitorMenu(menu);
+    HMENU languageMenu = CreatePopupMenu();
+    if (languageMenu)
+    {
+        AppendMenuW(languageMenu, MF_STRING | (!config_.settings.englishLanguage ? MF_CHECKED : 0),
+                    kMenuLanguageChinese, UiText(L"Chinese"));
+        AppendMenuW(languageMenu, MF_STRING | (config_.settings.englishLanguage ? MF_CHECKED : 0),
+                    kMenuLanguageEnglish, UiText(L"English"));
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(languageMenu),
+                    L"Language");
+    }
+    AppendMenuW(menu, MF_STRING, kMenuAbout, UiText(L"关于"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuExit, L"退出");
+    AppendMenuW(menu, MF_STRING, kMenuExit, UiText(L"退出"));
 
     POINT cursor{};
     GetCursorPos(&cursor);
@@ -2852,6 +2978,25 @@ void App::HandleMenuCommand(UINT id)
         }
 
         break;
+
+    case kMenuLanguageChinese:
+    case kMenuLanguageEnglish:
+        config_.settings.englishLanguage = id == kMenuLanguageEnglish;
+        SaveConfiguration();
+        break;
+
+    case kMenuAbout:
+    {
+        const wchar_t* title = UiText(L"关于");
+        const wchar_t* text = UiText(L"作者：TerryXu 和 ChatGPT");
+        std::wstring about = text;
+        about += L"\n";
+        about += UiText(L"联系邮箱：851858419@.com");
+        about += L"\n\n";
+        about += UiText(L"简介：TerryDock 是一款轻量、可自定义的 Windows 桌面 Dock，支持应用快捷启动、自动隐藏，以及图标和背景栏外观设置。");
+        MessageBoxW(window_.Handle(), about.c_str(), title, MB_OK | MB_ICONINFORMATION);
+        break;
+    }
 
     case kMenuAdd:
     {
@@ -3075,7 +3220,7 @@ bool App::EditItem(size_t index)
     // The title names the app being configured so the user always knows
     // which entry they are editing.
     const std::wstring title =
-        L"图标配置 — " + items_[index]->name;
+        std::wstring(UiText(L"图标配置 — ")) + items_[index]->name;
 
     const int scaledWidth = static_cast<int>(std::lround(width * dpiScale_));
     const int scaledHeight = static_cast<int>(std::lround(height * dpiScale_));
@@ -3226,7 +3371,7 @@ bool App::ShowSettings()
     HWND dialog = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         kSettingsClass,
-        L"Dock 设置",
+        UiText(L"Dock 设置"),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         x, y, scaledWidth, scaledHeight,
         window_.Handle(),
@@ -3560,6 +3705,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         auto makeLabel = [&](const wchar_t* text, int x, int y, int w,
                              bool bold = false)
         {
+            text = UiText(text);
             HWND control = CreateWindowExW(
                 0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
                 S(x), S(y), S(w), S(20), hwnd, nullptr, instance_, nullptr);
@@ -3589,6 +3735,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
 
         auto makeButton = [&](const wchar_t* text, int id, int x, int y)
         {
+            text = UiText(text);
             HWND control = CreateWindowExW(
                 0, L"BUTTON", text,
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
@@ -3602,6 +3749,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         auto makeCheck = [&](const wchar_t* text, bool checked, int id,
                              int x, int y, int w)
         {
+            text = UiText(text);
             HWND control = CreateWindowExW(
                 0, L"BUTTON", text,
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
@@ -3635,12 +3783,12 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         if (settings_.modeCombo)
         {
             SendMessageW(settings_.modeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(L"固定宽度（进入时展开）"));
+                         reinterpret_cast<LPARAM>(UiText(L"固定宽度（进入时展开）")));
             SendMessageW(settings_.modeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(L"弹性跟随图标"));
+                         reinterpret_cast<LPARAM>(UiText(L"弹性跟随图标")));
 
             SendMessageW(settings_.modeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(L"无动画（名称气泡正常）"));
+                         reinterpret_cast<LPARAM>(UiText(L"无动画（名称气泡正常）")));
 
             SendMessageW(settings_.modeCombo, CB_SETCURSEL,
                          config_.settings.panelMode == PanelMode::Fixed ? 0
@@ -3660,13 +3808,13 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         if (settings_.edgeCombo)
         {
             SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(L"底部"));
+                         reinterpret_cast<LPARAM>(UiText(L"底部")));
             SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(L"顶部"));
+                         reinterpret_cast<LPARAM>(UiText(L"顶部")));
             SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(L"左侧（竖排）"));
+                         reinterpret_cast<LPARAM>(UiText(L"左侧（竖排）")));
             SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(L"右侧（竖排）"));
+                         reinterpret_cast<LPARAM>(UiText(L"右侧（竖排）")));
             SendMessageW(settings_.edgeCombo, CB_SETCURSEL,
                 config_.settings.dockEdge == DockEdge::Top ? 1
                 : config_.settings.dockEdge == DockEdge::Left ? 2
@@ -3814,20 +3962,20 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         settings_.strokeOpacityLabel = makeLabel(L"", 306, 576, 60);
 
         // --- tooltip bubble -------------------------------------------------
-        makeLabel(L"名称气泡", 22, 54, 300, true);
-        makeLabel(L"气泡不透明度", 22, 80, 120);
+        HWND tooltipHeader = makeLabel(L"名称气泡", 22, 54, 300, true);
+        HWND tooltipOpacityCaption = makeLabel(L"气泡不透明度", 22, 80, 120);
         settings_.tooltipOpacitySlider = makeSlider(
             kIdTooltipOpacity, 158, 76, 140, 10, 100,
             static_cast<int>(std::lround(config_.settings.tooltipOpacity
                                          * 100.0f)));
         settings_.tooltipOpacityLabel = makeLabel(L"", 306, 80, 60);
-        makeLabel(L"淡入淡出时长", 22, 108, 120);
+        HWND tooltipFadeCaption = makeLabel(L"淡入淡出时长", 22, 108, 120);
         settings_.tooltipFadeSlider = makeSlider(
             kIdTooltipFade, 158, 104, 140, 50, 1000,
             static_cast<int>(std::lround(
                 config_.settings.tooltipFadeSeconds * 1000.0f)));
         settings_.tooltipFadeLabel = makeLabel(L"", 306, 108, 70);
-        makeLabel(L"气泡比例", 22, 136, 120);
+        HWND tooltipScaleCaption = makeLabel(L"气泡比例", 22, 136, 120);
         settings_.tooltipScaleSlider = makeSlider(
             kIdTooltipScale, 158, 132, 140, 50, 188,
             static_cast<int>(std::lround(config_.settings.tooltipScale * 100.0f)));
@@ -3856,13 +4004,13 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         {
             TCITEMW tab{};
             tab.mask = TCIF_TEXT;
-            tab.pszText = const_cast<wchar_t*>(L"行为");
+            tab.pszText = const_cast<wchar_t*>(UiText(L"行为"));
             TabCtrl_InsertItem(settings_.tabControl, 0, &tab);
-            tab.pszText = const_cast<wchar_t*>(L"背景栏");
+            tab.pszText = const_cast<wchar_t*>(UiText(L"背景栏"));
             TabCtrl_InsertItem(settings_.tabControl, 1, &tab);
-            tab.pszText = const_cast<wchar_t*>(L"图标");
+            tab.pszText = const_cast<wchar_t*>(UiText(L"图标"));
             TabCtrl_InsertItem(settings_.tabControl, 2, &tab);
-            tab.pszText = const_cast<wchar_t*>(L"气泡");
+            tab.pszText = const_cast<wchar_t*>(UiText(L"气泡"));
             TabCtrl_InsertItem(settings_.tabControl, 3, &tab);
             TabCtrl_SetCurSel(settings_.tabControl, 0);
 
@@ -3903,6 +4051,16 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             // final coordinates; pre-tag them so the generic page classifier
             // does not shift them through another tab's coordinate range.
             MarkDialogTabPage(tooltipCornerCaption, 3);
+            MarkDialogTabPage(tooltipHeader, 3);
+            MarkDialogTabPage(tooltipOpacityCaption, 3);
+            MarkDialogTabPage(tooltipFadeCaption, 3);
+            MarkDialogTabPage(tooltipScaleCaption, 3);
+            MarkDialogTabPage(settings_.tooltipOpacitySlider, 3);
+            MarkDialogTabPage(settings_.tooltipOpacityLabel, 3);
+            MarkDialogTabPage(settings_.tooltipFadeSlider, 3);
+            MarkDialogTabPage(settings_.tooltipFadeLabel, 3);
+            MarkDialogTabPage(settings_.tooltipScaleSlider, 3);
+            MarkDialogTabPage(settings_.tooltipScaleLabel, 3);
             MarkDialogTabPage(settings_.tooltipCornerSlider, 3);
             MarkDialogTabPage(settings_.tooltipCornerLabel, 3);
 
@@ -3911,28 +4069,6 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                 S(160), S(382), 2, S(38), -S(120), -S(338)};
             EnumChildWindows(hwnd, TagDialogChildren,
                              reinterpret_cast<LPARAM>(&tagContext));
-            MarkDialogTabPage(settings_.tooltipOpacitySlider, 3);
-            MarkDialogTabPage(settings_.tooltipOpacityLabel, 3);
-            MarkDialogTabPage(settings_.tooltipFadeSlider, 3);
-            MarkDialogTabPage(settings_.tooltipFadeLabel, 3);
-            MarkDialogTabPage(settings_.tooltipScaleSlider, 3);
-            MarkDialogTabPage(settings_.tooltipScaleLabel, 3);
-            // The two bubble captions also live in the behavior page's
-            // original coordinates; tag them explicitly by their rectangles.
-            EnumChildWindows(hwnd, [](HWND child, LPARAM) -> BOOL
-            {
-                wchar_t caption[64]{};
-                GetWindowTextW(child, caption, ARRAYSIZE(caption));
-                if (wcscmp(caption, L"名称气泡") == 0
-                    || wcscmp(caption, L"气泡不透明度") == 0
-                    || wcscmp(caption, L"淡入淡出时长") == 0
-                    || wcscmp(caption, L"气泡比例") == 0
-                    || wcscmp(caption, L"气泡圆角") == 0)
-                {
-                    MarkDialogTabPage(child, 3);
-                }
-                return TRUE;
-            }, 0);
             EnumChildWindows(hwnd, [](HWND child, LPARAM amount) -> BOOL
             {
                 HANDLE tag = GetPropW(child, kDialogTabPageProperty);
@@ -3957,7 +4093,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
             HWND restore = CreateWindowExW(
-                0, L"BUTTON", L"恢复默认值",
+                0, L"BUTTON", UiText(L"恢复默认值"),
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
                 S(20), S(330), S(120), S(28), hwnd,
                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(
@@ -4741,6 +4877,7 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         auto makeLabel = [&](const wchar_t* text, int x, int y, int w,
                              bool bold = false)
         {
+            text = UiText(text);
             HWND control = CreateWindowExW(
                 0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
                 S(x), S(y + 5), S(w), S(20), hwnd, nullptr, instance_, nullptr);
@@ -4762,6 +4899,7 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
 
         auto makeButton = [&](const wchar_t* text, int id, int x, int y, int w)
         {
+            text = UiText(text);
             HWND control = CreateWindowExW(
                 0, L"BUTTON", text,
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
@@ -4775,6 +4913,7 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         auto makeCheck = [&](const wchar_t* text, bool checked, int id,
                              int x, int y, int w)
         {
+            text = UiText(text);
             HWND control = CreateWindowExW(
                 0, L"BUTTON", text,
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
@@ -4929,9 +5068,9 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         {
             TCITEMW tab{};
             tab.mask = TCIF_TEXT;
-            tab.pszText = const_cast<wchar_t*>(L"快捷方式");
+            tab.pszText = const_cast<wchar_t*>(UiText(L"快捷方式"));
             TabCtrl_InsertItem(tabs, 0, &tab);
-            tab.pszText = const_cast<wchar_t*>(L"图标外观");
+            tab.pszText = const_cast<wchar_t*>(UiText(L"图标外观"));
             TabCtrl_InsertItem(tabs, 1, &tab);
             TabCtrl_SetCurSel(tabs, 0);
 
