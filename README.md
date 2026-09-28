@@ -42,13 +42,13 @@ UpdateLayeredWindow
 
 ## 构建
 
-项目已附带当前使用的 MinGW-w64 与 CMake 工具链，Windows 上无需安装 Visual Studio。双击项目根目录的 `build.bat` 即可完成配置和编译。
+项目使用 MinGW-w64 与 CMake 工具链，Windows 上无需安装 Visual Studio。首次在新电脑上 clone 项目后，先双击 `setup-toolchain.bat` 下载并安装编译环境，再双击项目根目录的 `build.bat` 完成配置和编译。
 
 ```bat
 build.bat
 ```
 
-脚本会使用项目上一级目录的 `_toolchain\mingw\mingw64`，将构建输出放在 `build_mingw`：
+`setup-toolchain.bat` 会把当前固定版本的 WinLibs 工具链安装到项目内的 `_toolchain\mingw\mingw64`；`build.bat` 使用这个目录，并将构建输出放在 `build_mingw`：
 
 ```text
 build_mingw\LightDock.exe
@@ -57,9 +57,9 @@ build_mingw\LightDock.exe
 也可以手动执行：
 
 ```bat
-set PATH=..\_toolchain\mingw\mingw64\bin;%PATH%
-..\_toolchain\mingw\mingw64\bin\cmake.exe -G "MinGW Makefiles" -B build_mingw -S .
-..\_toolchain\mingw\mingw64\bin\cmake.exe --build build_mingw --parallel 4
+set PATH=_toolchain\mingw\mingw64\bin;%PATH%
+_toolchain\mingw\mingw64\bin\cmake.exe -G "MinGW Makefiles" -B build_mingw -S .
+_toolchain\mingw\mingw64\bin\cmake.exe --build build_mingw --parallel 4
 ```
 
 产物：`build_mingw\LightDock.exe`

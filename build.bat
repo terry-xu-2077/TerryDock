@@ -4,7 +4,7 @@ setlocal
 rem Build with the bundled MinGW toolchain used by this project.
 set "PROJECT_DIR=%~dp0"
 set "PROJECT_ROOT=%PROJECT_DIR:~0,-1%"
-set "TOOLCHAIN_DIR=%PROJECT_ROOT%\..\_toolchain\mingw\mingw64"
+set "TOOLCHAIN_DIR=%PROJECT_ROOT%\_toolchain\mingw\mingw64"
 set "CMAKE=%TOOLCHAIN_DIR%\bin\cmake.exe"
 set "BUILD_DIR=%PROJECT_ROOT%\build_mingw"
 

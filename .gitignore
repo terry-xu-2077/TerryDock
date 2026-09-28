@@ -21,7 +21,7 @@ x86/
 Release/
 Debug/
 
-# Local toolchain used only for syntax checking
+# Local build toolchain, installed by setup-toolchain.bat
 _toolchain/
 
 # OS
