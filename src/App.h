@@ -58,6 +58,7 @@ private:
         kMenuLanguageChinese = 7,
         kMenuLanguageEnglish = 8,
         kMenuAbout = 9,
+        kMenuOpenFolder = 10,
         kMenuAddRunningBase = 1000,
 
         /// Monitor entries start here; kMenuMonitorBase + index.
