@@ -66,6 +66,14 @@ _toolchain\mingw\mingw64\bin\cmake.exe --build build_mingw --parallel 4
 
 单文件可执行程序，静态链接 GCC 与 C++ 运行库，不需要额外 DLL。直接拷贝即可使用。
 
+开发测试时也可以直接双击：
+
+```bat
+update-build-run.bat
+```
+
+它会按顺序完成：关闭当前正在运行的 `LightDock.exe` → `git pull --ff-only` 拉取最新代码 → 调用 `build.bat` 编译 → 启动新的 `build_mingw\LightDock.exe`。脚本运行时会先把自身复制到临时目录，因此即使本次拉取更新了脚本自己，也不会中断当前流程。
+
 ---
 
 ## 使用
