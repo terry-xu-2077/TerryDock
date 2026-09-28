@@ -25,6 +25,33 @@ std::wstring FallbackName(const std::wstring& path)
     return name.empty() ? path : name;
 }
 
+void StripMatchingPathExtension(std::wstring& name,
+                                const std::wstring& resolvedPath,
+                                const std::wstring& originalPath)
+{
+    if (name.empty())
+    {
+        return;
+    }
+
+    const std::wstring nameExtension = GetFileExtension(name);
+    if (nameExtension.empty())
+    {
+        return;
+    }
+
+    const std::wstring resolvedExtension = GetFileExtension(resolvedPath);
+    const std::wstring originalExtension = GetFileExtension(originalPath);
+
+    if ((!resolvedExtension.empty()
+         && EqualsIgnoreCase(nameExtension, resolvedExtension))
+        || (!originalExtension.empty()
+            && EqualsIgnoreCase(nameExtension, originalExtension)))
+    {
+        name = GetFileStem(name);
+    }
+}
+
 /// Largest opaque run inside the bitmap: the size of the actual artwork
 /// before any upscaling. An icon whose artwork is 32px inside a 256px
 /// canvas was stretched by the shell and will look blurry on the dock.
@@ -342,6 +369,11 @@ AppInfo IconLoader::Inspect(const std::wstring& path, unsigned int iconSize)
     {
         info.name = FallbackName(info.resolvedPath);
     }
+
+    // Shell display names and some version resources return the literal
+    // filename (for example "VideoComp.exe"). Keep the friendly name, but
+    // remove a suffix when it matches the selected/target file extension.
+    StripMatchingPathExtension(info.name, info.resolvedPath, path);
 
     const unsigned int size = iconSize == 0 ? kPreferredIconSize : iconSize;
     ComPtr<IWICBitmap> icon = ExtractIconBitmap(info.resolvedPath, size);
