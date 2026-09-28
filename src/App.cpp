@@ -2745,6 +2745,7 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"程序", L"Application"},
         {L"附加命令", L"Arguments"},
         {L"图标文件", L"Icon file"},
+        {L"打开所在文件夹", L"Open file location"},
         {L"浏览…", L"Browse..."},
         {L"来自所选程序", L"From selected application"},
         {L"选择程序", L"Select application"},
@@ -2793,6 +2794,8 @@ void App::ShowContextMenu(int index, float x, float y)
     {
         // Per application only: this app's shortcut properties.
         AppendMenuW(menu, MF_STRING, kMenuOpen, UiText(L"打开"));
+        AppendMenuW(menu, MF_STRING, kMenuOpenFolder,
+                    UiText(L"打开所在文件夹"));
         AppendMenuW(menu, MF_STRING, kMenuEdit, UiText(L"图标配置…"));
         AppendMenuW(menu, MF_STRING, kMenuRemove, UiText(L"从 Dock 移除"));
     }
@@ -2962,6 +2965,18 @@ void App::HandleMenuCommand(UINT id)
         if (menuIndex_ >= 0)
         {
             AppLauncher::Open(items_[static_cast<size_t>(menuIndex_)]->targetPath);
+        }
+
+        break;
+
+    case kMenuOpenFolder:
+        if (menuIndex_ >= 0)
+        {
+            const DockItem& item =
+                *items_[static_cast<size_t>(menuIndex_)];
+            const std::wstring& path = item.resolvedPath.empty()
+                ? item.targetPath : item.resolvedPath;
+            AppLauncher::RevealInExplorer(path);
         }
 
         break;
