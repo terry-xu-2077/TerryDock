@@ -3244,8 +3244,8 @@ bool App::EditItem(size_t index)
 
     RegisterClassExW(&windowClass);
 
-    constexpr int width = 470;
-    constexpr int height = 420;
+    constexpr int width = 500;
+    constexpr int height = 500;
 
     // The title names the app being configured so the user always knows
     // which entry they are editing.
@@ -3387,8 +3387,12 @@ bool App::ShowSettings()
     pageClass.lpszClassName = kSettingsPageClass;
     RegisterClassExW(&pageClass);
 
-    constexpr int width = 424;
-    constexpr int height = 390;
+    // Give the tab pages enough breathing room for real group spacing.
+    // The old compact 424x390 layout forced separators directly against
+    // sliders/labels, so native controls painted over the line and made it
+    // look broken.
+    constexpr int width = 500;
+    constexpr int height = 460;
 
     // Scale the dialog for the monitor it will appear on.
     const int scaledWidth = static_cast<int>(std::lround(width * dpiScale_));
@@ -3889,7 +3893,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         // never moves it into the Background page.
         HWND behaviorSeparator = CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(22), S(162), S(356), S(2), hwnd, nullptr, instance_, nullptr);
+            S(22), S(168), S(430), S(2), hwnd, nullptr, instance_, nullptr);
         MarkDialogTabPage(behaviorSeparator, 0);
 
         // --- panel background ------------------------------------------------
@@ -3948,15 +3952,15 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         // coordinates and will be shifted with the rest of that tab.
         CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(22), S(302), S(356), S(2), hwnd, nullptr, instance_, nullptr);
+            S(22), S(318), S(430), S(2), hwnd, nullptr, instance_, nullptr);
 
-        makeLabel(L"顶部颜色", 22, 314, 90);
-        settings_.topSwatch = makeSwatch(kIdBgTop, 118, 310);
-        settings_.topHex = makeLabel(L"", 194, 314, 130);
+        makeLabel(L"顶部颜色", 22, 330, 90);
+        settings_.topSwatch = makeSwatch(kIdBgTop, 118, 326);
+        settings_.topHex = makeLabel(L"", 194, 330, 150);
 
-        makeLabel(L"底部颜色", 22, 346, 90);
-        settings_.bottomSwatch = makeSwatch(kIdBgBottom, 118, 342);
-        settings_.bottomHex = makeLabel(L"", 194, 346, 130);
+        makeLabel(L"底部颜色", 22, 364, 90);
+        settings_.bottomSwatch = makeSwatch(kIdBgBottom, 118, 360);
+        settings_.bottomHex = makeLabel(L"", 194, 364, 150);
 
         // --- global plate defaults ------------------------------------------
         makeLabel(L"全局图标设置", 22, 392, 300, true);
@@ -3966,8 +3970,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         makeLabel(L"圆角半径", 22, 424, 90);
         makeLabel(L"图标在底板内的比例", 22, 462, 130);
         makeLabel(L"不透明度", 22, 500, 90);
-        makeLabel(L"内描边粗细", 22, 538, 100);
-        makeLabel(L"描边不透明度", 22, 576, 110);
+        makeLabel(L"内描边粗细", 22, 554, 100);
+        makeLabel(L"描边不透明度", 22, 592, 110);
 
         settings_.cornerSlider = makeSlider(
             kIdCorner, 118, 416, 180, 0, 28,
@@ -3980,7 +3984,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             static_cast<int>(std::lround(backdrop.opacity * 100.0f)));
 
         settings_.strokeWidthSlider = makeSlider(
-            kIdStrokeWidth, 158, 530, 140, 0, 40,
+            kIdStrokeWidth, 158, 546, 140, 0, 40,
             static_cast<int>(std::lround(backdrop.strokeWidth * 10.0f)));
         settings_.cornerLabel = makeLabel(L"", 306, 424, 60);
         settings_.scaleLabel = makeLabel(L"", 306, 462, 60);
@@ -3991,14 +3995,14 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         // groups after tab layout.
         CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(22), S(520), S(356), S(2), hwnd, nullptr, instance_, nullptr);
+            S(22), S(528), S(430), S(2), hwnd, nullptr, instance_, nullptr);
 
-        settings_.strokeWidthLabel = makeLabel(L"", 306, 538, 60);
+        settings_.strokeWidthLabel = makeLabel(L"", 306, 554, 60);
 
         settings_.strokeOpacitySlider = makeSlider(
-            kIdStrokeOpacity, 158, 568, 140, 0, 100,
+            kIdStrokeOpacity, 158, 584, 140, 0, 100,
             static_cast<int>(std::lround(backdrop.strokeOpacity * 100.0f)));
-        settings_.strokeOpacityLabel = makeLabel(L"", 306, 576, 60);
+        settings_.strokeOpacityLabel = makeLabel(L"", 306, 592, 60);
 
         // --- tooltip bubble -------------------------------------------------
         HWND tooltipHeader = makeLabel(L"名称气泡", 22, 54, 300, true);
@@ -4029,13 +4033,13 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         refreshLabels();
         syncBackgroundControls();
 
-        HWND save = makeButton(L"保存", kIdSave, 212, 330);
-        makeButton(L"取消", kIdCancel, 304, 330);
+        HWND save = makeButton(L"保存", kIdSave, 300, 400);
+        makeButton(L"取消", kIdCancel, 392, 400);
 
         settings_.tabControl = CreateWindowExW(
             0, WC_TABCONTROLW, L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
-            S(12), S(8), S(400), S(300), hwnd,
+            S(12), S(8), S(476), S(370), hwnd,
             reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdSettingsTabs)),
             instance_, nullptr);
         setFont(settings_.tabControl);
@@ -4131,7 +4135,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             HWND restore = CreateWindowExW(
                 0, L"BUTTON", UiText(L"恢复默认值"),
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-                S(20), S(330), S(120), S(28), hwnd,
+                S(20), S(400), S(120), S(28), hwnd,
                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(
                     kIdRestoreDefaults)), instance_, nullptr);
             setFont(restore);
@@ -4146,8 +4150,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             POINT pageOrigin{pageRect.left, pageRect.top};
             MapWindowPoints(settings_.tabControl, hwnd, &pageOrigin, 1);
             const int pageHeight = std::max(
-                S(1), static_cast<int>(pageRect.bottom - pageRect.top)
-                    - S(42));
+                S(1), static_cast<int>(pageRect.bottom - pageRect.top));
             settings_.pageViewport = CreateWindowExW(
                 0, L"LightDock_SettingsPage", L"",
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
@@ -4998,19 +5001,19 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         makeLabel(L"附加命令", 20, rows[2], 70);
         makeLabel(L"图标文件", 20, rows[3], 70);
 
-        editor_.nameEdit = makeEdit(editor_.item->name, kIdName, 96, rows[0], 248);
-        editor_.pathEdit = makeEdit(editor_.item->targetPath, kIdPath, 96, rows[1], 248);
+        editor_.nameEdit = makeEdit(editor_.item->name, kIdName, 96, rows[0], 270);
+        editor_.pathEdit = makeEdit(editor_.item->targetPath, kIdPath, 96, rows[1], 270);
         editor_.argumentsEdit = makeEdit(editor_.item->arguments, kIdArguments,
-                                         96, rows[2], 248);
-        editor_.iconEdit = makeEdit(editor_.item->iconFile, kIdIcon, 96, rows[3], 248);
+                                         96, rows[2], 270);
+        editor_.iconEdit = makeEdit(editor_.item->iconFile, kIdIcon, 96, rows[3], 270);
 
-        makeButton(L"浏览...", kIdBrowsePath, 346, rows[1] - 2, 82);
-        makeButton(L"浏览...", kIdBrowseIcon, 346, rows[3] - 2, 82);
+        makeButton(L"浏览...", kIdBrowsePath, 376, rows[1] - 2, 84);
+        makeButton(L"浏览...", kIdBrowseIcon, 376, rows[3] - 2, 84);
 
         // Group divider: application/arguments above, icon selection below.
         CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(20), S(126), S(408), S(2), hwnd, nullptr, instance_, nullptr);
+            S(20), S(126), S(440), S(2), hwnd, nullptr, instance_, nullptr);
 
         // --- per icon plate -------------------------------------------------
         const PlateStyle& own = editor_.item->plate;
@@ -5033,7 +5036,7 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         // Group divider: plate size above, colour treatment below.
         CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(20), S(252), S(408), S(2), hwnd, nullptr, instance_, nullptr);
+            S(20), S(260), S(440), S(2), hwnd, nullptr, instance_, nullptr);
 
         // --- colour picks ----------------------------------------------------
         // Owner drawn swatches: the control itself previews the colour and
@@ -5068,51 +5071,51 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             : derivedColor(editor_.topColor);
         editor_.strokeColor = colorRefOf(own.strokeColor, RGB(255, 255, 255));
 
-        makeLabel(L"顶部颜色", 20, 262, 90);
-        editor_.topSwatch = makeSwatch(kIdTop, 158, 258);
-        editor_.topHex = makeLabel(L"", 234, 262, 120);
+        makeLabel(L"顶部颜色", 20, 276, 90);
+        editor_.topSwatch = makeSwatch(kIdTop, 158, 272);
+        editor_.topHex = makeLabel(L"", 234, 276, 170);
 
         editor_.secondBox = makeCheck(L"自定义第二颜色（渐变）", own.customBottom,
-                                      kIdSecond, 20, 294, 240);
+                                      kIdSecond, 20, 312, 240);
 
-        makeLabel(L"底部颜色", 20, 328, 90);
-        editor_.bottomSwatch = makeSwatch(kIdBottom, 158, 324);
-        editor_.bottomHex = makeLabel(L"", 234, 328, 160);
+        makeLabel(L"底部颜色", 20, 348, 90);
+        editor_.bottomSwatch = makeSwatch(kIdBottom, 158, 344);
+        editor_.bottomHex = makeLabel(L"", 234, 348, 190);
 
         // Group divider: fill colours above, rim controls below.
         CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(20), S(346), S(408), S(2), hwnd, nullptr, instance_, nullptr);
+            S(20), S(376), S(440), S(2), hwnd, nullptr, instance_, nullptr);
 
         editor_.strokeOverrideBox = makeCheck(
             L"自定义描边颜色", !own.strokeColor.empty(),
-            kIdStrokeOverride, 20, 358, 130);
-        editor_.strokeSwatch = makeSwatch(kIdStrokeColor, 158, 356);
-        editor_.strokeHex = makeLabel(L"", 234, 360, 160);
+            kIdStrokeOverride, 20, 390, 130);
+        editor_.strokeSwatch = makeSwatch(kIdStrokeColor, 158, 388);
+        editor_.strokeHex = makeLabel(L"", 234, 392, 190);
 
         editor_.strokeOpacityBox = makeCheck(
             L"自定义描边透明度", own.strokeOpacity >= 0.0f,
-            kIdStrokeOpacityOverride, 20, 390, 145);
-        makeLabel(L"描边不透明度", 20, 426, 110);
+            kIdStrokeOpacityOverride, 20, 426, 145);
+        makeLabel(L"描边不透明度", 20, 462, 110);
         const float strokeOpacity = own.strokeOpacity >= 0.0f
             ? own.strokeOpacity : config_.settings.backdrop.strokeOpacity;
         editor_.strokeOpacitySlider = makeSlider(
-            kIdStrokeOpacitySlider, 158, 422, 140, 0, 100,
+            kIdStrokeOpacitySlider, 158, 458, 140, 0, 100,
             static_cast<int>(std::lround(strokeOpacity * 100.0f)));
-        editor_.strokeOpacityLabel = makeLabel(L"", 306, 426, 60);
+        editor_.strokeOpacityLabel = makeLabel(L"", 306, 462, 60);
 
         refreshLabels();
         syncAppearance();
         refreshSwatches();
 
         // --- buttons --------------------------------------------------------
-        makeButton(L"保存", kIdSave, 272, 368, 84);
-        makeButton(L"取消", kIdCancel, 362, 368, 84);
+        makeButton(L"保存", kIdSave, 300, 438, 84);
+        makeButton(L"取消", kIdCancel, 390, 438, 84);
 
             HWND tabs = CreateWindowExW(
                 0, WC_TABCONTROLW, L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
-                S(12), S(6), S(430), S(350), hwnd,
+                S(12), S(6), S(460), S(420), hwnd,
                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdEditorTabs)),
                 instance_, nullptr);
         setFont(tabs);
@@ -5128,13 +5131,13 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
 
             TagDialogChildrenContext tagContext{
                 hwnd, kIdEditorTabs, kIdSave, kIdCancel,
-                S(176), S(500), 1, S(38), -S(126), 0};
+                S(176), S(650), 1, S(38), -S(126), 0};
             EnumChildWindows(hwnd, TagDialogChildren,
                              reinterpret_cast<LPARAM>(&tagContext));
             ShowDialogTabPage(hwnd, 0);
             SetWindowPos(tabs, HWND_BOTTOM, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            makeButton(L"恢复默认值", kIdRestoreDefaults, 20, 368, 120);
+            makeButton(L"恢复默认值", kIdRestoreDefaults, 20, 438, 120);
         }
 
         SetFocus(editor_.nameEdit);
