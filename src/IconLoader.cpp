@@ -160,6 +160,144 @@ bool IconLoader::Initialize()
     return SUCCEEDED(hr);
 }
 
+bool IconLoader::IsCircularIcon(IWICBitmap* source) const
+{
+    if (!source)
+    {
+        return false;
+    }
+
+    unsigned int width = 0;
+    unsigned int height = 0;
+    if (FAILED(source->GetSize(&width, &height)) || width < 8 || height < 8)
+    {
+        return false;
+    }
+
+    WICRect whole{0, 0, static_cast<INT>(width), static_cast<INT>(height)};
+    ComPtr<IWICBitmapLock> lock;
+    if (FAILED(source->Lock(&whole, WICBitmapLockRead, lock.AddressOf())))
+    {
+        return false;
+    }
+
+    unsigned int stride = 0;
+    unsigned char* data = nullptr;
+    unsigned int dataSize = 0;
+    if (FAILED(lock->GetStride(&stride))
+        || FAILED(lock->GetDataPointer(&dataSize, &data)))
+    {
+        return false;
+    }
+
+    constexpr unsigned char kAlphaThreshold = 28;
+    int minX = static_cast<int>(width);
+    int minY = static_cast<int>(height);
+    int maxX = -1;
+    int maxY = -1;
+
+    for (unsigned int y = 0; y < height; ++y)
+    {
+        const unsigned char* row = data + static_cast<size_t>(y) * stride;
+        for (unsigned int x = 0; x < width; ++x)
+        {
+            if (row[x * 4 + 3] <= kAlphaThreshold)
+            {
+                continue;
+            }
+
+            minX = (std::min)(minX, static_cast<int>(x));
+            minY = (std::min)(minY, static_cast<int>(y));
+            maxX = (std::max)(maxX, static_cast<int>(x));
+            maxY = (std::max)(maxY, static_cast<int>(y));
+        }
+    }
+
+    if (maxX < minX || maxY < minY)
+    {
+        return false;
+    }
+
+    const float boxWidth = static_cast<float>(maxX - minX + 1);
+    const float boxHeight = static_cast<float>(maxY - minY + 1);
+    const float aspect = boxWidth / boxHeight;
+    if (aspect < 0.92f || aspect > 1.08f)
+    {
+        return false;
+    }
+
+    const float centerX = (static_cast<float>(minX + maxX) + 1.0f) * 0.5f;
+    const float centerY = (static_cast<float>(minY + maxY) + 1.0f) * 0.5f;
+    const float radiusX = boxWidth * 0.5f;
+    const float radiusY = boxHeight * 0.5f;
+
+    constexpr int kBins = 72;
+    float radialMax[kBins]{};
+
+    for (int y = minY; y <= maxY; ++y)
+    {
+        const unsigned char* row =
+            data + static_cast<size_t>(y) * stride;
+
+        for (int x = minX; x <= maxX; ++x)
+        {
+            if (row[x * 4 + 3] <= kAlphaThreshold)
+            {
+                continue;
+            }
+
+            const float nx =
+                (static_cast<float>(x) + 0.5f - centerX) / radiusX;
+            const float ny =
+                (static_cast<float>(y) + 0.5f - centerY) / radiusY;
+            const float radius = std::sqrt(nx * nx + ny * ny);
+            float angle = std::atan2(ny, nx);
+            if (angle < 0.0f)
+            {
+                angle += 2.0f * kPi;
+            }
+
+            int bin = static_cast<int>(
+                angle / (2.0f * kPi) * static_cast<float>(kBins));
+            bin = (std::clamp)(bin, 0, kBins - 1);
+            radialMax[bin] = (std::max)(radialMax[bin], radius);
+        }
+    }
+
+    float sum = 0.0f;
+    float minRadius = std::numeric_limits<float>::max();
+    float maxRadius = 0.0f;
+
+    for (float radius : radialMax)
+    {
+        // Missing directions mean the outer silhouette is not a closed circle.
+        if (radius < 0.78f)
+        {
+            return false;
+        }
+
+        sum += radius;
+        minRadius = (std::min)(minRadius, radius);
+        maxRadius = (std::max)(maxRadius, radius);
+    }
+
+    const float mean = sum / static_cast<float>(kBins);
+    float variance = 0.0f;
+    for (float radius : radialMax)
+    {
+        const float delta = radius - mean;
+        variance += delta * delta;
+    }
+    variance /= static_cast<float>(kBins);
+    const float deviation = std::sqrt(variance);
+
+    // A rasterised circle stays close to radius 1 in every direction.
+    // Rounded squares and arbitrary logos show much larger angular variation.
+    return mean >= 0.90f && mean <= 1.10f
+        && deviation <= 0.065f
+        && (maxRadius - minRadius) <= 0.20f;
+}
+
 AppInfo IconLoader::Inspect(const std::wstring& path, unsigned int iconSize)
 {
     AppInfo info;
