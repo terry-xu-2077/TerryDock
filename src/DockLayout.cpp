@@ -29,6 +29,62 @@ float RoundedRectDistance(float px, float py, const D2D1_RECT_F& rect, float rad
         + (std::min)((std::max)(dx, dy), 0.0f) - r;
 }
 
+float MaximumMagnifiedRowWidth(int itemCount, const LayoutMetrics& metrics)
+{
+    const int safeCount = (std::max)(itemCount, 1);
+    const float count = static_cast<float>(safeCount);
+    const float cell = metrics.iconSize + metrics.spacing;
+    const float baseRowWidth =
+        count * metrics.iconSize + (count - 1.0f) * metrics.spacing;
+
+    const float maxExtraScale = (std::max)(0.0f, metrics.magnification - 1.0f);
+    if (maxExtraScale <= 0.0f || safeCount <= 0)
+    {
+        return baseRowWidth;
+    }
+
+    const float sigma = metrics.sigmaFactor * cell;
+    const float twoSigmaSq = 2.0f * sigma * sigma;
+    constexpr float kMinimumVisibleScaleChange = 0.015f;
+
+    // The influence is a smooth sum of Gaussians. Sample densely across the
+    // resting icon centres once when geometry is rebuilt; this is far more
+    // accurate than assuming every icon reaches maximum scale simultaneously,
+    // while remaining trivial work even for a very large dock.
+    const int intervals = (std::max)(1, (safeCount - 1) * 32);
+    const float firstCenter = metrics.iconSize * 0.5f;
+    const float lastCenter =
+        firstCenter + static_cast<float>(safeCount - 1) * cell;
+
+    float widest = baseRowWidth;
+    for (int sample = 0; sample <= intervals; ++sample)
+    {
+        const float t = static_cast<float>(sample)
+            / static_cast<float>(intervals);
+        const float mouseX = firstCenter + (lastCenter - firstCenter) * t;
+
+        float width = baseRowWidth;
+        for (int i = 0; i < safeCount; ++i)
+        {
+            const float center =
+                firstCenter + static_cast<float>(i) * cell;
+            const float distance = mouseX - center;
+            const float falloff =
+                std::exp(-(distance * distance) / twoSigmaSq);
+            const float scaleChange = maxExtraScale * falloff;
+
+            if (scaleChange >= kMinimumVisibleScaleChange)
+            {
+                width += metrics.iconSize * scaleChange;
+            }
+        }
+
+        widest = (std::max)(widest, width);
+    }
+
+    return widest;
+}
+
 } // namespace
 
 LayoutMetrics MakeMetrics(const DockSettings& settings, float dpiScale)
@@ -104,13 +160,25 @@ DockGeometry ComputeGeometry(int itemCount, const LayoutMetrics& metrics,
     const float baseRowWidth =
         count * metrics.iconSize + (count - 1.0f) * metrics.spacing;
 
-    const float maxRowWidth =
-        count * metrics.iconSize * metrics.magnification
-        + (count - 1.0f) * metrics.spacing;
+    const float widestAnimatedRow =
+        MaximumMagnifiedRowWidth(safeCount, metrics);
 
     DockGeometry geometry;
     geometry.basePanelWidth = baseRowWidth + metrics.paddingX * 2.0f;
-    geometry.maxPanelWidth = maxRowWidth + metrics.paddingX * 2.0f;
+
+    // Fixed mode should reserve only the width that the Gaussian hover can
+    // actually produce. A tiny safety margin covers spring overshoot and
+    // sub-pixel rounding without creating the large empty wings seen in the
+    // previous count * iconSize * constant approximation.
+    const float fixedSafety = 4.0f * metrics.dpiScale;
+    geometry.fixedPanelWidth =
+        widestAnimatedRow + metrics.paddingX * 2.0f + fixedSafety;
+
+    // Surface/shadow allocation gets a little more headroom than the visible
+    // panel, but this no longer affects the panel the user sees.
+    const float renderSafety = 8.0f * metrics.dpiScale;
+    geometry.maxPanelWidth =
+        geometry.fixedPanelWidth + renderSafety;
 
     // The icon row is vertically centred: equal padding above and below.
     // The running indicator dots live inside the bottom padding strip and
@@ -262,39 +330,22 @@ LayoutFrame ApplyLayout(std::vector<DockItem*>& items,
 
     float rowLeft = baseContentLeft;
 
-    // Gap between neighbouring icons. The Fixed mode stretches this so the
-    // row uses the width its panel just gained; Elastic keeps the base gap.
-    float gap = metrics.spacing;
+    // Neighbour spacing stays constant in every animated panel mode.
+    const float gap = metrics.spacing;
 
     if (fixedPanel)
     {
-        // macOS style: the panel expands once, and the row spreads to use
-        // the width it just gained. The slack between the expanded panel
-        // and the currently magnified row is shared out between the gaps,
-        // so an enlarging icon pushes its neighbours outward into the
-        // reserved side space instead of leaving the row huddled in the
-        // middle with dead margins on both ends.
-        const float panelX = (surfaceWidth - panelWidth) * 0.5f;
-        const float available = panelWidth - metrics.paddingX * 2.0f;
-        const float slack = available - rowWidth;
-
-        if (slack > 0.5f && count > 1)
-        {
-            gap += slack / static_cast<float>(count - 1);
-            rowLeft = panelX + metrics.paddingX;
-        }
-        else
-        {
-            rowLeft = panelX + (panelWidth - rowWidth) * 0.5f;
-        }
+        // Fixed mode freezes only the panel width. The icon row itself keeps
+        // its normal spacing and remains centred, so the pre-expanded area is
+        // genuine breathing room rather than artificial extra gaps between
+        // every icon.
+        rowLeft = (surfaceWidth - rowWidth) * 0.5f;
     }
     else
     {
         // Elastic means the panel follows the changing width of the icon row,
         // not the cursor position. Keep the row centre fixed in the surface
-        // while individual icons magnify. This removes the left/right
-        // feedback loop that made the whole dock sway as the pointer crossed
-        // neighbouring icons.
+        // while individual icons magnify.
         rowLeft = (surfaceWidth - rowWidth) * 0.5f;
     }
 
