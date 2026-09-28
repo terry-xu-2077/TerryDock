@@ -601,6 +601,13 @@ void App::AddApplication(const std::wstring& path)
 
     if (item->iconSource)
     {
+        // Choose a useful first-run appearance from the alpha silhouette.
+        // Pure circles can occupy the full slot cleanly without a plate;
+        // everything else gets a rounded plate and a restrained 85% fill.
+        const bool circular = icons_.IsCircularIcon(item->iconSource.Get());
+        item->plate.enabled = !circular;
+        item->plate.iconScale = circular ? 0.0f : 0.85f;
+
         icons_.SaveToCache(item->iconSource.Get(),
                            GetIconCacheDir() + L"\\" + item->iconFile);
     }
@@ -1751,7 +1758,8 @@ void App::Render()
         const bool verticalDock = config_.settings.dockEdge == DockEdge::Left
             || config_.settings.dockEdge == DockEdge::Right;
         const float indicatorY = config_.settings.dockEdge == DockEdge::Top
-            ? item->baselineBottom + metrics_.paddingY * 0.5f
+            ? item->baselineBottom - item->size
+                - metrics_.paddingY * 0.5f
             : verticalDock
                 ? item->baselineBottom - item->size
                     - metrics_.paddingY * 0.5f
@@ -2367,6 +2375,12 @@ void App::OnExternalDragEnter(const std::vector<std::wstring>& paths,
     preview->arguments = info.arguments;
     preview->processName = info.processName;
     preview->iconSource = info.icon;
+    if (preview->iconSource)
+    {
+        const bool circular = icons_.IsCircularIcon(preview->iconSource.Get());
+        preview->plate.enabled = !circular;
+        preview->plate.iconScale = circular ? 0.0f : 0.85f;
+    }
     preview->scale = 1.0f;
     preview->scaleSpring.Reset(1.0f);
     preview->bounceSpring.Reset(0.0f);
