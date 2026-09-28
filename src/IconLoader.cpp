@@ -355,6 +355,14 @@ AppInfo IconLoader::Inspect(const std::wstring& path, unsigned int iconSize)
     if (icon)
     {
         icon = NormalizeContent(icon.Get(), size);
+
+        // Circular icons look best without a backing plate. Tighten their
+        // remaining transparent margin so the visible outer circle, rather
+        // than the original ICO canvas, defines the display size.
+        if (icon && IsCircularIcon(icon.Get()))
+        {
+            icon = NormalizeContent(icon.Get(), size, true);
+        }
     }
 
     info.icon = std::move(icon);
@@ -363,7 +371,8 @@ AppInfo IconLoader::Inspect(const std::wstring& path, unsigned int iconSize)
 }
 
 ComPtr<IWICBitmap> IconLoader::NormalizeContent(IWICBitmap* source,
-                                                unsigned int targetSize)
+                                                unsigned int targetSize,
+                                                bool tight)
 {
     if (!wic_ || !source || targetSize == 0)
     {
@@ -442,9 +451,12 @@ ComPtr<IWICBitmap> IconLoader::NormalizeContent(IWICBitmap* source,
     const int contentWidth = maxX - minX + 1;
     const int contentHeight = maxY - minY + 1;
 
-    // Content already fills the canvas: nothing to do.
-    if (contentWidth >= static_cast<int>(width * 88 / 100)
-        && contentHeight >= static_cast<int>(height * 88 / 100))
+    // Ordinary icons keep a small source-defined margin. Circular icons
+    // use a tighter threshold so their alpha contour can sit naturally near
+    // the edge of the dock slot instead of inheriting ICO canvas padding.
+    const int fillPercent = tight ? 98 : 88;
+    if (contentWidth >= static_cast<int>(width * fillPercent / 100)
+        && contentHeight >= static_cast<int>(height * fillPercent / 100))
     {
         ComPtr<IWICBitmap> keep;
         wic_->CreateBitmapFromSource(
