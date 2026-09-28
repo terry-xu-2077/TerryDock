@@ -1206,7 +1206,7 @@ void App::Tick(double dt)
 
     UpdateScaleTargets(
         pointers_, anchorX_, hoverPresence_, metrics_,
-        config_.settings.panelMode == PanelMode::Elastic);
+        config_.settings.panelMode != PanelMode::Static);
 
     // Only the release tail keeps the loop alive; a settled hover stays
     // idle so a resting dock costs nothing.
@@ -1259,17 +1259,15 @@ void App::Tick(double dt)
 
     if (config_.settings.panelMode == PanelMode::Fixed)
     {
-        // Expand once on entry, collapse on exit: the width is not a function
-        // of the current scales, so the icons always stay inside the panel.
-        // Driven by the same eased presence value as the icons, so leaving
-        // the dock never pops.
-        // Fixed-panel expansion stays independent of the magnification
-        // setting. The extra width is based only on unscaled icon dimensions.
-        constexpr float kFixedPanelStretchPerIcon = 0.42f;
-        const float fixedStretch = static_cast<float>(items_.size())
-            * metrics_.iconSize * kFixedPanelStretchPerIcon;
-        panelWidth_.target = geometry_.basePanelWidth
-            + fixedStretch * hoverPresence_;
+        // Expand once to the width the real Gaussian magnification can
+        // require. The old count * iconSize * 0.42 estimate grew linearly
+        // with the number of apps even though only a local neighbourhood is
+        // enlarged, which created very large empty wings on long docks.
+        const float expansion =
+            (std::max)(0.0f,
+                       geometry_.fixedPanelWidth - geometry_.basePanelWidth);
+        panelWidth_.target =
+            geometry_.basePanelWidth + expansion * hoverPresence_;
 
         panelWidth_.Update(dt, kPanelSpring);
 
