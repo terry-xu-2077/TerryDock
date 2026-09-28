@@ -198,4 +198,42 @@ bool AppLauncher::Open(const std::wstring& path)
     return Launch(path, std::wstring());
 }
 
+bool AppLauncher::RevealInExplorer(const std::wstring& path)
+{
+    if (path.empty())
+    {
+        return false;
+    }
+
+    PIDLIST_ABSOLUTE item = nullptr;
+    SFGAOF attributes = 0;
+    if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &item,
+                                  0, &attributes))
+        || !item)
+    {
+        return false;
+    }
+
+    PIDLIST_ABSOLUTE folder = ILClone(item);
+    if (!folder)
+    {
+        CoTaskMemFree(item);
+        return false;
+    }
+
+    PCUITEMID_CHILD child = ILFindLastID(item);
+    if (!child || !ILRemoveLastID(folder))
+    {
+        CoTaskMemFree(folder);
+        CoTaskMemFree(item);
+        return false;
+    }
+
+    const HRESULT hr = SHOpenFolderAndSelectItems(folder, 1, &child, 0);
+
+    CoTaskMemFree(folder);
+    CoTaskMemFree(item);
+    return SUCCEEDED(hr);
+}
+
 } // namespace ld
