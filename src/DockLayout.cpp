@@ -176,7 +176,8 @@ float RowInfluenceFade(float mouseX,
 void UpdateScaleTargets(std::vector<DockItem*>& items,
                         float mouseX,
                         float presence,
-                        const LayoutMetrics& metrics)
+                        const LayoutMetrics& metrics,
+                        bool useBaseCenters)
 {
     const float cell = metrics.iconSize + metrics.spacing;
     const float sigma = metrics.sigmaFactor * cell;
@@ -200,11 +201,13 @@ void UpdateScaleTargets(std::vector<DockItem*>& items,
             continue;
         }
 
-        // Measure against where the icon actually is this frame, not its
-        // resting slot. In Fixed mode the row spreads into the expanded
-        // panel, so the outer icons sit far away from their base centres —
-        // measuring from the base would leave them unable to magnify at all.
-        const float distance = mouseX - item->centerX;
+        // Elastic mode uses the stable resting centre so magnification does
+        // not feed back into its own hit calculation as neighbouring icons
+        // grow. Fixed mode deliberately uses the live centre because that
+        // layout spreads icons across an expanded panel.
+        const float referenceCenter =
+            useBaseCenters ? item->baseCenterX : item->centerX;
+        const float distance = mouseX - referenceCenter;
         const float falloff = std::exp(-(distance * distance) / twoSigmaSq);
         const float scaleChange = maxExtra * falloff * strength;
 
@@ -223,6 +226,9 @@ LayoutFrame ApplyLayout(std::vector<DockItem*>& items,
                         float presence,
                         const LayoutMetrics& metrics)
 {
+    (void)mouseX;
+    (void)presence;
+
     LayoutFrame frame;
 
     const float cell = metrics.iconSize + metrics.spacing;
@@ -282,52 +288,14 @@ LayoutFrame ApplyLayout(std::vector<DockItem*>& items,
             rowLeft = panelX + (panelWidth - rowWidth) * 0.5f;
         }
     }
-    else if (presence > 0.0f)
+    else
     {
-        // The anchor is clamped to the icon row on purpose: past either end
-        // it degenerates and the whole row would chase the cursor towards the
-        // edge (the old "sticks to your mouse" feeling). The resulting shift
-        // is then faded out with the same release curve as the scales, so
-        // the row glides back to centre instead of jumping.
-        const float anchorX =
-            ClampF(mouseX, baseContentLeft, baseContentLeft + baseRowWidth);
-
-        const float local = anchorX - baseContentLeft;
-
-        const float column = local / cell;
-        int index = static_cast<int>(std::floor(column));
-        if (index >= static_cast<int>(count))
-        {
-            index = static_cast<int>(count) - 1;
-        }
-
-        const float fraction = column - static_cast<float>(index);
-
-        float offset = 0.0f;
-        for (int i = 0; i < index; ++i)
-        {
-            offset += metrics.iconSize * items[static_cast<size_t>(i)]->scale
-                + metrics.spacing;
-        }
-
-        offset += fraction
-            * (metrics.iconSize * items[static_cast<size_t>(index)]->scale
-               + metrics.spacing);
-
-        const float anchored = anchorX - offset;
-
-        // The row may drift sideways while the icons swell. Saturate it
-        // smoothly instead of clamping, which would make the panel snap.
-        const float limit = (metrics.magnification - 1.0f) * metrics.iconSize;
-        const float shift = limit > 0.0f
-            ? limit * std::tanh((anchored - baseContentLeft) / limit)
-            : 0.0f;
-
-        // `presence` is already the time-eased influence, so the drift fades
-        // out on exactly the same curve as the icon scales. No extra spatial
-        // factor here: the anchor is held steady through the release (see
-        // App::Tick), so this is a clean fade back to centre.
-        rowLeft = baseContentLeft + shift * presence;
+        // Elastic means the panel follows the changing width of the icon row,
+        // not the cursor position. Keep the row centre fixed in the surface
+        // while individual icons magnify. This removes the left/right
+        // feedback loop that made the whole dock sway as the pointer crossed
+        // neighbouring icons.
+        rowLeft = (surfaceWidth - rowWidth) * 0.5f;
     }
 
     float cursor = rowLeft;
