@@ -23,6 +23,9 @@ struct PlateStyle
     /// Icon-to-plate ratio; 0 follows the global backdrop default.
     float iconScale = 0.0f;
 
+    /// Negative inherits the global plate opacity; otherwise 0..1.
+    float opacity = -1.0f;
+
     /// When false the gradient's second colour is derived from `top`
     /// automatically (a slightly darker offset). When true `bottom` is used.
     bool customBottom = false;
