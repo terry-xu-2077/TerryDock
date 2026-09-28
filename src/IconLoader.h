@@ -70,7 +70,8 @@ private:
     /// the middle of it. This measures the opaque content, crops to it and
     /// scales it back up, so a small source icon still fills the dock slot.
     ComPtr<IWICBitmap> NormalizeContent(IWICBitmap* source,
-                                        unsigned int targetSize);
+                                        unsigned int targetSize,
+                                        bool tight = false);
 
     ComPtr<IWICImagingFactory> wic_;
 };
