@@ -1552,10 +1552,18 @@ void App::Render()
                              config_.settings.backgroundOpacity,
                              config_.settings.borderOpacity);
 
-    // Upload at roughly twice the largest on-screen size: every draw is then
-    // a clean downscale instead of a 5x minification of the 256px source.
+    // Keep the uploaded mip close to the largest on-screen icon size.
+    // D2D1's DC render target only offers bilinear bitmap filtering; feeding
+    // it a bitmap that is ~2x larger than the final icon forces another
+    // heavy minification pass and produces visible stair-stepping on 1080p
+    // displays. WIC performs the expensive high-quality downscale once, then
+    // D2D only has to resize within a narrow range while hover animation runs.
+    // 1.25 leaves headroom for spring overshoot and the 8% drag lift without
+    // making the normal-size icon a tiny sample of an oversized bitmap.
+    constexpr float kIconMipHeadroom = 1.25f;
     const unsigned int displaySize = static_cast<unsigned int>(
-        std::ceil(metrics_.iconSize * metrics_.magnification * 2.0f));
+        std::ceil(metrics_.iconSize * metrics_.magnification
+                  * kIconMipHeadroom));
 
     // Resolves the plate look for one icon. Radius and opacity are global
     // (the tile shape is a dock wide constant, like macOS); the on/off
