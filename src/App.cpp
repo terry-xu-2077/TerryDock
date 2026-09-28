@@ -2993,7 +2993,7 @@ void App::HandleMenuCommand(UINT id)
         about += L"\n";
         about += UiText(L"联系邮箱：851858419@.com");
         about += L"\n\n";
-        about += UiText(L"简介：TerryDock 是一款轻量、可自定义的 Windows 桌面 Dock，支持应用快捷启动、自动隐藏，以及图标和背景栏外观设置。");
+        about += UiText(L"简介：LightDock 是一款轻量、可自定义的 Windows 桌面 Dock，支持应用快捷启动、自动隐藏，以及图标和背景栏外观设置。");
         MessageBoxW(window_.Handle(), about.c_str(), title, MB_OK | MB_ICONINFORMATION);
         break;
     }
@@ -5408,16 +5408,13 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
                 item.iconSource = editor_.pendingIcon;
                 item.icon.Reset();
 
-                const bool fromPng =
-                    !editor_.pendingIconPath.empty()
-                    && GetFileExtension(editor_.pendingIconPath) == L".png";
-
-                if (!fromPng)
-                {
-                    icons_.SaveToCache(
-                        editor_.pendingIcon.Get(),
-                        GetIconCacheDir() + L"\\" + item.iconFile);
-                }
+                // Persist every chosen icon into LightDock's own cache,
+                // including custom PNGs. Otherwise a PNG previews correctly
+                // for this session but the old cached icon returns after the
+                // next launch.
+                icons_.SaveToCache(
+                    editor_.pendingIcon.Get(),
+                    GetIconCacheDir() + L"\\" + item.iconFile);
             }
 
             // --- plate look --------------------------------------------------
