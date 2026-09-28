@@ -182,10 +182,11 @@ private:
 
         DockItem* item = nullptr;
 
-        /// Plate look when the dialog opened. Live preview writes straight
-        /// into the item so the dock repaints immediately; cancelling rolls
-        /// back to this snapshot.
+        /// Plate look and icon source when the dialog opened. Live preview
+        /// writes straight into the item so the dock repaints immediately;
+        /// cancelling restores both snapshots.
         PlateStyle originalPlate;
+        ComPtr<IWICBitmap> originalIconSource;
 
         std::wstring pendingIconPath;
         ComPtr<IWICBitmap> pendingIcon;
