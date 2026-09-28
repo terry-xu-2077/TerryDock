@@ -1,6 +1,9 @@
 @echo off
 setlocal EnableExtensions
 
+set "NO_PAUSE=0"
+if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
+
 rem Build LightDock with the bundled MinGW toolchain used by this project.
 set "PROJECT_DIR=%~dp0"
 set "PROJECT_ROOT=%PROJECT_DIR:~0,-1%"
@@ -99,5 +102,5 @@ goto :fail
 echo.
 echo [X] Build failed.
 echo.
-pause
+if "%NO_PAUSE%"=="0" pause
 exit /b 1
