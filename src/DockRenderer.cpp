@@ -417,10 +417,11 @@ void DockRenderer::EnsureBrushes()
     // near white on a dark one.
     const bool lightPanel = panelLuminance_ > 0.6f;
 
+    constexpr float kIndicatorOpacity = 0.80f;
     rt_->CreateSolidColorBrush(
         lightPanel
-            ? D2D1::ColorF(0.16f, 0.17f, 0.20f, 0.85f)
-            : D2D1::ColorF(0.92f, 0.94f, 0.99f, 1.0f),
+            ? D2D1::ColorF(0.16f, 0.17f, 0.20f, kIndicatorOpacity)
+            : D2D1::ColorF(0.92f, 0.94f, 0.99f, kIndicatorOpacity),
         indicatorBrush_.AddressOf());
 
     // Panel outline: one uniform hairline around the whole panel. No gradient
