@@ -37,6 +37,11 @@ public:
     /// Stores an icon in the cache directory as PNG.
     bool SaveToCache(IWICBitmap* bitmap, const std::wstring& file);
 
+    /// Returns true when the alpha silhouette is a near-perfect circle.
+    /// Used only when an app is first added so LightDock can choose sensible
+    /// automatic plate defaults without overriding later user customization.
+    bool IsCircularIcon(IWICBitmap* source) const;
+
 private:
     ComPtr<IWICBitmap> ExtractIconBitmap(const std::wstring& path,
                                          unsigned int size);
