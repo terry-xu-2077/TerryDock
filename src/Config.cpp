@@ -313,6 +313,13 @@ DockConfig Config::Load()
                 item.plate.iconScale = readFloat("iconScale",
                                                  item.plate.iconScale);
 
+                if (plate->Find("opacity"))
+                {
+                    item.plate.opacity = ClampF(
+                        static_cast<float>(plate->Find("opacity")->AsDouble(
+                            item.plate.opacity)), 0.0f, 1.0f);
+                }
+
                 // Legacy entries only carried "bottom" when the user had
                 // actually set a second colour, so its presence implies the
                 // custom switch.
@@ -492,6 +499,11 @@ bool Config::Save(const DockConfig& config)
             plate.Set("enabled", json::Value(item.plate.enabled));
             plate.Set("iconScale",
                       json::Value(static_cast<double>(item.plate.iconScale)));
+            if (item.plate.opacity >= 0.0f)
+            {
+                plate.Set("opacity",
+                          json::Value(static_cast<double>(item.plate.opacity)));
+            }
             plate.Set("customBottom", json::Value(item.plate.customBottom));
             plate.Set("top", json::Value(WideToUtf8(item.plate.top)));
             plate.Set("bottom", json::Value(WideToUtf8(item.plate.bottom)));
