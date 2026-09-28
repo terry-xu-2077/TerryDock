@@ -85,6 +85,130 @@ float MaximumMagnifiedRowWidth(int itemCount, const LayoutMetrics& metrics)
     return widest;
 }
 
+void ResolveFixedIconPositions(const std::vector<DockItem*>& items,
+                               float baseContentLeft,
+                               float panelX,
+                               float panelWidth,
+                               const LayoutMetrics& metrics,
+                               std::vector<float>& lefts)
+{
+    const size_t count = items.size();
+    lefts.assign(count, 0.0f);
+    if (count == 0)
+    {
+        return;
+    }
+
+    const float cell = metrics.iconSize + metrics.spacing;
+
+    std::vector<float> widths(count, metrics.iconSize);
+    std::vector<float> offsets(count, 0.0f);
+    std::vector<float> desired(count, 0.0f);
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        widths[i] = metrics.iconSize * items[i]->scale;
+        if (i > 0)
+        {
+            offsets[i] = offsets[i - 1]
+                + widths[i - 1] + metrics.spacing;
+        }
+
+        const float baseCenter =
+            baseContentLeft + metrics.iconSize * 0.5f
+            + static_cast<float>(i) * cell;
+
+        // Every icon wants to grow around its own resting centre.
+        desired[i] = baseCenter - widths[i] * 0.5f - offsets[i];
+    }
+
+    // Project the desired positions onto the non-overlap constraints with
+    // isotonic regression (PAVA). Unlike rebuilding the whole row from its
+    // changing total width, this is anchored to the immutable resting slots:
+    // only icons that are actually pushed by a growing neighbour move.
+    struct Block
+    {
+        size_t first = 0;
+        size_t last = 0;
+        float sum = 0.0f;
+        float weight = 0.0f;
+
+        float Mean() const
+        {
+            return weight > 0.0f ? sum / weight : 0.0f;
+        }
+    };
+
+    std::vector<Block> blocks;
+    blocks.reserve(count);
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        blocks.push_back(Block{i, i, desired[i], 1.0f});
+
+        while (blocks.size() >= 2)
+        {
+            Block& right = blocks.back();
+            Block& left = blocks[blocks.size() - 2];
+            if (left.Mean() <= right.Mean())
+            {
+                break;
+            }
+
+            Block merged;
+            merged.first = left.first;
+            merged.last = right.last;
+            merged.sum = left.sum + right.sum;
+            merged.weight = left.weight + right.weight;
+
+            blocks.pop_back();
+            blocks.back() = merged;
+        }
+    }
+
+    std::vector<float> solved(count, 0.0f);
+    for (const Block& block : blocks)
+    {
+        const float value = block.Mean();
+        for (size_t i = block.first; i <= block.last; ++i)
+        {
+            solved[i] = value;
+        }
+    }
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        lefts[i] = solved[i] + offsets[i];
+    }
+
+    // The accurate fixed panel has enough total width for the resolved row.
+    // Near the first/last icon the optimal local solution can be asymmetric,
+    // so translate it as a whole only when it would cross the panel's inner
+    // padding. This translation is continuous and does not relayout gaps.
+    const float innerLeft = panelX + metrics.paddingX;
+    const float innerRight = panelX + panelWidth - metrics.paddingX;
+    const float rowLeft = lefts.front();
+    const float rowRight = lefts.back() + widths.back();
+
+    float shift = 0.0f;
+    if (rowLeft < innerLeft)
+    {
+        shift = innerLeft - rowLeft;
+    }
+    if (rowRight + shift > innerRight)
+    {
+        shift += innerRight - (rowRight + shift);
+    }
+
+    if (std::fabs(shift) > 0.0001f)
+    {
+        for (float& left : lefts)
+        {
+            left += shift;
+        }
+    }
+}
+
 } // namespace
 
 LayoutMetrics MakeMetrics(const DockSettings& settings, float dpiScale)
@@ -269,10 +393,8 @@ void UpdateScaleTargets(std::vector<DockItem*>& items,
             continue;
         }
 
-        // Elastic mode uses the stable resting centre so magnification does
-        // not feed back into its own hit calculation as neighbouring icons
-        // grow. Fixed mode deliberately uses the live centre because that
-        // layout spreads icons across an expanded panel.
+        // Animated modes use the stable resting centre so magnification never
+        // feeds back into its own hit calculation as neighbouring icons move.
         const float referenceCenter =
             useBaseCenters ? item->baseCenterX : item->centerX;
         const float distance = mouseX - referenceCenter;
@@ -328,44 +450,53 @@ LayoutFrame ApplyLayout(std::vector<DockItem*>& items,
     // fixed reference point that scale targets are measured against.
     const float baseContentLeft = (surfaceWidth - baseRowWidth) * 0.5f;
 
-    float rowLeft = baseContentLeft;
-
-    // Neighbour spacing stays constant in every animated panel mode.
-    const float gap = metrics.spacing;
-
     if (fixedPanel)
     {
-        // Fixed mode freezes only the panel width. The icon row itself keeps
-        // its normal spacing and remains centred, so the pre-expanded area is
-        // genuine breathing room rather than artificial extra gaps between
-        // every icon.
-        rowLeft = (surfaceWidth - rowWidth) * 0.5f;
+        const float panelX = (surfaceWidth - panelWidth) * 0.5f;
+        std::vector<float> lefts;
+        ResolveFixedIconPositions(
+            items, baseContentLeft, panelX, panelWidth, metrics, lefts);
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            DockItem* item = items[i];
+            const float size = metrics.iconSize * item->scale;
+
+            item->size = size;
+            item->x = lefts[i];
+            item->centerX = lefts[i] + size * 0.5f;
+            item->baseCenterX =
+                baseContentLeft + metrics.iconSize * 0.5f
+                + static_cast<float>(i) * cell;
+            item->baselineBottom = metrics.anchorIconsAtTop
+                ? geometry.panelY + metrics.paddingY + size
+                : geometry.iconBaselineBottom;
+        }
     }
     else
     {
-        // Elastic means the panel follows the changing width of the icon row,
-        // not the cursor position. Keep the row centre fixed in the surface
-        // while individual icons magnify.
-        rowLeft = (surfaceWidth - rowWidth) * 0.5f;
-    }
+        // Elastic deliberately re-centres the changing row because its panel
+        // breathes with the row. This behaviour already feels correct and is
+        // kept separate from the fixed-mode solver above.
+        float cursor = (surfaceWidth - rowWidth) * 0.5f;
 
-    float cursor = rowLeft;
-    for (size_t i = 0; i < count; ++i)
-    {
-        DockItem* item = items[i];
-        const float size = metrics.iconSize * item->scale;
+        for (size_t i = 0; i < count; ++i)
+        {
+            DockItem* item = items[i];
+            const float size = metrics.iconSize * item->scale;
 
-        item->size = size;
-        item->x = cursor;
-        item->centerX = cursor + size * 0.5f;
-        item->baseCenterX =
-            baseContentLeft + metrics.iconSize * 0.5f
-            + static_cast<float>(i) * cell;
-        item->baselineBottom = metrics.anchorIconsAtTop
-            ? geometry.panelY + metrics.paddingY + size
-            : geometry.iconBaselineBottom;
+            item->size = size;
+            item->x = cursor;
+            item->centerX = cursor + size * 0.5f;
+            item->baseCenterX =
+                baseContentLeft + metrics.iconSize * 0.5f
+                + static_cast<float>(i) * cell;
+            item->baselineBottom = metrics.anchorIconsAtTop
+                ? geometry.panelY + metrics.paddingY + size
+                : geometry.iconBaselineBottom;
 
-        cursor += size + gap;
+            cursor += size + metrics.spacing;
+        }
     }
 
     if (fixedPanel)
