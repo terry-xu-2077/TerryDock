@@ -1204,7 +1204,9 @@ void App::Tick(double dt)
         anchorX_ = mouseX_;
     }
 
-    UpdateScaleTargets(pointers_, anchorX_, hoverPresence_, metrics_);
+    UpdateScaleTargets(
+        pointers_, anchorX_, hoverPresence_, metrics_,
+        config_.settings.panelMode == PanelMode::Elastic);
 
     // Only the release tail keeps the loop alive; a settled hover stays
     // idle so a resting dock costs nothing.
@@ -1679,26 +1681,29 @@ void App::Render()
                         iconTop + iconSize));
         renderer_.PopClip();
 
-        // The rim is independent of the optional coloured plate. It is
-        // always drawn over the icon, with global defaults and per-icon
-        // colour/opacity overrides.
-        renderer_.DrawPlateRim(plate,
-                               baseRadius * item->scale,
-                               item->plate.strokeOpacity >= 0.0f
-                                   ? item->plate.strokeOpacity
-                                   : backdrop.strokeOpacity,
-                               config_.settings.backdrop.strokeWidth
-                                   * dockScale_ * item->scale,
-                               [&]()
-                               {
-                                   float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
-                                   if (ParseHexColor(item->plate.strokeColor,
-                                                     r, g, b, a))
+        // The rim belongs to the rounded plate. Turning the plate off
+        // hides the rim too; users should not have to zero a separate opacity
+        // control just to get a plain icon.
+        if (plateOn)
+        {
+            renderer_.DrawPlateRim(plate,
+                                   baseRadius * item->scale,
+                                   item->plate.strokeOpacity >= 0.0f
+                                       ? item->plate.strokeOpacity
+                                       : backdrop.strokeOpacity,
+                                   config_.settings.backdrop.strokeWidth
+                                       * dockScale_ * item->scale,
+                                   [&]()
                                    {
-                                       return D2D1::ColorF(r, g, b, a);
-                                   }
-                                   return D2D1::ColorF(1, 1, 1, 1);
-                               }());
+                                       float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
+                                       if (ParseHexColor(item->plate.strokeColor,
+                                                         r, g, b, a))
+                                       {
+                                           return D2D1::ColorF(r, g, b, a);
+                                       }
+                                       return D2D1::ColorF(1, 1, 1, 1);
+                                   }());
+        }
     }
 
     // The label is rendered in the same layered surface as the dock, so it
@@ -3879,11 +3884,15 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             kIdFullscreenHideSpeed, 158, 240, 140, 0, 1000,
             config_.settings.autoHideAnimationMs);
         settings_.autoHideSpeedLabel = makeLabel(L"", 306, 244, 65);
-        // --- panel background ------------------------------------------------
-        CreateWindowExW(
+        // Divider inside the Behavior tab: general dock interaction above,
+        // auto-hide timing below. Tag it explicitly so tab classification
+        // never moves it into the Background page.
+        HWND behaviorSeparator = CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(22), S(170), S(356), S(2), hwnd, nullptr, instance_, nullptr);
+            S(22), S(162), S(356), S(2), hwnd, nullptr, instance_, nullptr);
+        MarkDialogTabPage(behaviorSeparator, 0);
 
+        // --- panel background ------------------------------------------------
         makeLabel(L"背景栏外观", 22, 182, 300, true);
 
         settings_.customBox = makeCheck(L"自定义背景渐变",
@@ -3934,6 +3943,13 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             static_cast<int>(std::lround(config_.settings.cornerRadius)));
         settings_.dockCornerLabel = makeLabel(L"", 306, 282, 60);
 
+        // Divider inside the Background tab: geometry/opacity above,
+        // colour controls below. This is intentionally in page-1 authored
+        // coordinates and will be shifted with the rest of that tab.
+        CreateWindowExW(
+            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+            S(22), S(302), S(356), S(2), hwnd, nullptr, instance_, nullptr);
+
         makeLabel(L"顶部颜色", 22, 314, 90);
         settings_.topSwatch = makeSwatch(kIdBgTop, 118, 310);
         settings_.topHex = makeLabel(L"", 194, 314, 130);
@@ -3943,10 +3959,6 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         settings_.bottomHex = makeLabel(L"", 194, 346, 130);
 
         // --- global plate defaults ------------------------------------------
-        CreateWindowExW(
-            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(22), S(380), S(356), S(2), hwnd, nullptr, instance_, nullptr);
-
         makeLabel(L"全局图标设置", 22, 392, 300, true);
 
         const IconBackdrop& backdrop = config_.settings.backdrop;
@@ -3973,6 +3985,14 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         settings_.cornerLabel = makeLabel(L"", 306, 424, 60);
         settings_.scaleLabel = makeLabel(L"", 306, 462, 60);
         settings_.opacityLabel = makeLabel(L"", 306, 500, 60);
+
+        // Divider inside the Icons tab: tile shape/fill above, rim controls
+        // below. In page-2 authored coordinates this lands between the two
+        // groups after tab layout.
+        CreateWindowExW(
+            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+            S(22), S(520), S(356), S(2), hwnd, nullptr, instance_, nullptr);
+
         settings_.strokeWidthLabel = makeLabel(L"", 306, 538, 60);
 
         settings_.strokeOpacitySlider = makeSlider(
@@ -4769,20 +4789,21 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         }
         if (editor_.strokeOverrideBox)
         {
-            EnableWindow(editor_.strokeOverrideBox, TRUE);
+            EnableWindow(editor_.strokeOverrideBox, on ? TRUE : FALSE);
         }
         if (editor_.strokeSwatch)
         {
-            EnableWindow(editor_.strokeSwatch, stroke ? TRUE : FALSE);
+            EnableWindow(editor_.strokeSwatch,
+                         on && stroke ? TRUE : FALSE);
         }
         if (editor_.strokeOpacityBox)
         {
-            EnableWindow(editor_.strokeOpacityBox, TRUE);
+            EnableWindow(editor_.strokeOpacityBox, on ? TRUE : FALSE);
         }
         if (editor_.strokeOpacitySlider)
         {
             EnableWindow(editor_.strokeOpacitySlider,
-                         strokeOpacity ? TRUE : FALSE);
+                         on && strokeOpacity ? TRUE : FALSE);
         }
     };
 
@@ -4838,12 +4859,16 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         Render();
     };
 
-    /// Puts back the plate the icon had before the dialog opened.
+    /// Puts back the plate and icon the entry had before the dialog
+    /// opened. Both are previewed directly on the dock.
     auto restorePlate = [&]()
     {
         if (editor_.item)
         {
             editor_.item->plate = editor_.originalPlate;
+            editor_.item->iconSource = editor_.originalIconSource;
+            editor_.item->icon.Reset();
+            Render();
         }
     };
 
@@ -4863,6 +4888,7 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
 
         // Snapshot for the live preview rollback on cancel.
         editor_.originalPlate = editor_.item->plate;
+        editor_.originalIconSource = editor_.item->iconSource;
 
         INITCOMMONCONTROLSEX controls{};
         controls.dwSize = sizeof(controls);
@@ -4978,14 +5004,15 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
                                          96, rows[2], 248);
         editor_.iconEdit = makeEdit(editor_.item->iconFile, kIdIcon, 96, rows[3], 248);
 
-        makeButton(L"浏览...", kIdBrowsePath, 356, rows[1] - 2, 90);
-        makeButton(L"浏览...", kIdBrowseIcon, 356, rows[3] - 2, 90);
+        makeButton(L"浏览...", kIdBrowsePath, 346, rows[1] - 2, 82);
+        makeButton(L"浏览...", kIdBrowseIcon, 346, rows[3] - 2, 82);
 
-        // --- per icon plate -------------------------------------------------
+        // Group divider: application/arguments above, icon selection below.
         CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(20), S(176), S(414), S(2), hwnd, nullptr, instance_, nullptr);
+            S(20), S(126), S(408), S(2), hwnd, nullptr, instance_, nullptr);
 
+        // --- per icon plate -------------------------------------------------
         const PlateStyle& own = editor_.item->plate;
         const IconBackdrop& globalBackdrop = config_.settings.backdrop;
 
@@ -5002,6 +5029,11 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             kIdScale, 158, 224, 140, 50, 150,
             static_cast<int>(std::lround(effectiveScale * 100.0f)));
         editor_.scaleLabel = makeLabel(L"", 306, 228, 60);
+
+        // Group divider: plate size above, colour treatment below.
+        CreateWindowExW(
+            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+            S(20), S(252), S(408), S(2), hwnd, nullptr, instance_, nullptr);
 
         // --- colour picks ----------------------------------------------------
         // Owner drawn swatches: the control itself previews the colour and
@@ -5046,6 +5078,11 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         makeLabel(L"底部颜色", 20, 328, 90);
         editor_.bottomSwatch = makeSwatch(kIdBottom, 158, 324);
         editor_.bottomHex = makeLabel(L"", 234, 328, 160);
+
+        // Group divider: fill colours above, rim controls below.
+        CreateWindowExW(
+            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+            S(20), S(346), S(408), S(2), hwnd, nullptr, instance_, nullptr);
 
         editor_.strokeOverrideBox = makeCheck(
             L"自定义描边颜色", !own.strokeColor.empty(),
@@ -5266,6 +5303,10 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
                 editor_.pendingIcon = info.icon;
                 editor_.pendingIconPath.clear();
                 SetWindowTextW(editor_.iconEdit, L"(来自所选程序)");
+
+                editor_.item->iconSource = editor_.pendingIcon;
+                editor_.item->icon.Reset();
+                Render();
             }
 
             return 0;
@@ -5305,6 +5346,10 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
                 editor_.pendingIcon = icon;
                 editor_.pendingIconPath = path;
                 SetWindowTextW(editor_.iconEdit, GetFileName(path).c_str());
+
+                editor_.item->iconSource = editor_.pendingIcon;
+                editor_.item->icon.Reset();
+                Render();
             }
 
             return 0;
