@@ -20,6 +20,9 @@ public:
 
     /// Same as Launch but used by the "open" context menu entry.
     static bool Open(const std::wstring& path);
+
+    /// Opens Explorer with the file selected.
+    static bool RevealInExplorer(const std::wstring& path);
 };
 
 } // namespace ld
