@@ -150,15 +150,19 @@ bool DockItem::EnsureIconBitmap(ID2D1RenderTarget* target,
 
     if (wanted < sourceWidth)
     {
-        // Let WIC do a high quality downscale once instead of asking D2D to
-        // minify a 256px icon every frame (which aliases badly).
+        // Pre-filter large icon resources with WIC's area-style Fant
+        // resampler. It is noticeably cleaner than cubic for the strong
+        // 256px -> ~40-100px reduction used by a 1080p dock, especially on
+        // high-contrast diagonal and rounded alpha edges. The result is
+        // cached as the target-bound bitmap, so this cost is not paid per
+        // frame.
         ComPtr<IWICBitmapScaler> scaler;
         if (SUCCEEDED(wic->CreateBitmapScaler(scaler.AddressOf()))
             && SUCCEEDED(scaler->Initialize(
                 iconSource.Get(),
                 static_cast<UINT>(wanted),
                 static_cast<UINT>(wanted),
-                WICBitmapInterpolationModeCubic)))
+                WICBitmapInterpolationModeFant)))
         {
             wic->CreateBitmapFromSource(
                 scaler.Get(), WICBitmapCacheOnLoad, upload.AddressOf());
