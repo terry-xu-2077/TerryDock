@@ -21,6 +21,8 @@ const SpringParams kScaleSpring{6.8f, 0.78f, 0.0006f, 0.02f};
 /// Launch bounce: slow, springy, clearly visible.
 const BounceParams kBounce;
 
+/// Panel width in macOS mode: quick, essentially critically damped.
+const SpringParams kPanelSpring{3.4f, 0.92f, 0.05f, 1.0f};
 const SpringParams kFullscreenSlideSpring{5.2f, 0.92f, 0.001f, 0.03f};
 constexpr float kTooltipScaleBaseline = 0.8f;
 
@@ -1207,20 +1209,6 @@ void App::Tick(double dt)
     if (wanted > 0.0f)
     {
         anchorX_ = mouseX_;
-
-        if (config_.settings.panelMode == PanelMode::Fixed
-            && !items_.empty())
-        {
-            // The expanded fixed panel intentionally has breathing room at
-            // both ends. Crossing that empty padding must not make every icon
-            // shrink before the pointer has actually left the dock. Pin the
-            // magnification centre to the nearest resting edge icon instead.
-            const float firstCenter = items_.front()->baseCenterX;
-            const float lastCenter = items_.back()->baseCenterX;
-            anchorX_ = ClampF(anchorX_,
-                              (std::min)(firstCenter, lastCenter),
-                              (std::max)(firstCenter, lastCenter));
-        }
     }
 
     UpdateScaleTargets(
@@ -1288,13 +1276,9 @@ void App::Tick(double dt)
         panelWidth_.target =
             geometry_.basePanelWidth + expansion * hoverPresence_;
 
-        // Use exactly the same spring response as icon magnification.
-        // A separate slower panel spring made the background trail both the
-        // expansion and the spacing/scale collapse, which read as two
-        // disconnected animations.
-        panelWidth_.Update(dt, kScaleSpring);
+        panelWidth_.Update(dt, kPanelSpring);
 
-        if (!panelWidth_.Settled(kScaleSpring))
+        if (!panelWidth_.Settled(kPanelSpring))
         {
             moving = true;
         }
