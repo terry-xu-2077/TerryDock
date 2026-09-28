@@ -1,24 +1,29 @@
 @echo off
 setlocal
 
-where cmake >nul 2>nul
-if errorlevel 1 (
-    echo [!] cmake not found in PATH.
-    echo     Install "C++ CMake tools for Windows" from the Visual Studio Installer,
-    echo     or run this from a Developer Command Prompt.
+rem Build with the bundled MinGW toolchain used by this project.
+set "PROJECT_DIR=%~dp0"
+set "PROJECT_ROOT=%PROJECT_DIR:~0,-1%"
+set "TOOLCHAIN_DIR=%PROJECT_ROOT%\..\_toolchain\mingw\mingw64"
+set "CMAKE=%TOOLCHAIN_DIR%\bin\cmake.exe"
+set "BUILD_DIR=%PROJECT_ROOT%\build_mingw"
+
+if not exist "%CMAKE%" (
+    echo [!] Bundled CMake was not found:
+    echo     %CMAKE%
     exit /b 1
 )
 
-if not exist build mkdir build
+set "PATH=%TOOLCHAIN_DIR%\bin;%PATH%"
 
-cmake -G "Visual Studio 17 2022" -A x64 -B build -S .
+"%CMAKE%" -G "MinGW Makefiles" -B "%BUILD_DIR%" -S "%PROJECT_ROOT%"
 if errorlevel 1 goto :fail
 
-cmake --build build --config Release
+"%CMAKE%" --build "%BUILD_DIR%" --parallel 4
 if errorlevel 1 goto :fail
 
 echo.
-echo [OK] build\Release\LightDock.exe
+echo [OK] %BUILD_DIR%\LightDock.exe
 exit /b 0
 
 :fail
