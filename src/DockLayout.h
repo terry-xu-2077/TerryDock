@@ -49,9 +49,15 @@ struct DockGeometry
     /// Panel width with every icon at scale 1.0.
     float basePanelWidth = 0.0f;
 
-    /// Widest the panel can ever get (every icon at full magnification).
-    /// Used once to bake the drop shadow, and as the target of the macOS
-    /// style "expand once on hover" behaviour.
+    /// Accurate one-time expansion width for Fixed mode. This is derived
+    /// from the actual Gaussian hover influence, so only the locally affected
+    /// icons contribute instead of pretending every icon is fully magnified
+    /// at the same time.
+    float fixedPanelWidth = 0.0f;
+
+    /// Widest panel/surface width required by the animated row. Kept separate
+    /// from fixedPanelWidth so renderer allocation can retain a small safety
+    /// margin without making the visible fixed panel unnecessarily wide.
     float maxPanelWidth = 0.0f;
 
     float panelHeight = 0.0f;
