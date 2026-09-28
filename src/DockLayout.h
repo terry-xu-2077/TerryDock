@@ -104,7 +104,8 @@ SurfaceMargins ComputeMargins(const LayoutMetrics& metrics,
 void UpdateScaleTargets(std::vector<DockItem*>& items,
                         float mouseX,
                         float presence,
-                        const LayoutMetrics& metrics);
+                        const LayoutMetrics& metrics,
+                        bool useBaseCenters);
 
 /// Horizontal span in which the pointer drives the dock: the un-magnified
 /// row widened by hitMargin, plus `fadeDistance` -- the band outside those
