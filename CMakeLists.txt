@@ -16,6 +16,32 @@ endif()
 # ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
+# windres on some Chinese Windows code pages mis-decodes UTF-8 resource
+# filenames. Keep the repository's original icon name, but copy it to an
+# ASCII-only build path and generate the .rc file with absolute ASCII-safe
+# resource paths.
+set(LIGHTDOCK_ICON_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/图标模板01.ico")
+set(LIGHTDOCK_ICON_BINARY "${CMAKE_CURRENT_BINARY_DIR}/LightDock.ico")
+
+if(NOT EXISTS "${LIGHTDOCK_ICON_SOURCE}")
+    message(FATAL_ERROR "LightDock icon source not found: ${LIGHTDOCK_ICON_SOURCE}")
+endif()
+
+configure_file(
+    "${LIGHTDOCK_ICON_SOURCE}"
+    "${LIGHTDOCK_ICON_BINARY}"
+    COPYONLY)
+
+file(TO_CMAKE_PATH "${LIGHTDOCK_ICON_BINARY}" LIGHTDOCK_ICON_RC_PATH)
+file(TO_CMAKE_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app.manifest"
+    LIGHTDOCK_MANIFEST_RC_PATH)
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app.rc"
+    "${CMAKE_CURRENT_BINARY_DIR}/app.generated.rc"
+    @ONLY)
+
 set(LIGHTDOCK_SOURCES
     src/main.cpp
     src/App.cpp
@@ -30,7 +56,7 @@ set(LIGHTDOCK_SOURCES
     src/Config.cpp
     src/Json.cpp
     src/Utils.cpp
-    src/app.rc
+    "${CMAKE_CURRENT_BINARY_DIR}/app.generated.rc"
 )
 
 set(LIGHTDOCK_HEADERS
