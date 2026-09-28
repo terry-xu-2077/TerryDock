@@ -12,9 +12,8 @@ namespace ld
 ///
 /// The corner radius (and therefore the rounded clipping of full bleed
 /// icons) always follows the global backdrop, matching macOS where the
-/// tile shape is a dock-wide constant. So do plate opacity and the
-/// icon-to-plate *default*: `iconScale` of 0 means "follow the global
-/// default", any other value pins this one icon.
+/// tile shape is a dock-wide constant. Icon scale and plate opacity can
+/// optionally override their global defaults per icon.
 struct PlateStyle
 {
     /// Whether this icon draws its rounded plate at all.
