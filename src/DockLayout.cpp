@@ -506,9 +506,10 @@ LayoutFrame ApplyLayout(std::vector<DockItem*>& items,
     }
     else
     {
-        // Elastic: the panel simply wraps whatever the row turned into.
+        // Elastic: the panel simply wraps the centred animated row.
         frame.panelWidth = rowWidth + metrics.paddingX * 2.0f;
-        frame.panelX = rowLeft - metrics.paddingX;
+        frame.panelX =
+            (surfaceWidth - rowWidth) * 0.5f - metrics.paddingX;
     }
 
     return frame;
