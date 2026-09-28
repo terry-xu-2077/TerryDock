@@ -162,6 +162,9 @@ private:
         HWND enableBox = nullptr;
         HWND scaleSlider = nullptr;
         HWND scaleLabel = nullptr;
+        HWND opacityBox = nullptr;
+        HWND opacitySlider = nullptr;
+        HWND opacityLabel = nullptr;
 
         /// Owner drawn colour preview buttons; clicking one opens the
         /// system colour picker.
