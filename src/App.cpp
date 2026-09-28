@@ -1652,7 +1652,9 @@ void App::Render()
             item->centerX + size * 0.5f,
             bottom);
 
-        const float plateOpacity = ClampF(backdrop.opacity, 0.0f, 1.0f);
+        const float plateOpacity = ClampF(
+            own.opacity >= 0.0f ? own.opacity : backdrop.opacity,
+            0.0f, 1.0f);
 
         // The plate is always a vertical blend: from the icon's colour, or
         // from an automatically darkened offset unless the user pinned a
@@ -2764,6 +2766,8 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"自动隐藏/覆盖", L"Auto-hide/overlay"},
         {L"自定义背景渐变", L"Custom background gradient"},
         {L"启用圆角底板", L"Enable rounded icon plate"},
+        {L"自定义底板透明度", L"Custom plate opacity"},
+        {L"底板透明度", L"Plate opacity"},
         {L"自定义第二颜色（渐变）", L"Custom second color (gradient)"},
         {L"自定义描边颜色", L"Custom stroke color"},
         {L"自定义描边透明度", L"Custom stroke opacity"},
@@ -3274,7 +3278,7 @@ bool App::EditItem(size_t index)
     RegisterClassExW(&windowClass);
 
     constexpr int width = 500;
-    constexpr int height = 500;
+    constexpr int height = 570;
 
     // The title names the app being configured so the user always knows
     // which entry they are editing.
@@ -4710,6 +4714,8 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         kIdStrokeColor,
         kIdStrokeOpacityOverride,
         kIdStrokeOpacitySlider,
+        kIdPlateOpacityOverride = 140,
+        kIdPlateOpacitySlider,
 
         kIdSave = 121,
         kIdCancel,
@@ -4799,12 +4805,16 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         const bool strokeOpacity = editor_.strokeOpacityBox
             && SendMessageW(editor_.strokeOpacityBox, BM_GETCHECK, 0, 0)
                == BST_CHECKED;
+        const bool plateOpacity = editor_.opacityBox
+            && SendMessageW(editor_.opacityBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
 
         HWND plateControls[] =
         {
             editor_.scaleSlider,
             editor_.topSwatch,
             editor_.secondBox,
+            editor_.opacityBox,
         };
 
         for (HWND control : plateControls)
@@ -4837,6 +4847,16 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             EnableWindow(editor_.strokeOpacitySlider,
                          on && strokeOpacity ? TRUE : FALSE);
         }
+        if (editor_.opacitySlider)
+        {
+            EnableWindow(editor_.opacitySlider,
+                         on && plateOpacity ? TRUE : FALSE);
+        }
+        if (editor_.opacityLabel)
+        {
+            EnableWindow(editor_.opacityLabel,
+                         on && plateOpacity ? TRUE : FALSE);
+        }
     };
 
     auto refreshLabels = [&]()
@@ -4845,6 +4865,8 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
 
         swprintf(text, 48, L"%d%%", sliderValue(editor_.scaleSlider));
         SetWindowTextW(editor_.scaleLabel, text);
+        swprintf(text, 48, L"%d%%", sliderValue(editor_.opacitySlider));
+        SetWindowTextW(editor_.opacityLabel, text);
         swprintf(text, 48, L"%d%%",
                  sliderValue(editor_.strokeOpacitySlider));
         SetWindowTextW(editor_.strokeOpacityLabel, text);
@@ -4869,6 +4891,13 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
 
         plate.iconScale =
             static_cast<float>(sliderValue(editor_.scaleSlider)) / 100.0f;
+
+        const bool opacityOverride = editor_.opacityBox
+            && SendMessageW(editor_.opacityBox, BM_GETCHECK, 0, 0)
+               == BST_CHECKED;
+        plate.opacity = opacityOverride
+            ? static_cast<float>(sliderValue(editor_.opacitySlider)) / 100.0f
+            : -1.0f;
 
         plate.customBottom = editor_.secondBox
             && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0)
@@ -5062,10 +5091,21 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             static_cast<int>(std::lround(effectiveScale * 100.0f)));
         editor_.scaleLabel = makeLabel(L"", 306, 228, 60);
 
-        // Group divider: plate size above, colour treatment below.
+        editor_.opacityBox = makeCheck(
+            L"自定义底板透明度", own.opacity >= 0.0f,
+            kIdPlateOpacityOverride, 20, 260, 160);
+        makeLabel(L"底板透明度", 20, 296, 110);
+        const float effectiveOpacity = own.opacity >= 0.0f
+            ? own.opacity : config_.settings.backdrop.opacity;
+        editor_.opacitySlider = makeSlider(
+            kIdPlateOpacitySlider, 158, 292, 140, 0, 100,
+            static_cast<int>(std::lround(effectiveOpacity * 100.0f)));
+        editor_.opacityLabel = makeLabel(L"", 306, 296, 60);
+
+        // Group divider: plate size/opacity above, colour treatment below.
         CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(20), S(260), S(440), S(2), hwnd, nullptr, instance_, nullptr);
+            S(20), S(326), S(440), S(2), hwnd, nullptr, instance_, nullptr);
 
         // --- colour picks ----------------------------------------------------
         // Owner drawn swatches: the control itself previews the colour and
@@ -5100,51 +5140,51 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             : derivedColor(editor_.topColor);
         editor_.strokeColor = colorRefOf(own.strokeColor, RGB(255, 255, 255));
 
-        makeLabel(L"顶部颜色", 20, 276, 90);
-        editor_.topSwatch = makeSwatch(kIdTop, 158, 272);
-        editor_.topHex = makeLabel(L"", 234, 276, 170);
+        makeLabel(L"顶部颜色", 20, 342, 90);
+        editor_.topSwatch = makeSwatch(kIdTop, 158, 338);
+        editor_.topHex = makeLabel(L"", 234, 342, 170);
 
         editor_.secondBox = makeCheck(L"自定义第二颜色（渐变）", own.customBottom,
-                                      kIdSecond, 20, 312, 240);
+                                      kIdSecond, 20, 378, 240);
 
-        makeLabel(L"底部颜色", 20, 348, 90);
-        editor_.bottomSwatch = makeSwatch(kIdBottom, 158, 344);
-        editor_.bottomHex = makeLabel(L"", 234, 348, 190);
+        makeLabel(L"底部颜色", 20, 414, 90);
+        editor_.bottomSwatch = makeSwatch(kIdBottom, 158, 410);
+        editor_.bottomHex = makeLabel(L"", 234, 414, 190);
 
         // Group divider: fill colours above, rim controls below.
         CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(20), S(376), S(440), S(2), hwnd, nullptr, instance_, nullptr);
+            S(20), S(442), S(440), S(2), hwnd, nullptr, instance_, nullptr);
 
         editor_.strokeOverrideBox = makeCheck(
             L"自定义描边颜色", !own.strokeColor.empty(),
-            kIdStrokeOverride, 20, 390, 130);
-        editor_.strokeSwatch = makeSwatch(kIdStrokeColor, 158, 388);
-        editor_.strokeHex = makeLabel(L"", 234, 392, 190);
+            kIdStrokeOverride, 20, 456, 130);
+        editor_.strokeSwatch = makeSwatch(kIdStrokeColor, 158, 454);
+        editor_.strokeHex = makeLabel(L"", 234, 458, 190);
 
         editor_.strokeOpacityBox = makeCheck(
             L"自定义描边透明度", own.strokeOpacity >= 0.0f,
-            kIdStrokeOpacityOverride, 20, 426, 145);
-        makeLabel(L"描边不透明度", 20, 462, 110);
+            kIdStrokeOpacityOverride, 20, 492, 145);
+        makeLabel(L"描边不透明度", 20, 528, 110);
         const float strokeOpacity = own.strokeOpacity >= 0.0f
             ? own.strokeOpacity : config_.settings.backdrop.strokeOpacity;
         editor_.strokeOpacitySlider = makeSlider(
-            kIdStrokeOpacitySlider, 158, 458, 140, 0, 100,
+            kIdStrokeOpacitySlider, 158, 524, 140, 0, 100,
             static_cast<int>(std::lround(strokeOpacity * 100.0f)));
-        editor_.strokeOpacityLabel = makeLabel(L"", 306, 462, 60);
+        editor_.strokeOpacityLabel = makeLabel(L"", 306, 528, 60);
 
         refreshLabels();
         syncAppearance();
         refreshSwatches();
 
         // --- buttons --------------------------------------------------------
-        makeButton(L"保存", kIdSave, 300, 438, 84);
-        makeButton(L"取消", kIdCancel, 390, 438, 84);
+        makeButton(L"保存", kIdSave, 300, 508, 84);
+        makeButton(L"取消", kIdCancel, 390, 508, 84);
 
             HWND tabs = CreateWindowExW(
                 0, WC_TABCONTROLW, L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
-                S(12), S(6), S(460), S(420), hwnd,
+                S(12), S(6), S(460), S(490), hwnd,
                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdEditorTabs)),
                 instance_, nullptr);
         setFont(tabs);
@@ -5166,7 +5206,7 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             ShowDialogTabPage(hwnd, 0);
             SetWindowPos(tabs, HWND_BOTTOM, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            makeButton(L"恢复默认值", kIdRestoreDefaults, 20, 438, 120);
+            makeButton(L"恢复默认值", kIdRestoreDefaults, 20, 508, 120);
         }
 
         SetFocus(editor_.nameEdit);
@@ -5231,6 +5271,11 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             SendMessageW(editor_.scaleSlider, TBM_SETPOS, TRUE,
                          static_cast<LPARAM>(std::lround(
                              config_.settings.backdrop.iconScale * 100.0f)));
+            SendMessageW(editor_.opacityBox, BM_SETCHECK,
+                         BST_UNCHECKED, 0);
+            SendMessageW(editor_.opacitySlider, TBM_SETPOS, TRUE,
+                         static_cast<LPARAM>(std::lround(
+                             config_.settings.backdrop.opacity * 100.0f)));
             SendMessageW(editor_.secondBox, BM_SETCHECK, BST_UNCHECKED, 0);
             SendMessageW(editor_.strokeOverrideBox, BM_SETCHECK,
                          BST_UNCHECKED, 0);
@@ -5249,6 +5294,7 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
             return 0;
 
         case kIdEnable:
+        case kIdPlateOpacityOverride:
         case kIdSecond:
         case kIdStrokeOverride:
         case kIdStrokeOpacityOverride:
@@ -5463,6 +5509,12 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
 
             plate.iconScale = std::abs(chosen - config_.settings.backdrop.iconScale)
                 < 0.005f ? 0.0f : chosen;
+
+            plate.opacity = editor_.opacityBox
+                && SendMessageW(editor_.opacityBox, BM_GETCHECK, 0, 0)
+                   == BST_CHECKED
+                ? static_cast<float>(sliderValue(editor_.opacitySlider)) / 100.0f
+                : -1.0f;
 
             plate.customBottom = editor_.secondBox
                 && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0)
