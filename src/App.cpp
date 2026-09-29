@@ -4439,12 +4439,13 @@ void App::OnMouseButton(int button, bool down, float x, float y)
         }
 
         const int index = IndexAtPoint(x, y);
+        const int pressed = pressedIndex_;
 
-        if (index >= 0 && index == pressedIndex_)
-        {
-            LaunchApplication(static_cast<size_t>(index));
-        }
-
+        // End the press/capture state *before* launching or activating the
+        // target. ShellExecute/foreground activation may re-enter the message
+        // queue on some Windows paths; leaving pressedIndex_ alive during that
+        // window let a synthetic/moved WM_MOUSEMOVE promote the click into a
+        // drag while the launch bounce had already started.
         if (GetCapture() == window_.Handle())
         {
             ReleaseCapture();
@@ -4455,6 +4456,12 @@ void App::OnMouseButton(int button, bool down, float x, float y)
         dragPlaceholderAmount_ = 0.0f;
         dragTargetIndex_ = -1;
         dragVisualTargetIndex_ = -1;
+
+        if (index >= 0 && index == pressed)
+        {
+            LaunchApplication(static_cast<size_t>(index));
+        }
+
         return;
     }
 
