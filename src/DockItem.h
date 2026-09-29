@@ -9,6 +9,19 @@
 namespace ld
 {
 
+enum class DockItemKind
+{
+    /// User configured/persisted launcher.
+    Pinned,
+
+    /// Built-in Windows shell shortcuts that always live on the left.
+    StartButton,
+    SearchButton,
+
+    /// Temporary icon for an unpinned app that currently owns a taskbar window.
+    RunningTransient,
+};
+
 /// A single entry in the dock.
 ///
 /// The transform applied when drawing is intentionally composed of three
@@ -20,6 +33,8 @@ namespace ld
 ///                    + scale (bottom anchored growth)
 struct DockItem
 {
+    DockItemKind kind = DockItemKind::Pinned;
+
     std::wstring id;
     std::wstring name;
 
