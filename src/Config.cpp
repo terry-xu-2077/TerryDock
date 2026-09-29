@@ -148,6 +148,12 @@ DockConfig Config::Load()
                 config.settings.tooltipCornerRadius)), 0.0f, 40.0f);
     }
 
+    if (const json::Value* v = root.Find("windowMenuHoverDelayMs"))
+    {
+        config.settings.windowMenuHoverDelayMs = std::clamp(
+            v->AsInt(config.settings.windowMenuHoverDelayMs), 0, 1500);
+    }
+
     if (const json::Value* background = root.Find("background"))
     {
         if (const json::Value* v = background->Find("opacity"))
@@ -417,6 +423,8 @@ bool Config::Save(const DockConfig& config)
     root.Set("tooltipCornerRadius",
              json::Value(static_cast<double>(
                  config.settings.tooltipCornerRadius)));
+    root.Set("windowMenuHoverDelayMs",
+             json::Value(config.settings.windowMenuHoverDelayMs));
 
     json::Value background(json::Value::Type::Object);
     background.Set("opacity",
