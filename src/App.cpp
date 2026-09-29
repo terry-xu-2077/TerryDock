@@ -3677,6 +3677,17 @@ struct TaskbarWindowContext
     std::vector<std::wstring> paths;
 };
 
+bool IsShellUiProcess(const std::wstring& path)
+{
+    const std::wstring name = GetFileName(path);
+    return EqualsIgnoreCase(name, L"SearchHost.exe")
+        || EqualsIgnoreCase(name, L"SearchApp.exe")
+        || EqualsIgnoreCase(name, L"StartMenuExperienceHost.exe")
+        || EqualsIgnoreCase(name, L"ShellExperienceHost.exe")
+        || EqualsIgnoreCase(name, L"TextInputHost.exe")
+        || EqualsIgnoreCase(name, L"LockApp.exe");
+}
+
 BOOL CALLBACK CollectTaskbarWindow(HWND hwnd, LPARAM parameter)
 {
     auto* context = reinterpret_cast<TaskbarWindowContext*>(parameter);
@@ -3723,6 +3734,11 @@ BOOL CALLBACK CollectTaskbarWindow(HWND hwnd, LPARAM parameter)
     }
 
     std::wstring candidate(path, pathLength);
+    if (IsShellUiProcess(candidate))
+    {
+        return TRUE;
+    }
+
     for (const auto& existing : context->paths)
     {
         if (EqualsIgnoreCase(existing, candidate))
