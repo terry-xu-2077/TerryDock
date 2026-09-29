@@ -852,6 +852,72 @@ ComPtr<IWICBitmap> IconLoader::BitmapFromHBitmap(HBITMAP bitmap)
     return normalized;
 }
 
+ComPtr<IWICBitmap> IconLoader::LoadWindowIcon(
+    HWND hwnd,
+    unsigned int size)
+{
+    if (!wic_ || !hwnd || !IsWindow(hwnd) || size == 0)
+    {
+        return {};
+    }
+
+    auto queryWindowIcon = [&](WPARAM kind) -> HICON
+    {
+        DWORD_PTR value = 0;
+        if (SendMessageTimeoutW(
+                hwnd,
+                WM_GETICON,
+                kind,
+                0,
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                60,
+                &value) != 0
+            && value != 0)
+        {
+            return reinterpret_cast<HICON>(value);
+        }
+        return nullptr;
+    };
+
+    HICON icon = queryWindowIcon(ICON_BIG);
+    if (!icon)
+    {
+#ifdef ICON_SMALL2
+        icon = queryWindowIcon(ICON_SMALL2);
+#endif
+    }
+    if (!icon)
+    {
+        icon = queryWindowIcon(ICON_SMALL);
+    }
+    if (!icon)
+    {
+        icon = reinterpret_cast<HICON>(
+            GetClassLongPtrW(hwnd, GCLP_HICON));
+    }
+    if (!icon)
+    {
+        icon = reinterpret_cast<HICON>(
+            GetClassLongPtrW(hwnd, GCLP_HICONSM));
+    }
+
+    if (!icon)
+    {
+        return {};
+    }
+
+    ComPtr<IWICBitmap> bitmap = BitmapFromHIcon(icon, size);
+    if (!bitmap)
+    {
+        return {};
+    }
+
+    // Taskbar HICONs are commonly delivered on a standard square canvas with
+    // transparent padding. Crop that padding aggressively, then scale the
+    // actual artwork back to the requested size.
+    return NormalizeContent(bitmap.Get(), size, true);
+}
+
 ComPtr<IWICBitmap> IconLoader::LoadShellApplicationIcon(
     const std::wstring& appUserModelId,
     unsigned int size)
@@ -908,17 +974,11 @@ ComPtr<IWICBitmap> IconLoader::LoadShellApplicationIcon(
         return {};
     }
 
-    // AppsFolder already selects the shell/taskbar identity. Keep the same
-    // normalization rules as ordinary icons so the artwork fills the slot
-    // consistently with the rest of the dock.
-    bitmap = NormalizeContent(bitmap.Get(), size);
-
-    if (bitmap && IsCircularIcon(bitmap.Get()))
-    {
-        bitmap = NormalizeContent(bitmap.Get(), size, true);
-    }
-
-    return bitmap;
+    // AppsFolder often returns a large icon canvas around comparatively
+    // small artwork. Packaged-app fallback icons therefore use the tight
+    // normalization path unconditionally; ordinary executable icons keep
+    // their existing normalization behaviour elsewhere.
+    return NormalizeContent(bitmap.Get(), size, true);
 }
 
 ComPtr<IWICBitmap> IconLoader::LoadFromCache(const std::wstring& file)
