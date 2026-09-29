@@ -2235,19 +2235,6 @@ void App::RefreshRunningApplications()
     const std::vector<RunningWindowInfo> windows =
         FindRunningTaskbarWindows();
 
-    auto isPinnedPath = [&](const std::wstring& path)
-    {
-        const std::wstring id = MakeStableId(path);
-        return std::any_of(
-            items_.begin(), items_.end(), [&](const auto& item)
-            {
-                return item->kind == DockItemKind::Pinned
-                    && (item->id == id
-                        || EqualsIgnoreCase(item->targetPath, path)
-                        || EqualsIgnoreCase(item->resolvedPath, path));
-            });
-    };
-
     std::vector<std::unique_ptr<DockItem>> persistent;
     std::vector<std::unique_ptr<DockItem>> previousTransient;
     persistent.reserve(items_.size());
@@ -2264,6 +2251,19 @@ void App::RefreshRunningApplications()
             persistent.push_back(std::move(item));
         }
     }
+
+    auto isPinnedPath = [&](const std::wstring& path)
+    {
+        const std::wstring id = MakeStableId(path);
+        return std::any_of(
+            persistent.begin(), persistent.end(), [&](const auto& item)
+            {
+                return item && item->kind == DockItemKind::Pinned
+                    && (item->id == id
+                        || EqualsIgnoreCase(item->targetPath, path)
+                        || EqualsIgnoreCase(item->resolvedPath, path));
+            });
+    };
 
     std::vector<bool> matched(windows.size(), false);
     std::vector<std::unique_ptr<DockItem>> nextTransient;
