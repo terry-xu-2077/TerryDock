@@ -1435,6 +1435,10 @@ void App::UpdateShellPopupPlacement()
     if (elapsed > std::chrono::milliseconds(1800))
     {
         shellPopupPlacementPending_ = false;
+        // Stop reserving the native taskbar band once the shell transition is
+        // over. This also snaps an auto-hidden Dock back to its true monitor
+        // edge if Explorer happened to leave its taskbar visible briefly.
+        UpdateDockWindowPosition();
         return;
     }
 
@@ -1662,7 +1666,13 @@ void App::UpdateDockWindowPosition()
     RECT anchorRect =
         config_.settings.autoHide ? monitorRect : work;
 
-    const int visibleTaskbarInset = config_.settings.autoHide
+    // Only yield to Explorer's revealed taskbar while LightDock itself
+    // intentionally opened Start/Search. A normal edge reveal often wakes
+    // the auto-hidden Windows taskbar too; treating that as permanent inset
+    // made LightDock pop up floating above the taskbar instead of from the
+    // physical screen edge.
+    const int visibleTaskbarInset =
+        config_.settings.autoHide && shellPopupPlacementPending_
         ? VisibleTaskbarInset(monitorRect, config_.settings.dockEdge)
         : 0;
     lastVisibleTaskbarInset_ = visibleTaskbarInset;
@@ -3390,6 +3400,7 @@ void App::CheckPointer()
     const bool inside = HitTest(physicalX, physicalY);
 
     if (config_.settings.autoHide
+        && shellPopupPlacementPending_
         && monitorIndex_ >= 0
         && monitorIndex_ < static_cast<int>(monitors_.size()))
     {
