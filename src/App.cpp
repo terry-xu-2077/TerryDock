@@ -2797,7 +2797,7 @@ void App::Render()
 
     windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
     windowMenuVisibleRows_ = 0;
-    windowMenuRowHeight_ = 0.0f;
+    windowMenuItemWidth_ = 0.0f;
 
     if (windowMenuVisible_ && !windowMenuItemId_.empty())
     {
@@ -2810,21 +2810,38 @@ void App::Render()
         if (menuItem != items_.end() && (*menuItem)->windows.size() >= 2)
         {
             const DockItem& item = **menuItem;
-            constexpr size_t kMaxVisibleWindowRows = 8;
-            const size_t rowCount =
-                (std::min)(item.windows.size(), kMaxVisibleWindowRows);
 
-            // Window management is UI, not icon artwork: keep it readable
-            // even when the user deliberately makes the Dock itself small.
-            // Size it from monitor DPI instead of dockScale_ (which also
-            // contains the Dock's user-controlled overallScale).
+            // One horizontal strip of preview cards. The thumbnail owns most
+            // of each card; the title is a subordinate single line below it.
             const float menuScale = ClampF(
                 config_.settings.windowMenuScale, 0.75f, 1.25f);
-            const float rowHeight = 68.0f * dpiScale_ * menuScale;
-            const float menuWidth = 480.0f * dpiScale_ * menuScale;
-            const float menuHeight = rowHeight * static_cast<float>(rowCount);
+            const float thumbnailScale = ClampF(
+                config_.settings.windowMenuThumbnailScale, 0.6f, 1.4f);
+            const float itemWidth =
+                200.0f * dpiScale_ * menuScale * thumbnailScale;
+            const float thumbnailHeight =
+                112.0f * dpiScale_ * menuScale * thumbnailScale;
+            const float titleHeight =
+                30.0f * dpiScale_ * menuScale;
+            const float verticalPadding =
+                16.0f * dpiScale_ * menuScale;
+            const float menuHeight =
+                thumbnailHeight + titleHeight + verticalPadding;
             const float gap = 6.0f * dpiScale_ * menuScale;
             const float margin = 8.0f * dpiScale_;
+
+            const float availableWidth = (std::max)(
+                itemWidth,
+                static_cast<float>(renderer_.Width()) - margin * 2.0f);
+            const size_t maxVisibleByWidth = (std::max<size_t>)(
+                1, static_cast<size_t>(
+                    std::floor(availableWidth / itemWidth)));
+            constexpr size_t kMaxVisibleWindowItems = 8;
+            const size_t rowCount = (std::min)(
+                item.windows.size(),
+                (std::min)(kMaxVisibleWindowItems, maxVisibleByWidth));
+            const float menuWidth =
+                itemWidth * static_cast<float>(rowCount);
 
             const float bottom = item.baselineBottom + item.bounceOffset;
             const D2D1_RECT_F logicalIcon = D2D1::RectF(
@@ -2902,7 +2919,7 @@ void App::Render()
 
             windowMenuBounds_ = menu;
             windowMenuVisibleRows_ = static_cast<int>(rowCount);
-            windowMenuRowHeight_ = rowHeight;
+            windowMenuItemWidth_ = itemWidth;
 
             std::vector<WindowPreview::Entry> previewEntries;
             previewEntries.reserve(rowCount);
@@ -3632,14 +3649,14 @@ int App::WindowMenuRowAt(float physicalX, float physicalY) const
         || physicalX > windowMenuBounds_.right
         || physicalY < windowMenuBounds_.top
         || physicalY > windowMenuBounds_.bottom
-        || windowMenuRowHeight_ <= 0.0f
+        || windowMenuItemWidth_ <= 0.0f
         || windowMenuVisibleRows_ <= 0)
     {
         return -1;
     }
 
     const int row = static_cast<int>(
-        (physicalY - windowMenuBounds_.top) / windowMenuRowHeight_);
+        (physicalX - windowMenuBounds_.left) / windowMenuItemWidth_);
     return row >= 0 && row < windowMenuVisibleRows_ ? row : -1;
 }
 
