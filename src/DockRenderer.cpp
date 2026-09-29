@@ -1069,6 +1069,93 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
     }
 }
 
+void DockRenderer::DrawBubbleTail(const D2D1_RECT_F& body,
+                                  D2D1_POINT_2F tip,
+                                  DockEdge edge,
+                                  float scale,
+                                  float opacity)
+{
+    if (!rt_ || !d2d_ || body.right <= body.left || body.bottom <= body.top)
+    {
+        return;
+    }
+
+    const D2D1_MATRIX_3X2_F previous =
+        DockTransform(edge_, logicalWidth_, logicalHeight_).Matrix();
+    rt_->SetTransform(D2D1::Matrix3x2F::Identity());
+
+    const float safeScale = ClampF(scale, 0.5f, 2.0f);
+    const float halfBase = 8.0f * safeScale;
+    const float alpha = ClampF(opacity, 0.0f, 1.0f);
+
+    ComPtr<ID2D1SolidColorBrush> fill;
+    rt_->CreateSolidColorBrush(
+        D2D1::ColorF(0.96f, 0.98f, 1.0f, 0.92f * alpha),
+        fill.AddressOf());
+
+    if (!fill)
+    {
+        rt_->SetTransform(previous);
+        return;
+    }
+
+    ComPtr<ID2D1PathGeometry> geometry;
+    if (FAILED(d2d_->CreatePathGeometry(geometry.AddressOf())))
+    {
+        rt_->SetTransform(previous);
+        return;
+    }
+
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geometry->Open(sink.AddressOf())))
+    {
+        rt_->SetTransform(previous);
+        return;
+    }
+
+    switch (edge)
+    {
+    case DockEdge::Top:
+        sink->BeginFigure(
+            D2D1::Point2F(tip.x - halfBase, body.top),
+            D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(tip);
+        sink->AddLine(D2D1::Point2F(tip.x + halfBase, body.top));
+        break;
+
+    case DockEdge::Left:
+        sink->BeginFigure(
+            D2D1::Point2F(body.left, tip.y - halfBase),
+            D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(tip);
+        sink->AddLine(D2D1::Point2F(body.left, tip.y + halfBase));
+        break;
+
+    case DockEdge::Right:
+        sink->BeginFigure(
+            D2D1::Point2F(body.right, tip.y - halfBase),
+            D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(tip);
+        sink->AddLine(D2D1::Point2F(body.right, tip.y + halfBase));
+        break;
+
+    case DockEdge::Bottom:
+    default:
+        sink->BeginFigure(
+            D2D1::Point2F(tip.x - halfBase, body.bottom),
+            D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(tip);
+        sink->AddLine(D2D1::Point2F(tip.x + halfBase, body.bottom));
+        break;
+    }
+
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    sink->Close();
+    rt_->FillGeometry(geometry.Get(), fill.Get());
+
+    rt_->SetTransform(previous);
+}
+
 void DockRenderer::DrawWindowMenu(
     const D2D1_RECT_F& rect,
     const std::vector<std::wstring>& titles,
