@@ -121,6 +121,10 @@ struct DockSettings
     bool englishLanguage = false;
     float tooltipCornerRadius = 10.0f;
 
+    /// Delay before an app with multiple windows expands its window menu.
+    /// 400 ms matches the familiar Windows taskbar hover cadence.
+    int windowMenuHoverDelayMs = 400;
+
     IconBackdrop backdrop;
 
     PanelMode panelMode = PanelMode::Fixed;
