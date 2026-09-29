@@ -384,7 +384,7 @@ private:
     int windowMenuHoveredRow_ = -1;
     int windowMenuPressedRow_ = -1;
     int windowMenuVisibleRows_ = 0;
-    float windowMenuRowHeight_ = 0.0f;
+    float windowMenuItemWidth_ = 0.0f;
     D2D1_RECT_F windowMenuBounds_{};
 
     /// Width of the panel in macOS "expand once" mode, animated.
