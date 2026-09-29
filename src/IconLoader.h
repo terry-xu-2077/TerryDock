@@ -41,6 +41,11 @@ public:
         const std::wstring& appUserModelId,
         unsigned int size);
 
+    /// Reads the HICON Windows exposes on a running top-level window. This is
+    /// usually the same unplated artwork the taskbar uses, which avoids the
+    /// tiny glyph-inside-a-tile result AppsFolder can return for packaged apps.
+    ComPtr<IWICBitmap> LoadWindowIcon(HWND hwnd, unsigned int size);
+
     /// Stores an icon in the cache directory as PNG.
     bool SaveToCache(IWICBitmap* bitmap, const std::wstring& file);
 
