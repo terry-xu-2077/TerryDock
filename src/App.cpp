@@ -1112,33 +1112,52 @@ void App::UpdateDockWindowPosition()
 
     const RECT work = CurrentWorkArea();
     lastWorkArea_ = work;
+
+    RECT monitorRect = work;
+    if (monitorIndex_ >= 0 && monitorIndex_ < static_cast<int>(monitors_.size()))
+    {
+        monitorRect = monitors_[static_cast<size_t>(monitorIndex_)].rect;
+    }
+
+    // Overlay/auto-hide mode must hug the real monitor edge. rcWork can still
+    // contain a 40-50 px reservation from the Windows taskbar even when that
+    // taskbar is visually hidden, which made LightDock float above the edge.
+    const RECT& anchorRect =
+        config_.settings.autoHide ? monitorRect : work;
+
     const int gap = static_cast<int>(std::round(kBottomGap * dockScale_));
-    int x = work.left + ((work.right - work.left) - width) / 2;
-    int y = work.bottom - static_cast<int>(std::round(geometry_.panelY));
+    int x = anchorRect.left
+        + ((anchorRect.right - anchorRect.left) - width) / 2;
+    int y = anchorRect.bottom
+        - static_cast<int>(std::round(geometry_.panelY));
 
     switch (config_.settings.dockEdge)
     {
     case DockEdge::Top:
         y = config_.settings.autoHide
-            ? work.top + gap - static_cast<int>(std::round(geometry_.panelY))
-            : work.top - static_cast<int>(std::round(
+            ? anchorRect.top + gap
+                - static_cast<int>(std::round(geometry_.panelY))
+            : anchorRect.top - static_cast<int>(std::round(
                 geometry_.panelY + geometry_.panelHeight));
         break;
     case DockEdge::Left:
         x = config_.settings.autoHide
-            ? work.left + gap - static_cast<int>(std::round(geometry_.panelY))
-            : work.left - static_cast<int>(std::round(
+            ? anchorRect.left + gap
+                - static_cast<int>(std::round(geometry_.panelY))
+            : anchorRect.left - static_cast<int>(std::round(
                 geometry_.panelY + geometry_.panelHeight));
-        y = work.top + ((work.bottom - work.top) - height) / 2;
+        y = anchorRect.top
+            + ((anchorRect.bottom - anchorRect.top) - height) / 2;
         break;
     case DockEdge::Right:
         x = config_.settings.autoHide
-            ? work.right - gap - width
+            ? anchorRect.right - gap - width
                 + static_cast<int>(std::round(geometry_.panelY))
-            : work.right - width
+            : anchorRect.right - width
                 + static_cast<int>(std::round(geometry_.panelY
                                                + geometry_.panelHeight));
-        y = work.top + ((work.bottom - work.top) - height) / 2;
+        y = anchorRect.top
+            + ((anchorRect.bottom - anchorRect.top) - height) / 2;
         break;
     case DockEdge::Bottom:
     default:
@@ -1146,15 +1165,9 @@ void App::UpdateDockWindowPosition()
         {
             const int panelBottom = static_cast<int>(
                 std::round(geometry_.panelY + geometry_.panelHeight));
-            y = work.bottom - gap - panelBottom;
+            y = anchorRect.bottom - gap - panelBottom;
         }
         break;
-    }
-
-    RECT monitorRect = work;
-    if (monitorIndex_ >= 0 && monitorIndex_ < static_cast<int>(monitors_.size()))
-    {
-        monitorRect = monitors_[static_cast<size_t>(monitorIndex_)].rect;
     }
     const float hiddenProgress =
         1.0f - ClampF(fullscreenVisibility_.value, 0.0f, 1.0f);
@@ -1944,7 +1957,14 @@ void App::Tick(double dt)
     if (hideIndicatorVisibility_.value > 0.001f)
     {
         const RECT dockBounds = window_.GetBounds();
-        const RECT work = CurrentWorkArea();
+        RECT indicatorRect = CurrentWorkArea();
+        if (monitorIndex_ >= 0
+            && monitorIndex_ < static_cast<int>(monitors_.size()))
+        {
+            indicatorRect =
+                monitors_[static_cast<size_t>(monitorIndex_)].rect;
+        }
+
         const int indicatorHeight = (std::max)(
             1, static_cast<int>(std::lround(5.0f * dockScale_)));
         const int fullIndicatorWidth = (std::max)(
@@ -1957,12 +1977,12 @@ void App::Tick(double dt)
         int indicatorX = dockBounds.left
             + static_cast<int>(std::lround(frame_.panelX
                 + (fullIndicatorWidth - indicatorLength) * 0.5f));
-        int indicatorY = work.bottom - indicatorHeight;
+        int indicatorY = indicatorRect.bottom - indicatorHeight;
         int indicatorWidth = indicatorLength;
         int actualIndicatorHeight = indicatorHeight;
         if (config_.settings.dockEdge == DockEdge::Top)
         {
-            indicatorY = work.top;
+            indicatorY = indicatorRect.top;
         }
         else if (config_.settings.dockEdge == DockEdge::Left
                  || config_.settings.dockEdge == DockEdge::Right)
@@ -1970,7 +1990,7 @@ void App::Tick(double dt)
             indicatorWidth = indicatorHeight;
             actualIndicatorHeight = indicatorLength;
             indicatorX = config_.settings.dockEdge == DockEdge::Left
-                ? work.left : work.right - indicatorWidth;
+                ? indicatorRect.left : indicatorRect.right - indicatorWidth;
             indicatorY = dockBounds.top + static_cast<int>(std::lround(
                 frame_.panelX + (fullIndicatorWidth - indicatorLength) * 0.5f));
         }
@@ -2248,11 +2268,15 @@ void App::Render()
             const size_t rowCount =
                 (std::min)(item.windows.size(), kMaxVisibleWindowRows);
 
-            const float rowHeight = 30.0f * dockScale_;
-            const float menuWidth = 320.0f * dockScale_;
+            // Window management is UI, not icon artwork: keep it readable
+            // even when the user deliberately makes the Dock itself small.
+            // Size it from monitor DPI instead of dockScale_ (which also
+            // contains the Dock's user-controlled overallScale).
+            const float rowHeight = 38.0f * dpiScale_;
+            const float menuWidth = 360.0f * dpiScale_;
             const float menuHeight = rowHeight * static_cast<float>(rowCount);
-            const float gap = 10.0f * dockScale_;
-            const float margin = 8.0f * dockScale_;
+            const float gap = 6.0f * dpiScale_;
+            const float margin = 8.0f * dpiScale_;
 
             const float bottom = item.baselineBottom + item.bounceOffset;
             const D2D1_RECT_F logicalIcon = D2D1::RectF(
@@ -2350,7 +2374,7 @@ void App::Render()
 
             renderer_.DrawWindowMenu(
                 menu, titles, active, minimized,
-                windowMenuHoveredRow_, dockScale_, 1.0f);
+                windowMenuHoveredRow_, dpiScale_, 1.0f);
         }
     }
 
