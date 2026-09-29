@@ -3504,6 +3504,7 @@ void App::RefreshRunningApplications()
         {
             item->windows.clear();
             item->runtimeApplicationName.clear();
+            item->runtimeAppUserModelId.clear();
         }
     }
 
