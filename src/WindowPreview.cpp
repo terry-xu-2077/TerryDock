@@ -273,7 +273,7 @@ void WindowPreview::UpdateThumbnailRects()
     const int topPad = ScalePx(7.0f, uiScale);
     const int titleHeight = ScalePx(20.0f, uiScale);
     const int titleGap = ScalePx(3.0f, uiScale);
-    const int previewHeight = ScalePx(77.0f, uiScale);
+    const int previewHeight = ScalePx(85.0f, uiScale);
     const int previewTop = topPad + titleHeight + titleGap;
     const int previewBottom = (std::min)(
         height, previewTop + previewHeight);
@@ -551,9 +551,9 @@ void WindowPreview::InvalidateHoverTransition(int oldRow, int newRow)
     const int topPad = ScalePx(7.0f, uiScale);
     const int titleHeight = ScalePx(20.0f, uiScale);
     const int titleGap = ScalePx(3.0f, uiScale);
-    const int previewHeight = ScalePx(77.0f, uiScale);
+    const int previewHeight = ScalePx(85.0f, uiScale);
     const int frameBottomPad = ScalePx(5.0f, uiScale);
-    const int appNameHeight = ScalePx(22.0f, uiScale);
+    const int appNameHeight = ScalePx(24.0f, uiScale);
     const int appBottomPad = ScalePx(5.0f, uiScale);
     const int previewTop = topPad + titleHeight + titleGap;
     const int previewBottom = (std::min)(
@@ -660,9 +660,9 @@ void WindowPreview::Paint()
     const int frameInset = ScalePx(5.0f, uiScale);
     const int titleHeight = ScalePx(20.0f, uiScale);
     const int titleGap = ScalePx(3.0f, uiScale);
-    const int previewHeight = ScalePx(77.0f, uiScale);
+    const int previewHeight = ScalePx(85.0f, uiScale);
     const int frameBottomPad = ScalePx(5.0f, uiScale);
-    const int appNameHeight = ScalePx(22.0f, uiScale);
+    const int appNameHeight = ScalePx(24.0f, uiScale);
     const int appBottomPad = ScalePx(5.0f, uiScale);
     const int previewTop = topPad + titleHeight + titleGap;
     const int previewBottom = (std::min)(
@@ -796,7 +796,7 @@ void WindowPreview::Paint()
         // still perceptually smaller after inheriting the preview menu scale,
         // so give just this label another 10% size.
         HFONT appFont = CreateFontW(
-            -ScalePx(15.4f, uiScale),
+            -ScalePx(17.0f, uiScale),
             0, 0, 0, FW_NORMAL,
             FALSE, FALSE, FALSE,
             DEFAULT_CHARSET,
