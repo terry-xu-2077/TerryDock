@@ -3275,12 +3275,28 @@ void App::ShowContextMenu(int index, float x, float y)
 
     if (index >= 0)
     {
-        // Per application only: this app's shortcut properties.
-        AppendMenuW(menu, MF_STRING, kMenuOpen, UiText(L"打开"));
-        AppendMenuW(menu, MF_STRING, kMenuOpenFolder,
-                    UiText(L"打开所在文件夹"));
-        AppendMenuW(menu, MF_STRING, kMenuEdit, UiText(L"图标配置…"));
-        AppendMenuW(menu, MF_STRING, kMenuRemove, UiText(L"从 Dock 移除"));
+        const DockItem& item = *items_[static_cast<size_t>(index)];
+
+        if (item.kind == DockItemKind::Pinned)
+        {
+            AppendMenuW(menu, MF_STRING, kMenuOpen, UiText(L"打开"));
+            AppendMenuW(menu, MF_STRING, kMenuOpenFolder,
+                        UiText(L"打开所在文件夹"));
+            AppendMenuW(menu, MF_STRING, kMenuEdit, UiText(L"图标配置…"));
+            AppendMenuW(menu, MF_STRING, kMenuRemove, UiText(L"从 Dock 移除"));
+        }
+        else if (item.kind == DockItemKind::RunningTransient)
+        {
+            AppendMenuW(menu, MF_STRING, kMenuOpen, UiText(L"打开"));
+            AppendMenuW(menu, MF_STRING, kMenuOpenFolder,
+                        UiText(L"打开所在文件夹"));
+            AppendMenuW(menu, MF_STRING, kMenuPinRunning,
+                        UiText(L"固定到 Dock"));
+        }
+        else
+        {
+            AppendMenuW(menu, MF_STRING, kMenuOpen, UiText(L"打开"));
+        }
     }
     else
     {
@@ -3460,6 +3476,21 @@ void App::HandleMenuCommand(UINT id)
             const std::wstring& path = item.resolvedPath.empty()
                 ? item.targetPath : item.resolvedPath;
             AppLauncher::RevealInExplorer(path);
+        }
+
+        break;
+
+    case kMenuPinRunning:
+        if (menuIndex_ >= 0
+            && menuIndex_ < static_cast<int>(items_.size()))
+        {
+            const DockItem& item =
+                *items_[static_cast<size_t>(menuIndex_)];
+            if (item.kind == DockItemKind::RunningTransient)
+            {
+                AddApplication(item.resolvedPath.empty()
+                    ? item.targetPath : item.resolvedPath);
+            }
         }
 
         break;
