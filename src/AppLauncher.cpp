@@ -101,6 +101,10 @@ bool AppLauncher::ActivateWindow(HWND target)
         return false;
     }
 
+    // Never synchronously manipulate another application's input queue here.
+    // A hung/busy target must not be able to stall LightDock's render loop.
+    // ShowWindowAsync and SWP_ASYNCWINDOWPOS queue the work to the target
+    // thread instead of waiting for it to process window messages.
     if (IsIconic(target))
     {
         ShowWindowAsync(target, SW_RESTORE);
@@ -114,37 +118,22 @@ bool AppLauncher::ActivateWindow(HWND target)
         ShowWindowAsync(target, SW_SHOWNOACTIVATE);
     }
 
-    BringWindowToTop(target);
+    SetWindowPos(
+        target,
+        HWND_TOP,
+        0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+            | SWP_ASYNCWINDOWPOS);
 
-    const DWORD targetThread = GetWindowThreadProcessId(target, nullptr);
-    const HWND foreground = GetForegroundWindow();
-    const DWORD foregroundThread = foreground
-        ? GetWindowThreadProcessId(foreground, nullptr) : 0;
-    const DWORD currentThread = GetCurrentThreadId();
-
-    const bool attachForeground = foregroundThread != 0
-        && foregroundThread != currentThread
-        && AttachThreadInput(currentThread, foregroundThread, TRUE) != FALSE;
-    const bool attachTarget = targetThread != 0
-        && targetThread != currentThread
-        && targetThread != foregroundThread
-        && AttachThreadInput(currentThread, targetThread, TRUE) != FALSE;
-
-    SetForegroundWindow(target);
-    SetActiveWindow(target);
-
-    if (attachTarget)
+    const BOOL foreground = SetForegroundWindow(target);
+    if (!foreground)
     {
-        AttachThreadInput(currentThread, targetThread, FALSE);
-    }
-    if (attachForeground)
-    {
-        AttachThreadInput(currentThread, foregroundThread, FALSE);
-    }
-
-    if (GetForegroundWindow() != target)
-    {
-        FlashWindow(target, TRUE);
+        FLASHWINFO flash{};
+        flash.cbSize = sizeof(flash);
+        flash.hwnd = target;
+        flash.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
+        flash.uCount = 2;
+        FlashWindowEx(&flash);
     }
 
     return true;
@@ -183,7 +172,9 @@ bool AppLauncher::Launch(const std::wstring& path, const std::wstring& arguments
     info.cbSize = sizeof(info);
     // Keep the shell UI enabled so Windows can explain missing file
     // associations or an unavailable script runtime to the user.
-    info.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
+    // Allow the shell to complete activation/DDE work asynchronously.
+    // SEE_MASK_NOASYNC can make the Dock wait behind a busy application.
+    info.fMask = SEE_MASK_ASYNCOK | SEE_MASK_NOCLOSEPROCESS;
     info.lpVerb = L"open";
     info.lpFile = path.c_str();
     info.lpParameters = arguments.empty() ? nullptr : arguments.c_str();
