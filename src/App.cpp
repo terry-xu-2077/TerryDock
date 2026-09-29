@@ -3040,27 +3040,14 @@ void App::Render()
     {
         const PlateStyle& own = item->plate;
 
-        // Packaged/UWP applications already arrive from AppsFolder in the
-        // same visual form Windows uses for the taskbar. Giving a transient
-        // Shell icon another LightDock plate shrinks it to ~85% and creates
-        // the double-tile look (most visible on Photos). Draw those runtime
-        // icons directly at the full dock slot instead.
-        const bool shellRuntimeIcon =
-            item->kind == DockItemKind::RunningTransient
-            && !item->runtimeAppUserModelId.empty();
-        const bool plateOn = own.enabled && !shellRuntimeIcon;
+        const bool plateOn = own.enabled;
 
         // How much of the plate the icon itself occupies. A zero stored
-        // ratio means "follow the global default". Shell runtime icons are
-        // already presentation-ready, so they always use the full slot.
-        const float iconFill = shellRuntimeIcon
-            ? 1.0f
-            : plateOn
-                ? ClampF(
-                    own.iconScale > 0.0f
-                        ? own.iconScale : backdrop.iconScale,
-                    0.4f, 1.5f)
-                : 1.0f;
+        // ratio means "follow the global default".
+        const float iconFill = plateOn
+            ? ClampF(own.iconScale > 0.0f ? own.iconScale : backdrop.iconScale,
+                     0.4f, 1.5f)
+            : 1.0f;
 
         // Clip against the plate, independent of the artwork's fill ratio.
         // The artwork itself stays unmasked so shrinking it does not shrink
@@ -3698,16 +3685,32 @@ void App::RefreshRunningApplications()
             item->name = group.applicationName;
         }
 
-        if (identityChanged && !group.appUserModelId.empty())
+        if (!item->windows.empty()
+            && (identityChanged || !item->runtimeWindowIconLoaded))
         {
-            if (ComPtr<IWICBitmap> shellIcon =
-                    icons_.LoadShellApplicationIcon(
-                        group.appUserModelId, 256))
+            if (ComPtr<IWICBitmap> windowIcon =
+                    icons_.LoadWindowIcon(
+                        item->windows.front().hwnd, 256))
             {
-                item->iconSource = std::move(shellIcon);
+                item->iconSource = std::move(windowIcon);
+                item->runtimeWindowIconLoaded = true;
                 item->icon.Reset();
                 item->iconBitmapScale = 0.0f;
                 item->iconCornerFraction = -1.0f;
+            }
+            else if (identityChanged
+                     && !group.appUserModelId.empty())
+            {
+                if (ComPtr<IWICBitmap> shellIcon =
+                        icons_.LoadShellApplicationIcon(
+                            group.appUserModelId, 256))
+                {
+                    item->iconSource = std::move(shellIcon);
+                    item->runtimeWindowIconLoaded = false;
+                    item->icon.Reset();
+                    item->iconBitmapScale = 0.0f;
+                    item->iconCornerFraction = -1.0f;
+                }
             }
         }
 
@@ -3742,15 +3745,28 @@ void App::RefreshRunningApplications()
         item->processName = info.processName.empty()
             ? GetFileName(item->resolvedPath) : info.processName;
 
-        if (!group.appUserModelId.empty())
+        if (!group.windows.empty())
+        {
+            item->iconSource =
+                icons_.LoadWindowIcon(
+                    group.windows.front().hwnd, 256);
+            item->runtimeWindowIconLoaded =
+                item->iconSource != nullptr;
+        }
+
+        if (!item->iconSource
+            && !group.appUserModelId.empty())
         {
             item->iconSource =
                 icons_.LoadShellApplicationIcon(
                     group.appUserModelId, 256);
+            item->runtimeWindowIconLoaded = false;
         }
+
         if (!item->iconSource)
         {
             item->iconSource = info.icon;
+            item->runtimeWindowIconLoaded = false;
         }
 
         item->running = true;
