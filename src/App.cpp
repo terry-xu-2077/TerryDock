@@ -962,7 +962,7 @@ void App::LaunchApplication(size_t index)
 
     if (item.kind == DockItemKind::RunningTransient)
     {
-        if (!AppLauncher::ActivateRunningWindow(item.processName))
+        if (!AppLauncher::ActivateWindow(item.windowHandle))
         {
             AppLauncher::Open(item.resolvedPath.empty()
                 ? item.targetPath : item.resolvedPath);
@@ -3671,10 +3671,17 @@ void App::HandleMenuCommand(UINT id)
 namespace
 {
 
+struct TaskbarWindowRecord
+{
+    HWND hwnd = nullptr;
+    std::wstring path;
+    std::wstring title;
+};
+
 struct TaskbarWindowContext
 {
     HWND dock = nullptr;
-    std::vector<std::wstring> paths;
+    std::vector<TaskbarWindowRecord> windows;
 };
 
 bool IsShellUiProcess(const std::wstring& path)
@@ -3691,20 +3698,38 @@ bool IsShellUiProcess(const std::wstring& path)
 BOOL CALLBACK CollectTaskbarWindow(HWND hwnd, LPARAM parameter)
 {
     auto* context = reinterpret_cast<TaskbarWindowContext*>(parameter);
-    if (!context || !IsWindowVisible(hwnd) || hwnd == context->dock
-        || GetWindow(hwnd, GW_OWNER) != nullptr)
+    if (!context || !IsWindowVisible(hwnd) || hwnd == context->dock)
     {
         return TRUE;
     }
 
     const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    if ((exStyle & WS_EX_TOOLWINDOW) != 0)
+    const HWND owner = GetWindow(hwnd, GW_OWNER);
+
+    // Match normal taskbar eligibility more closely: owned windows are
+    // normally secondary/tool surfaces unless WS_EX_APPWINDOW explicitly
+    // asks for taskbar presence.
+    if (owner != nullptr && (exStyle & WS_EX_APPWINDOW) == 0)
+    {
+        return TRUE;
+    }
+    if ((exStyle & WS_EX_TOOLWINDOW) != 0
+        && (exStyle & WS_EX_APPWINDOW) == 0)
+    {
+        return TRUE;
+    }
+
+    DWORD cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(
+            hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+        && cloaked != 0)
     {
         return TRUE;
     }
 
     wchar_t title[512]{};
-    if (GetWindowTextW(hwnd, title, ARRAYSIZE(title)) <= 0)
+    const int titleLength = GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+    if (titleLength <= 0)
     {
         return TRUE;
     }
@@ -3728,6 +3753,7 @@ BOOL CALLBACK CollectTaskbarWindow(HWND hwnd, LPARAM parameter)
     const BOOL gotPath = QueryFullProcessImageNameW(
         process, 0, path, &pathLength);
     CloseHandle(process);
+
     if (!gotPath || pathLength == 0)
     {
         return TRUE;
@@ -3739,43 +3765,74 @@ BOOL CALLBACK CollectTaskbarWindow(HWND hwnd, LPARAM parameter)
         return TRUE;
     }
 
-    for (const auto& existing : context->paths)
-    {
-        if (EqualsIgnoreCase(existing, candidate))
-        {
-            return TRUE;
-        }
-    }
-
-    context->paths.push_back(std::move(candidate));
+    TaskbarWindowRecord record;
+    record.hwnd = hwnd;
+    record.path = std::move(candidate);
+    record.title.assign(title, static_cast<size_t>(titleLength));
+    context->windows.push_back(std::move(record));
     return TRUE;
 }
 
 } // namespace
 
-std::vector<std::wstring> App::FindRunningTaskbarApplications() const
+std::vector<App::RunningWindowInfo> App::FindRunningTaskbarWindows() const
 {
     TaskbarWindowContext context;
     context.dock = window_.Handle();
     EnumWindows(CollectTaskbarWindow, reinterpret_cast<LPARAM>(&context));
 
-    std::vector<std::wstring> filtered;
-    for (const auto& path : context.paths)
+    std::vector<RunningWindowInfo> result;
+    result.reserve(context.windows.size());
+
+    for (auto& record : context.windows)
     {
-        const std::wstring id = MakeStableId(path);
-        const bool alreadyAdded = std::any_of(
-            items_.begin(), items_.end(), [&path, &id](const auto& item)
+        RunningWindowInfo info;
+        info.hwnd = record.hwnd;
+        info.path = std::move(record.path);
+        info.title = std::move(record.title);
+        result.push_back(std::move(info));
+    }
+
+    return result;
+}
+
+
+std::vector<std::wstring> App::FindRunningTaskbarApplications() const
+{
+    const std::vector<RunningWindowInfo> windows =
+        FindRunningTaskbarWindows();
+
+    std::vector<std::wstring> filtered;
+    for (const RunningWindowInfo& window : windows)
+    {
+        const std::wstring id = MakeStableId(window.path);
+        const bool alreadyPinned = std::any_of(
+            items_.begin(), items_.end(), [&](const auto& item)
             {
                 return item->kind == DockItemKind::Pinned
                     && (item->id == id
-                        || EqualsIgnoreCase(item->targetPath, path)
-                        || EqualsIgnoreCase(item->resolvedPath, path));
+                        || EqualsIgnoreCase(item->targetPath, window.path)
+                        || EqualsIgnoreCase(item->resolvedPath, window.path));
             });
-        if (!alreadyAdded)
+
+        if (alreadyPinned)
         {
-            filtered.push_back(path);
+            continue;
+        }
+
+        const bool alreadyListed = std::any_of(
+            filtered.begin(), filtered.end(),
+            [&](const std::wstring& path)
+            {
+                return EqualsIgnoreCase(path, window.path);
+            });
+
+        if (!alreadyListed)
+        {
+            filtered.push_back(window.path);
         }
     }
+
     return filtered;
 }
 
