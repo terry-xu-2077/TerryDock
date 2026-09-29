@@ -2757,6 +2757,29 @@ void App::OnMouseMove(float x, float y)
         return;
     }
 
+    mousePhysicalX_ = x;
+    mousePhysicalY_ = y;
+
+    const int windowRow = WindowMenuRowAt(x, y);
+    if (windowRow >= 0)
+    {
+        if (windowMenuHoveredRow_ != windowRow)
+        {
+            windowMenuHoveredRow_ = windowRow;
+            needsRender_ = true;
+        }
+
+        mouseActive_ = true;
+        WakeAnimation();
+        return;
+    }
+
+    if (windowMenuHoveredRow_ != -1)
+    {
+        windowMenuHoveredRow_ = -1;
+        needsRender_ = true;
+    }
+
     const D2D1_POINT_2F logical = dockTransform_.ToLogical(x, y);
     x = logical.x;
     y = logical.y;
