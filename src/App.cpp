@@ -957,6 +957,12 @@ bool App::Initialize(HINSTANCE instance)
         return false;
     }
 
+    if (!windowPreview_.Initialize(instance))
+    {
+        window_.Destroy();
+        return false;
+    }
+
     DetectRefreshRate();
     RefreshMonitors();
     LoadItems();
@@ -975,6 +981,7 @@ void App::Shutdown()
     items_.clear();
     pointers_.clear();
 
+    windowPreview_.Shutdown();
     renderer_.Shutdown();
     window_.Destroy();
 }
@@ -2741,7 +2748,7 @@ void App::Render()
         if (menuItem != items_.end() && (*menuItem)->windows.size() >= 2)
         {
             const DockItem& item = **menuItem;
-            constexpr size_t kMaxVisibleWindowRows = 16;
+            constexpr size_t kMaxVisibleWindowRows = 8;
             const size_t rowCount =
                 (std::min)(item.windows.size(), kMaxVisibleWindowRows);
 
@@ -2749,8 +2756,8 @@ void App::Render()
             // even when the user deliberately makes the Dock itself small.
             // Size it from monitor DPI instead of dockScale_ (which also
             // contains the Dock's user-controlled overallScale).
-            const float rowHeight = 38.0f * dpiScale_;
-            const float menuWidth = 360.0f * dpiScale_;
+            const float rowHeight = 68.0f * dpiScale_;
+            const float menuWidth = 480.0f * dpiScale_;
             const float menuHeight = rowHeight * static_cast<float>(rowCount);
             const float gap = 6.0f * dpiScale_;
             const float margin = 8.0f * dpiScale_;
@@ -2833,26 +2840,43 @@ void App::Render()
             windowMenuVisibleRows_ = static_cast<int>(rowCount);
             windowMenuRowHeight_ = rowHeight;
 
-            std::vector<std::wstring> titles;
-            std::vector<bool> active;
-            std::vector<bool> minimized;
-            titles.reserve(rowCount);
-            active.reserve(rowCount);
-            minimized.reserve(rowCount);
+            std::vector<WindowPreview::Entry> previewEntries;
+            previewEntries.reserve(rowCount);
 
             for (size_t i = 0; i < rowCount; ++i)
             {
                 const DockWindowEntry& window = item.windows[i];
-                titles.push_back(window.title.empty()
-                    ? item.name : window.title);
-                active.push_back(window.active);
-                minimized.push_back(window.minimized);
+                WindowPreview::Entry entry;
+                entry.hwnd = window.hwnd;
+                entry.title = window.title.empty()
+                    ? item.name : window.title;
+                entry.active = window.active;
+                entry.minimized = window.minimized;
+                previewEntries.push_back(std::move(entry));
             }
 
-            renderer_.DrawWindowMenu(
-                menu, titles, active, minimized,
-                windowMenuHoveredRow_, dpiScale_, 1.0f);
+            const RECT dockBounds = window_.GetBounds();
+            const RECT screenMenu{
+                dockBounds.left
+                    + static_cast<LONG>(std::lround(menu.left)),
+                dockBounds.top
+                    + static_cast<LONG>(std::lround(menu.top)),
+                dockBounds.left
+                    + static_cast<LONG>(std::lround(menu.right)),
+                dockBounds.top
+                    + static_cast<LONG>(std::lround(menu.bottom))};
+
+            windowPreview_.Show(
+                screenMenu, previewEntries,
+                windowMenuHoveredRow_, dpiScale_);
         }
+    }
+
+    if (!windowMenuVisible_
+        || windowMenuBounds_.right <= windowMenuBounds_.left
+        || windowMenuBounds_.bottom <= windowMenuBounds_.top)
+    {
+        windowPreview_.Hide();
     }
 
     // The label is rendered in the same layered surface as the dock, so it
@@ -3553,6 +3577,7 @@ void App::OnMouseMove(float x, float y)
         if (windowMenuHoveredRow_ != windowRow)
         {
             windowMenuHoveredRow_ = windowRow;
+            windowPreview_.SetHoveredRow(windowRow);
             needsRender_ = true;
         }
 
@@ -3564,6 +3589,7 @@ void App::OnMouseMove(float x, float y)
     if (windowMenuHoveredRow_ != -1)
     {
         windowMenuHoveredRow_ = -1;
+        windowPreview_.SetHoveredRow(-1);
         needsRender_ = true;
     }
 
@@ -3657,6 +3683,7 @@ void App::OnMouseButton(int button, bool down, float x, float y)
         }
 
         windowMenuVisible_ = false;
+        windowPreview_.Hide();
         windowMenuHoveredRow_ = -1;
         windowMenuHoverElapsed_ = 0.0f;
         windowMenuLeaveElapsed_ = 0.0f;
