@@ -433,9 +433,23 @@ void DockWindow::SetBounds(int x, int y, int width, int height)
         return;
     }
 
+    // HWND_TOPMOST was previously paired with SWP_NOZORDER, which makes the
+    // HWND_TOPMOST argument a no-op. That allowed Explorer's auto-hidden
+    // taskbar to raise itself above LightDock after the dock revealed.
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height,
-                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER
-                 | SWP_SHOWWINDOW);
+                 SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+}
+
+void DockWindow::EnsureTopmost()
+{
+    if (!hwnd_)
+    {
+        return;
+    }
+
+    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                 | SWP_NOOWNERZORDER);
 }
 
 RECT DockWindow::GetBounds() const
