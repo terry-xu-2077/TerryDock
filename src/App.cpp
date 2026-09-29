@@ -267,7 +267,7 @@ bool IsWindowsShellUiWindow(HWND hwnd)
 
 bool IsWindows11OrLater()
 {
-    using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
 
     static const bool windows11 = []()
     {
@@ -284,7 +284,7 @@ bool IsWindows11OrLater()
             return false;
         }
 
-        RTL_OSVERSIONINFOW version{};
+        OSVERSIONINFOW version{};
         version.dwOSVersionInfoSize = sizeof(version);
         if (rtlGetVersion(&version) != 0)
         {
