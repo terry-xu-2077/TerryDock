@@ -654,6 +654,7 @@ bool App::Initialize(HINSTANCE instance)
     RefreshMonitors();
     LoadItems();
     RebuildMetrics();
+    PollProcesses();
 
     window_.AddTrayIcon(MakeTrayIcon(GetSystemMetrics(SM_CXSMICON)), L"LightDock");
 
@@ -679,11 +680,36 @@ void App::LoadItems()
 {
     items_.clear();
 
+    auto addSystemButton = [&](DockItemKind kind,
+                               const wchar_t* id,
+                               const wchar_t* name,
+                               SystemDockGlyph glyph)
+    {
+        auto item = std::make_unique<DockItem>();
+        item->kind = kind;
+        item->id = id;
+        item->name = name;
+        item->plate.enabled = false;
+        item->iconSource = CreateSystemDockGlyph(icons_.Factory(), glyph);
+        item->scale = 1.0f;
+        item->scaleSpring.Reset(1.0f);
+        item->bounceSpring.Reset(0.0f);
+        items_.push_back(std::move(item));
+    };
+
+    addSystemButton(DockItemKind::StartButton,
+                    L"__lightdock_start", UiText(L"开始"),
+                    SystemDockGlyph::Start);
+    addSystemButton(DockItemKind::SearchButton,
+                    L"__lightdock_search", UiText(L"搜索"),
+                    SystemDockGlyph::Search);
+
     const std::wstring cacheDirectory = GetIconCacheDir();
 
     for (const AppEntry& entry : config_.apps)
     {
         auto item = std::make_unique<DockItem>();
+        item->kind = DockItemKind::Pinned;
 
         item->id = entry.id;
         item->name = entry.name;
@@ -747,6 +773,11 @@ void App::SaveConfiguration() const
 
     for (const auto& item : items_)
     {
+        if (item->kind != DockItemKind::Pinned)
+        {
+            continue;
+        }
+
         AppEntry entry;
         entry.id = item->id;
         entry.name = item->name;
@@ -2960,6 +2991,9 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
     static constexpr Translation translations[] =
     {
         {L"打开", L"Open"},
+        {L"开始", L"Start"},
+        {L"搜索", L"Search"},
+        {L"固定到 Dock", L"Pin to Dock"},
         {L"图标配置…", L"Icon settings..."},
         {L"图标配置 — ", L"Icon settings — "},
         {L"从 Dock 移除", L"Remove from Dock"},
