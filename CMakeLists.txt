@@ -133,6 +133,7 @@ endif()
 target_link_libraries(LightDock PRIVATE
     d2d1
     dwrite
+    dwmapi
     windowscodecs
     uuid
     ole32
