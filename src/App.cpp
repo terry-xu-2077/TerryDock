@@ -2232,8 +2232,21 @@ void App::PollProcesses()
 
 void App::RefreshRunningApplications()
 {
-    const std::vector<std::wstring> paths =
-        FindRunningTaskbarApplications();
+    const std::vector<RunningWindowInfo> windows =
+        FindRunningTaskbarWindows();
+
+    auto isPinnedPath = [&](const std::wstring& path)
+    {
+        const std::wstring id = MakeStableId(path);
+        return std::any_of(
+            items_.begin(), items_.end(), [&](const auto& item)
+            {
+                return item->kind == DockItemKind::Pinned
+                    && (item->id == id
+                        || EqualsIgnoreCase(item->targetPath, path)
+                        || EqualsIgnoreCase(item->resolvedPath, path));
+            });
+    };
 
     std::vector<std::unique_ptr<DockItem>> persistent;
     std::vector<std::unique_ptr<DockItem>> previousTransient;
@@ -2252,16 +2265,16 @@ void App::RefreshRunningApplications()
         }
     }
 
-    std::vector<bool> matched(paths.size(), false);
+    std::vector<bool> matched(windows.size(), false);
     std::vector<std::unique_ptr<DockItem>> nextTransient;
-    nextTransient.reserve(paths.size());
+    nextTransient.reserve(windows.size());
 
-    bool changed = previousTransient.size() != paths.size();
+    bool changed = false;
+    bool textChanged = false;
 
-    // Preserve the existing right-side order for apps that are still open.
-    // EnumWindows follows Z-order, which changes every time the user focuses
-    // another window; using that order directly would make the dock icons
-    // constantly shuffle. New apps are appended to the end instead.
+    // Keep existing transient icons in their previous order. Matching by HWND
+    // means multiple folders or browser windows from the same executable stay
+    // separate and never activate the wrong sibling window.
     for (auto& item : previousTransient)
     {
         if (!item)
@@ -2269,48 +2282,66 @@ void App::RefreshRunningApplications()
             continue;
         }
 
-        const std::wstring itemPath = item->resolvedPath.empty()
-            ? item->targetPath : item->resolvedPath;
-
-        size_t match = paths.size();
-        for (size_t i = 0; i < paths.size(); ++i)
+        size_t match = windows.size();
+        for (size_t i = 0; i < windows.size(); ++i)
         {
-            if (!matched[i] && EqualsIgnoreCase(itemPath, paths[i]))
+            if (!matched[i] && item->windowHandle == windows[i].hwnd)
             {
                 match = i;
                 break;
             }
         }
 
-        if (match < paths.size())
-        {
-            matched[match] = true;
-            item->running = true;
-            nextTransient.push_back(std::move(item));
-        }
-        else
+        if (match >= windows.size()
+            || isPinnedPath(windows[match].path))
         {
             changed = true;
+            continue;
         }
+
+        matched[match] = true;
+        item->running = true;
+        item->windowHandle = windows[match].hwnd;
+        item->windowTitle = windows[match].title;
+
+        if (!windows[match].title.empty()
+            && item->name != windows[match].title)
+        {
+            item->name = windows[match].title;
+            textChanged = true;
+        }
+
+        nextTransient.push_back(std::move(item));
     }
 
-    for (size_t i = 0; i < paths.size(); ++i)
+    // Append newly created windows at the end of the transient section. We do
+    // not use EnumWindows/Z-order as the persistent visual order, otherwise
+    // simply focusing another window would reshuffle the Dock.
+    for (size_t i = 0; i < windows.size(); ++i)
     {
-        if (matched[i])
+        if (matched[i] || isPinnedPath(windows[i].path))
         {
             continue;
         }
 
-        const std::wstring& path = paths[i];
-        AppInfo info = icons_.Inspect(path, 256);
+        AppInfo info = icons_.Inspect(windows[i].path, 256);
 
         auto item = std::make_unique<DockItem>();
         item->kind = DockItemKind::RunningTransient;
-        item->id = L"__running_" + MakeStableId(path);
-        item->name = info.name.empty() ? GetFileStem(path) : info.name;
-        item->targetPath = path;
+        item->id = L"__running_"
+            + MakeStableId(windows[i].path)
+            + L"_"
+            + std::to_wstring(
+                reinterpret_cast<std::uintptr_t>(windows[i].hwnd));
+        item->name = !windows[i].title.empty()
+            ? windows[i].title
+            : (info.name.empty()
+                ? GetFileStem(windows[i].path) : info.name);
+        item->windowTitle = windows[i].title;
+        item->windowHandle = windows[i].hwnd;
+        item->targetPath = windows[i].path;
         item->resolvedPath =
-            info.resolvedPath.empty() ? path : info.resolvedPath;
+            info.resolvedPath.empty() ? windows[i].path : info.resolvedPath;
         item->processName = info.processName.empty()
             ? GetFileName(item->resolvedPath) : info.processName;
         item->iconSource = info.icon;
@@ -2352,6 +2383,10 @@ void App::RefreshRunningApplications()
         UpdateSurfaceAndGeometry();
         RepositionWindow();
         WakeAnimation();
+    }
+    else if (textChanged)
+    {
+        needsRender_ = true;
     }
 }
 
