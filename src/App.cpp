@@ -1222,6 +1222,11 @@ void App::BeginShellPopupPlacement(bool search,
     shellPopupPlacementStarted_ = std::chrono::steady_clock::now();
 
     SendShellShortcut(search);
+
+    // Start/Search also raises Explorer's taskbar. Keep LightDock above it
+    // immediately; the normal pointer loop continues to maintain topmost
+    // while overlay mode is visible.
+    window_.EnsureTopmost();
 }
 
 void App::UpdateShellPopupPlacement()
@@ -1235,12 +1240,26 @@ void App::UpdateShellPopupPlacement()
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - shellPopupPlacementStarted_);
 
-    // This is deliberately a short-lived compatibility shim. Start/Search
-    // are shell-owned windows, so retry briefly while their opening animation
-    // is still free to overwrite our first SetWindowPos.
-    if (elapsed > std::chrono::milliseconds(900))
+    // Explorer raises its taskbar while Start/Search animate in. Reassert
+    // LightDock's z-order throughout that transition.
+    window_.EnsureTopmost();
+
+    if (elapsed > std::chrono::milliseconds(1800))
     {
         shellPopupPlacementPending_ = false;
+        return;
+    }
+
+    // On Windows 11 the visible Start/Search surfaces are composition-owned;
+    // moving the hosting HWND is ignored or immediately undone by the shell.
+    // Keep the relocation experiment only on Windows 10.
+    if (IsWindows11OrLater())
+    {
+        return;
+    }
+
+    if (elapsed > std::chrono::milliseconds(1000))
+    {
         return;
     }
 
@@ -1555,6 +1574,7 @@ void App::CheckFullscreen()
 
         if (root && root != window_.Handle() && root != GetShellWindow()
             && IsWindowVisible(root) && !IsIconic(root)
+            && !IsWindowsShellUiWindow(root)
             && MonitorFromWindow(root, MONITOR_DEFAULTTONEAREST)
                 == target.handle)
         {
