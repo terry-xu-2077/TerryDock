@@ -9,6 +9,7 @@
 #include "DockRenderer.h"
 #include "DockTransform.h"
 #include "DockWindow.h"
+#include "WindowPreview.h"
 #include "IconLoader.h"
 #include "ProcessMonitor.h"
 
@@ -331,6 +332,7 @@ private:
     std::vector<HBITMAP> menuRunningBitmaps_;
 
     DockWindow window_;
+    WindowPreview windowPreview_;
     DockRenderer renderer_;
     IconLoader icons_;
 
