@@ -39,7 +39,10 @@ public:
     void Show(const RECT& screenRect,
               const std::vector<Entry>& entries,
               int hoveredRow,
-              float dpiScale);
+              float dpiScale,
+              float menuScale,
+              float cornerRadius,
+              float thumbnailScale);
     void Hide();
     void SetHoveredRow(int hoveredRow);
 
@@ -61,6 +64,9 @@ private:
     std::vector<HTHUMBNAIL> thumbnails_;
     int hoveredRow_ = -1;
     float dpiScale_ = 1.0f;
+    float menuScale_ = 1.0f;
+    float cornerRadius_ = 10.0f;
+    float thumbnailScale_ = 1.0f;
     bool visible_ = false;
 };
 
