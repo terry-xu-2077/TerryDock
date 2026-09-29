@@ -76,6 +76,8 @@ private:
     float cornerRadius_ = 10.0f;
     float thumbnailScale_ = 1.0f;
     bool nativeRoundedCorners_ = false;
+    int lastClientWidth_ = 0;
+    int lastClientHeight_ = 0;
     bool visible_ = false;
 };
 
