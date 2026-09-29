@@ -68,6 +68,12 @@ struct DockItem
     /// configured launcher name.
     std::wstring runtimeApplicationName;
 
+    /// Runtime AppUserModelID. This is especially important for UWP/packaged
+    /// apps hosted by ApplicationFrameHost.exe: several unrelated apps can
+    /// share the same host executable, while the AUMID remains the real
+    /// taskbar identity.
+    std::wstring runtimeAppUserModelId;
+
     /// Top-level windows currently owned by this application. Dock rendering
     /// stays one-icon-per-application; this list powers the hover window menu.
     std::vector<DockWindowEntry> windows;
