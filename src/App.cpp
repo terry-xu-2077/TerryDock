@@ -3370,19 +3370,25 @@ void App::Render()
                 config_.settings.panelMode == PanelMode::Static
                 ? metrics_.magnification : item.scale;
 
+            // Ordinary name bubbles should be clearly readable even when
+            // the dock itself is in Static/no-animation mode. The old 0.8
+            // baseline was originally introduced for the preview bubble and
+            // made normal tooltips visibly undersized. Keep preview sizing
+            // unchanged, but render the ordinary name bubble at the full
+            // configured scale (25% larger than the old 0.8 baseline).
+            const float nameBubbleScale =
+                tooltipVisualScale * config_.settings.tooltipScale;
+
             renderer_.DrawTooltip(
                 item.name,
                 item.centerX,
                 verticalDock ? item.baselineBottom
                     : topDock ? item.baselineBottom + 7.0f * dockScale_
                     : item.baselineBottom - item.size - 7.0f * dockScale_,
-                tooltipVisualScale * config_.settings.tooltipScale
-                    * kTooltipScaleBaseline,
+                nameBubbleScale,
                 dockScale_,
                 config_.settings.tooltipCornerRadius * dockScale_
-                    * tooltipVisualScale
-                    * config_.settings.tooltipScale
-                    * kTooltipScaleBaseline,
+                    * nameBubbleScale,
                 tooltipOpacity_, topDock);
         }
     }
