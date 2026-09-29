@@ -46,6 +46,7 @@ set(LIGHTDOCK_SOURCES
     src/main.cpp
     src/App.cpp
     src/DockWindow.cpp
+    src/WindowPreview.cpp
     src/DockRenderer.cpp
     src/DockLayout.cpp
     src/Animation.cpp
@@ -63,6 +64,7 @@ set(LIGHTDOCK_HEADERS
     src/Common.h
     src/App.h
     src/DockWindow.h
+    src/WindowPreview.h
     src/DockRenderer.h
     src/DockLayout.h
     src/DockTransform.h
