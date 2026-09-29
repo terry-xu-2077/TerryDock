@@ -4,6 +4,7 @@
 
 #include <commctrl.h>
 #include <commdlg.h>
+#include <dwmapi.h>
 #include <mmsystem.h>
 #include <shlobj.h>
 
@@ -174,6 +175,55 @@ BOOL CALLBACK TagDialogChildren(HWND child, LPARAM parameter)
     }
 
     return TRUE;
+}
+
+bool GetVisibleWindowBounds(HWND hwnd, RECT& bounds)
+{
+    if (!hwnd)
+    {
+        return false;
+    }
+
+    RECT visible{};
+    if (SUCCEEDED(DwmGetWindowAttribute(
+            hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+            &visible, sizeof(visible))))
+    {
+        bounds = visible;
+        return true;
+    }
+
+    return GetWindowRect(hwnd, &bounds) != FALSE;
+}
+
+bool RectCovers(const RECT& outer, const RECT& inner, LONG tolerance)
+{
+    return outer.left <= inner.left + tolerance
+        && outer.top <= inner.top + tolerance
+        && outer.right >= inner.right - tolerance
+        && outer.bottom >= inner.bottom - tolerance;
+}
+
+bool IsOrdinaryMaximizedWindow(HWND hwnd)
+{
+    WINDOWPLACEMENT placement{};
+    placement.length = sizeof(placement);
+    const bool maximized =
+        IsZoomed(hwnd) != FALSE
+        || (GetWindowPlacement(hwnd, &placement)
+            && placement.showCmd == SW_SHOWMAXIMIZED);
+
+    if (!maximized)
+    {
+        return false;
+    }
+
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+
+    // Ordinary maximized desktop windows keep their normal resize/caption
+    // frame. Borderless fullscreen windows typically drop one or both.
+    return (style & WS_THICKFRAME) != 0
+        && (style & WS_CAPTION) != 0;
 }
 
 void ArmTimer(HANDLE timer, int milliseconds)
@@ -879,16 +929,20 @@ void App::CheckFullscreen()
         return;
     }
 
-    bool fullscreen = false;
-    if (monitorIndex_ >= 0 && monitorIndex_ < static_cast<int>(monitors_.size()))
+    bool fullscreenCandidate = false;
+
+    if (monitorIndex_ >= 0
+        && monitorIndex_ < static_cast<int>(monitors_.size()))
     {
-        const MonitorTarget& target = monitors_[static_cast<size_t>(monitorIndex_)];
+        const MonitorTarget& target =
+            monitors_[static_cast<size_t>(monitorIndex_)];
         HWND foreground = GetForegroundWindow();
         HWND root = foreground ? GetAncestor(foreground, GA_ROOT) : nullptr;
 
         if (root && root != window_.Handle() && root != GetShellWindow()
             && IsWindowVisible(root) && !IsIconic(root)
-            && MonitorFromWindow(root, MONITOR_DEFAULTTONEAREST) == target.handle)
+            && MonitorFromWindow(root, MONITOR_DEFAULTTONEAREST)
+                == target.handle)
         {
             wchar_t className[128]{};
             GetClassNameW(root, className, ARRAYSIZE(className));
@@ -897,22 +951,56 @@ void App::CheckFullscreen()
                 || wcscmp(className, L"Shell_TrayWnd") == 0
                 || wcscmp(className, L"Shell_SecondaryTrayWnd") == 0;
 
-            RECT bounds{};
-            if (!shellSurface && GetWindowRect(root, &bounds))
+            if (!shellSurface)
             {
-                constexpr LONG tolerance = 2;
-                fullscreen = bounds.left <= target.rect.left + tolerance
-                    && bounds.top <= target.rect.top + tolerance
-                    && bounds.right >= target.rect.right - tolerance
-                    && bounds.bottom >= target.rect.bottom - tolerance;
+                MONITORINFO monitorInfo{};
+                monitorInfo.cbSize = sizeof(monitorInfo);
+
+                RECT visibleBounds{};
+                if (GetMonitorInfoW(target.handle, &monitorInfo)
+                    && GetVisibleWindowBounds(root, visibleBounds))
+                {
+                    // GetWindowRect includes invisible resize borders on
+                    // maximized Chromium/Win32 windows. DWM's extended frame
+                    // bounds describe what is actually visible on screen.
+                    constexpr LONG kFullscreenTolerance = 1;
+                    const bool coversMonitor = RectCovers(
+                        visibleBounds, monitorInfo.rcMonitor,
+                        kFullscreenTolerance);
+
+                    // A regular maximized desktop window is not fullscreen,
+                    // even on an auto-hidden taskbar setup where rcWork can
+                    // nearly equal rcMonitor.
+                    fullscreenCandidate =
+                        coversMonitor && !IsOrdinaryMaximizedWindow(root);
+                }
             }
         }
     }
+
+    // Require two consecutive positive samples (the checker runs every
+    // 250 ms) before entering fullscreen. Leaving fullscreen is immediate.
+    // This filters transient maximize/DWM state changes without making the
+    // dock feel sticky after the foreground app exits fullscreen.
+    if (fullscreenCandidate)
+    {
+        fullscreenCandidateChecks_ =
+            (std::min)(fullscreenCandidateChecks_ + 1, 2);
+    }
+    else
+    {
+        fullscreenCandidateChecks_ = 0;
+    }
+
+    const bool fullscreen = fullscreenActive_
+        ? fullscreenCandidate
+        : fullscreenCandidateChecks_ >= 2;
 
     const auto now = std::chrono::steady_clock::now();
     if (fullscreen != fullscreenActive_)
     {
         fullscreenActive_ = fullscreen;
+
         if (fullscreen)
         {
             const int delay = (std::clamp)(
@@ -930,6 +1018,7 @@ void App::CheckFullscreen()
                 SetFullscreenVisibilityTarget(1.0f);
             }
         }
+
         WakeAnimation();
     }
 
