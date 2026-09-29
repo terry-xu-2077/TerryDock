@@ -24,6 +24,17 @@ DockConfig Config::Load()
 {
     DockConfig config;
 
+    // Seed the first-run value from Windows' own mouse-hover cadence. Once
+    // saved, LightDock keeps the user's explicit Dock setting independently.
+    UINT systemHoverMs = 0;
+    if (SystemParametersInfoW(
+            SPI_GETMOUSEHOVERTIME, 0, &systemHoverMs, 0)
+        && systemHoverMs > 0)
+    {
+        config.settings.windowMenuHoverDelayMs = std::clamp(
+            static_cast<int>(systemHoverMs), 0, 1500);
+    }
+
     const std::wstring path = FilePath();
 
     FILE* file = _wfopen(path.c_str(), L"rb");
