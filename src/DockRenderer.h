@@ -84,6 +84,15 @@ public:
                       float opacity,
                       bool arrowUp = false);
 
+    /// The same triangular tail used by name bubbles, but attached to the
+    /// separate DWM-backed window preview body. Coordinates are physical
+    /// surface coordinates so the tail can bridge the popup and Dock icon.
+    void DrawBubbleTail(const D2D1_RECT_F& body,
+                        D2D1_POINT_2F tip,
+                        DockEdge edge,
+                        float scale,
+                        float opacity);
+
     /// Upright window list drawn in physical surface coordinates.
     void DrawWindowMenu(const D2D1_RECT_F& rect,
                         const std::vector<std::wstring>& titles,
