@@ -2839,6 +2839,16 @@ void App::CheckPointer()
         {
             WakeAnimation();
         }
+
+        // Explorer's own auto-hidden taskbar can raise itself after our reveal
+        // animation has already settled. While LightDock is intentionally
+        // visible in overlay mode, periodically reassert its topmost band so
+        // the system taskbar cannot cover it at the shared screen edge.
+        if (config_.settings.autoHide
+            && fullscreenVisibility_.target > 0.0f)
+        {
+            window_.EnsureTopmost();
+        }
     }
 
     if (inside)
