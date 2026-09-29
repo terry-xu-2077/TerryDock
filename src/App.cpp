@@ -2719,6 +2719,29 @@ int App::IndexAtPoint(float x, float y) const
     return -1;
 }
 
+bool App::PointInWindowMenu(float physicalX, float physicalY) const
+{
+    return windowMenuVisible_
+        && physicalX >= windowMenuBounds_.left
+        && physicalX <= windowMenuBounds_.right
+        && physicalY >= windowMenuBounds_.top
+        && physicalY <= windowMenuBounds_.bottom;
+}
+
+int App::WindowMenuRowAt(float physicalX, float physicalY) const
+{
+    if (!PointInWindowMenu(physicalX, physicalY)
+        || windowMenuRowHeight_ <= 0.0f
+        || windowMenuVisibleRows_ <= 0)
+    {
+        return -1;
+    }
+
+    const int row = static_cast<int>(
+        (physicalY - windowMenuBounds_.top) / windowMenuRowHeight_);
+    return row >= 0 && row < windowMenuVisibleRows_ ? row : -1;
+}
+
 void App::OnMouseMove(float x, float y)
 {
     if (modal_)
