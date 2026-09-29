@@ -226,6 +226,79 @@ bool IsOrdinaryMaximizedWindow(HWND hwnd)
         && (style & WS_CAPTION) != 0;
 }
 
+std::wstring WindowProcessName(HWND hwnd)
+{
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (processId == 0)
+    {
+        return {};
+    }
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                 FALSE, processId);
+    if (!process)
+    {
+        return {};
+    }
+
+    wchar_t path[32768]{};
+    DWORD pathLength = ARRAYSIZE(path);
+    const BOOL gotPath = QueryFullProcessImageNameW(
+        process, 0, path, &pathLength);
+    CloseHandle(process);
+
+    return gotPath && pathLength > 0
+        ? GetFileName(std::wstring(path, pathLength))
+        : std::wstring();
+}
+
+bool IsWindowsShellUiWindow(HWND hwnd)
+{
+    const std::wstring name = WindowProcessName(hwnd);
+    return EqualsIgnoreCase(name, L"StartMenuExperienceHost.exe")
+        || EqualsIgnoreCase(name, L"SearchHost.exe")
+        || EqualsIgnoreCase(name, L"SearchApp.exe")
+        || EqualsIgnoreCase(name, L"SearchUI.exe")
+        || EqualsIgnoreCase(name, L"ShellExperienceHost.exe")
+        || EqualsIgnoreCase(name, L"TextInputHost.exe")
+        || EqualsIgnoreCase(name, L"LockApp.exe");
+}
+
+bool IsWindows11OrLater()
+{
+    using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+
+    static const bool windows11 = []()
+    {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (!ntdll)
+        {
+            return false;
+        }
+
+        auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(
+            GetProcAddress(ntdll, "RtlGetVersion"));
+        if (!rtlGetVersion)
+        {
+            return false;
+        }
+
+        RTL_OSVERSIONINFOW version{};
+        version.dwOSVersionInfoSize = sizeof(version);
+        if (rtlGetVersion(&version) != 0)
+        {
+            return false;
+        }
+
+        return version.dwMajorVersion > 10
+            || (version.dwMajorVersion == 10
+                && version.dwBuildNumber >= 22000);
+    }();
+
+    return windows11;
+}
+
 void ArmTimer(HANDLE timer, int milliseconds)
 {
     LARGE_INTEGER due{};
