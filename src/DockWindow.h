@@ -62,6 +62,12 @@ public:
     HWND Handle() const { return hwnd_; }
 
     void SetBounds(int x, int y, int width, int height);
+
+    /// Reasserts the layered dock at the topmost z-order without activating it.
+    /// Needed when the Windows auto-hidden taskbar raises itself after the
+    /// dock has already finished its reveal animation.
+    void EnsureTopmost();
+
     bool SetAppBarReservation(const RECT& monitorRect,
                              DockEdge edge,
                              int thickness);
