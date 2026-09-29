@@ -1938,6 +1938,27 @@ void App::Render()
                              config_.settings.backgroundOpacity,
                              config_.settings.borderOpacity);
 
+    // macOS-style boundary between persistent launchers and temporary
+    // running applications. It follows the animated item centres, so the
+    // divider remains visually attached to the two groups while magnifying.
+    const auto firstTransient = std::find_if(
+        items_.begin(), items_.end(),
+        [](const std::unique_ptr<DockItem>& item)
+        {
+            return item->kind == DockItemKind::RunningTransient;
+        });
+    if (firstTransient != items_.end() && firstTransient != items_.begin())
+    {
+        const DockItem& right = **firstTransient;
+        const DockItem& left = **std::prev(firstTransient);
+        const float dividerX = (left.centerX + right.centerX) * 0.5f;
+        const float inset = metrics_.paddingY * 0.7f;
+        renderer_.DrawDivider(
+            dividerX,
+            geometry_.panelY + inset,
+            geometry_.panelY + geometry_.panelHeight - inset);
+    }
+
     // Keep the uploaded mip close to the largest on-screen icon size.
     // D2D1's DC render target only offers bilinear bitmap filtering; feeding
     // it a bitmap that is ~2x larger than the final icon forces another
