@@ -24,17 +24,6 @@ DockConfig Config::Load()
 {
     DockConfig config;
 
-    // Seed the first-run value from Windows' own mouse-hover cadence. Once
-    // saved, LightDock keeps the user's explicit Dock setting independently.
-    UINT systemHoverMs = 0;
-    if (SystemParametersInfoW(
-            SPI_GETMOUSEHOVERTIME, 0, &systemHoverMs, 0)
-        && systemHoverMs > 0)
-    {
-        config.settings.windowMenuHoverDelayMs = std::clamp(
-            static_cast<int>(systemHoverMs), 0, 1500);
-    }
-
     const std::wstring path = FilePath();
 
     FILE* file = _wfopen(path.c_str(), L"rb");
@@ -157,12 +146,6 @@ DockConfig Config::Load()
         config.settings.tooltipCornerRadius = ClampF(
             static_cast<float>(v->AsDouble(
                 config.settings.tooltipCornerRadius)), 0.0f, 40.0f);
-    }
-
-    if (const json::Value* v = root.Find("windowMenuHoverDelayMs"))
-    {
-        config.settings.windowMenuHoverDelayMs = std::clamp(
-            v->AsInt(config.settings.windowMenuHoverDelayMs), 0, 1500);
     }
 
     if (const json::Value* background = root.Find("background"))
@@ -434,8 +417,6 @@ bool Config::Save(const DockConfig& config)
     root.Set("tooltipCornerRadius",
              json::Value(static_cast<double>(
                  config.settings.tooltipCornerRadius)));
-    root.Set("windowMenuHoverDelayMs",
-             json::Value(config.settings.windowMenuHoverDelayMs));
     json::Value background(json::Value::Type::Object);
     background.Set("opacity",
                    json::Value(static_cast<double>(config.settings.backgroundOpacity)));
