@@ -84,6 +84,14 @@ private:
         HWND hwnd = nullptr;
         std::wstring path;
         std::wstring title;
+
+        /// Windows taskbar identity for packaged/UWP apps. Unlike the host
+        /// executable path this stays unique when ApplicationFrameHost.exe
+        /// owns windows for several applications.
+        std::wstring appUserModelId;
+
+        /// Localized shell display name resolved from appUserModelId.
+        std::wstring applicationName;
     };
 
     enum
