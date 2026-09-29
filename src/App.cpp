@@ -3751,7 +3751,7 @@ void App::RefreshRunningApplications()
                 icons_.LoadWindowIcon(
                     group.windows.front().hwnd, 256);
             item->runtimeWindowIconLoaded =
-                item->iconSource != nullptr;
+                static_cast<bool>(item->iconSource);
         }
 
         if (!item->iconSource
