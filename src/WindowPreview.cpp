@@ -273,7 +273,7 @@ void WindowPreview::UpdateThumbnailRects()
     const int topPad = ScalePx(7.0f, uiScale);
     const int titleHeight = ScalePx(20.0f, uiScale);
     const int titleGap = ScalePx(3.0f, uiScale);
-    const int previewHeight = ScalePx(70.0f, uiScale);
+    const int previewHeight = ScalePx(77.0f, uiScale);
     const int previewTop = topPad + titleHeight + titleGap;
     const int previewBottom = (std::min)(
         height, previewTop + previewHeight);
@@ -551,7 +551,7 @@ void WindowPreview::InvalidateHoverTransition(int oldRow, int newRow)
     const int topPad = ScalePx(7.0f, uiScale);
     const int titleHeight = ScalePx(20.0f, uiScale);
     const int titleGap = ScalePx(3.0f, uiScale);
-    const int previewHeight = ScalePx(70.0f, uiScale);
+    const int previewHeight = ScalePx(77.0f, uiScale);
     const int previewTop = topPad + titleHeight + titleGap;
     const int previewBottom = (std::min)(
         height, previewTop + previewHeight);
@@ -650,7 +650,7 @@ void WindowPreview::Paint()
     const int frameInset = ScalePx(5.0f, uiScale);
     const int titleHeight = ScalePx(20.0f, uiScale);
     const int titleGap = ScalePx(3.0f, uiScale);
-    const int previewHeight = ScalePx(70.0f, uiScale);
+    const int previewHeight = ScalePx(77.0f, uiScale);
     const int frameBottomPad = ScalePx(5.0f, uiScale);
     const int appNameHeight = ScalePx(22.0f, uiScale);
     const int appBottomPad = ScalePx(5.0f, uiScale);
@@ -735,27 +735,15 @@ void WindowPreview::Paint()
                         frameBorderBrush.Get(),
                         frameStroke);
 
-                    if (static_cast<int>(i) == hoveredRow_
-                        && i < thumbnailRects_.size())
+                    if (static_cast<int>(i) == hoveredRow_)
                     {
-                        const RECT& thumb = thumbnailRects_[i];
-                        if (thumb.right > thumb.left
-                            && thumb.bottom > thumb.top)
-                        {
-                            const float pad = 2.0f * uiScale;
-                            const D2D1_RECT_F hoverFrame = D2D1::RectF(
-                                static_cast<float>(thumb.left) - pad,
-                                static_cast<float>(thumb.top) - pad,
-                                static_cast<float>(thumb.right) + pad,
-                                static_cast<float>(thumb.bottom) + pad);
-                            d2dTarget_->DrawRoundedRectangle(
-                                D2D1::RoundedRect(
-                                    hoverFrame,
-                                    5.0f * uiScale,
-                                    5.0f * uiScale),
-                                hoverBorderBrush.Get(),
-                                hoverStroke);
-                        }
+                        // The hover outline is the card selection state:
+                        // include the title and live thumbnail as one unit.
+                        d2dTarget_->DrawRoundedRectangle(
+                            D2D1::RoundedRect(
+                                frame, frameRadius, frameRadius),
+                            hoverBorderBrush.Get(),
+                            hoverStroke);
                     }
 
                     if (entries_[i].active)
@@ -794,8 +782,8 @@ void WindowPreview::Paint()
             L"Segoe UI");
 
         HFONT appFont = CreateFontW(
-            -ScalePx(13.0f, uiScale),
-            0, 0, 0, FW_SEMIBOLD,
+            -ScalePx(14.0f, uiScale),
+            0, 0, 0, FW_NORMAL,
             FALSE, FALSE, FALSE,
             DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS,
