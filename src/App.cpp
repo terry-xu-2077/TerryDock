@@ -299,6 +299,44 @@ bool IsWindows11OrLater()
     return windows11;
 }
 
+std::wstring WindowTitleWithoutApplicationName(
+    const std::wstring& title,
+    const std::wstring& applicationName)
+{
+    if (title.empty() || applicationName.empty()
+        || EqualsIgnoreCase(title, applicationName))
+    {
+        return title;
+    }
+
+    static constexpr const wchar_t* separators[] =
+    {
+        L" - ", L" – ", L" — ", L" | "
+    };
+
+    for (const wchar_t* separator : separators)
+    {
+        const std::wstring suffix =
+            std::wstring(separator) + applicationName;
+        if (title.size() > suffix.size()
+            && _wcsicmp(title.c_str() + title.size() - suffix.size(),
+                        suffix.c_str()) == 0)
+        {
+            return title.substr(0, title.size() - suffix.size());
+        }
+
+        const std::wstring prefix =
+            applicationName + separator;
+        if (title.size() > prefix.size()
+            && _wcsnicmp(title.c_str(), prefix.c_str(), prefix.size()) == 0)
+        {
+            return title.substr(prefix.size());
+        }
+    }
+
+    return title;
+}
+
 struct VisibleTaskbarContext
 {
     RECT monitor{};
@@ -2755,10 +2793,12 @@ void App::Render()
             // even when the user deliberately makes the Dock itself small.
             // Size it from monitor DPI instead of dockScale_ (which also
             // contains the Dock's user-controlled overallScale).
-            const float rowHeight = 68.0f * dpiScale_;
-            const float menuWidth = 480.0f * dpiScale_;
+            const float menuScale = ClampF(
+                config_.settings.windowMenuScale, 0.75f, 1.25f);
+            const float rowHeight = 68.0f * dpiScale_ * menuScale;
+            const float menuWidth = 480.0f * dpiScale_ * menuScale;
             const float menuHeight = rowHeight * static_cast<float>(rowCount);
-            const float gap = 6.0f * dpiScale_;
+            const float gap = 6.0f * dpiScale_ * menuScale;
             const float margin = 8.0f * dpiScale_;
 
             const float bottom = item.baselineBottom + item.bounceOffset;
@@ -2848,7 +2888,9 @@ void App::Render()
                 WindowPreview::Entry entry;
                 entry.hwnd = window.hwnd;
                 entry.title = window.title.empty()
-                    ? item.name : window.title;
+                    ? item.name
+                    : WindowTitleWithoutApplicationName(
+                        window.title, item.name);
                 entry.active = window.active;
                 entry.minimized = window.minimized;
                 previewEntries.push_back(std::move(entry));
@@ -2867,7 +2909,10 @@ void App::Render()
 
             windowPreview_.Show(
                 screenMenu, previewEntries,
-                windowMenuHoveredRow_, dpiScale_);
+                windowMenuHoveredRow_, dpiScale_,
+                menuScale,
+                config_.settings.windowMenuCornerRadius,
+                config_.settings.windowMenuThumbnailScale);
         }
     }
 
@@ -3244,6 +3289,20 @@ void App::CheckPointer()
     mousePhysicalY_ = physicalY;
 
     const bool overWindowMenu = PointInWindowMenu(physicalX, physicalY);
+    const int polledWindowRow =
+        WindowMenuRowAt(physicalX, physicalY);
+    if (windowMenuVisible_)
+    {
+        const int nextHoveredRow =
+            overWindowMenu ? polledWindowRow : -1;
+        if (nextHoveredRow != windowMenuHoveredRow_)
+        {
+            windowMenuHoveredRow_ = nextHoveredRow;
+            windowPreview_.SetHoveredRow(nextHoveredRow);
+            needsRender_ = true;
+        }
+    }
+
     const D2D1_POINT_2F logical = dockTransform_.ToLogical(physicalX, physicalY);
     const float x = logical.x;
     const float y = logical.y;
