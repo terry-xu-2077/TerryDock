@@ -47,6 +47,13 @@ struct DockItem
     std::wstring arguments;
     std::wstring processName;
 
+    /// Exact top-level window represented by a transient running item.
+    /// Null for pinned launchers and built-in Start/Search buttons.
+    HWND windowHandle = nullptr;
+
+    /// Current window title used by transient items for an unambiguous tooltip.
+    std::wstring windowTitle;
+
     /// Icon cache file (relative to the icon cache directory).
     std::wstring iconFile;
 
