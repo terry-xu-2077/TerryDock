@@ -12,6 +12,7 @@ set "CMAKE=%TOOLCHAIN_DIR%\bin\cmake.exe"
 set "GXX=%TOOLCHAIN_DIR%\bin\g++.exe"
 set "BUILD_DIR=%PROJECT_ROOT%\build_mingw"
 set "OUTPUT_EXE=%BUILD_DIR%\LightDock.exe"
+set "BUILD_LOG=%BUILD_DIR%\build-output.log"
 
 if not exist "%CMAKE%" (
     echo [!] Bundled CMake was not found:
@@ -55,8 +56,16 @@ if errorlevel 1 goto :fail
 
 echo.
 echo [2/3] Building LightDock...
-"%CMAKE%" --build "%BUILD_DIR%" --target LightDock --parallel 4
-if errorlevel 1 goto :fail
+if exist "%BUILD_LOG%" del /f /q "%BUILD_LOG%" >nul 2>nul
+"%CMAKE%" --build "%BUILD_DIR%" --target LightDock --parallel 4 > "%BUILD_LOG%" 2>&1
+set "BUILD_RESULT=%ERRORLEVEL%"
+type "%BUILD_LOG%"
+if not "%BUILD_RESULT%"=="0" (
+    echo.
+    echo [INFO] Full compiler output was saved to:
+    echo        %BUILD_LOG%
+    goto :fail
+)
 
 echo.
 echo [3/3] Verifying output...
@@ -94,8 +103,8 @@ echo     Expected:
 echo     %OUTPUT_EXE%
 echo.
 echo     If this happens again, send me:
-echo       1. build_mingw\CMakeCache.txt
-echo       2. the complete build.bat console output
+echo       1. build_mingw\build-output.log
+echo       2. build_mingw\CMakeCache.txt
 goto :fail
 
 :fail
