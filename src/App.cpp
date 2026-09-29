@@ -439,6 +439,15 @@ std::wstring DirectWindowAppUserModelId(HWND hwnd)
         }
     }
 
+    // Do not accept the host process identity for a UWP frame. Its child
+    // window belongs to the real packaged application and carries the AUMID
+    // that Windows uses for the taskbar label/icon.
+    if (EqualsIgnoreCase(
+            WindowProcessName(hwnd), L"ApplicationFrameHost.exe"))
+    {
+        return {};
+    }
+
     DWORD processId = 0;
     GetWindowThreadProcessId(hwnd, &processId);
     return ApplicationUserModelIdForProcess(processId);
