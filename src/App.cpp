@@ -2244,7 +2244,7 @@ void App::Render()
         if (menuItem != items_.end() && (*menuItem)->windows.size() >= 2)
         {
             const DockItem& item = **menuItem;
-            constexpr size_t kMaxVisibleWindowRows = 18;
+            constexpr size_t kMaxVisibleWindowRows = 16;
             const size_t rowCount =
                 (std::min)(item.windows.size(), kMaxVisibleWindowRows);
 
