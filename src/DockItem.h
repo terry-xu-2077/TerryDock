@@ -74,6 +74,11 @@ struct DockItem
     /// taskbar identity.
     std::wstring runtimeAppUserModelId;
 
+    /// Whether iconSource came directly from the running taskbar window's
+    /// HICON. Window icons usually correspond to the taskbar's unplated asset
+    /// and are preferable to AppsFolder's sometimes heavily padded tile.
+    bool runtimeWindowIconLoaded = false;
+
     /// Top-level windows currently owned by this application. Dock rendering
     /// stays one-icon-per-application; this list powers the hover window menu.
     std::vector<DockWindowEntry> windows;
