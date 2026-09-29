@@ -1653,15 +1653,40 @@ void App::Tick(double dt)
         && draggingIndex_ < static_cast<int>(items_.size()))
     {
         const int from = draggingIndex_;
-        int target = 0;
+        int firstPinned = -1;
+        int pinnedCount = 0;
+        int beforePointer = 0;
 
         for (int i = 0; i < static_cast<int>(items_.size()); ++i)
         {
+            if (items_[static_cast<size_t>(i)]->kind != DockItemKind::Pinned)
+            {
+                continue;
+            }
+
+            if (firstPinned < 0)
+            {
+                firstPinned = i;
+            }
+
             if (i != from
                 && mouseX_ > items_[static_cast<size_t>(i)]->centerX)
             {
-                ++target;
+                ++beforePointer;
             }
+            ++pinnedCount;
+        }
+
+        int target = from;
+        if (firstPinned >= 0 && pinnedCount > 0)
+        {
+            target = firstPinned + beforePointer;
+            if (target > from)
+            {
+                --target;
+            }
+            target = std::clamp(
+                target, firstPinned, firstPinned + pinnedCount - 1);
         }
 
         dragTargetIndex_ = target;
