@@ -325,6 +325,23 @@ std::wstring WindowTitleWithoutApplicationName(
         candidates.emplace_back(L"File Explorer");
         candidates.emplace_back(L"Windows Explorer");
     }
+    else if (EqualsIgnoreCase(processName, L"chrome.exe"))
+    {
+        candidates.emplace_back(L"Google Chrome");
+    }
+    else if (EqualsIgnoreCase(processName, L"msedge.exe"))
+    {
+        candidates.emplace_back(L"Microsoft Edge");
+    }
+    else if (EqualsIgnoreCase(processName, L"firefox.exe"))
+    {
+        candidates.emplace_back(L"Mozilla Firefox");
+        candidates.emplace_back(L"Firefox");
+    }
+    else if (EqualsIgnoreCase(processName, L"Code.exe"))
+    {
+        candidates.emplace_back(L"Visual Studio Code");
+    }
 
     static constexpr const wchar_t* separators[] =
     {
