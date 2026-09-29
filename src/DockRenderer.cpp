@@ -1069,6 +1069,134 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
     }
 }
 
+void DockRenderer::DrawWindowMenu(
+    const D2D1_RECT_F& rect,
+    const std::vector<std::wstring>& titles,
+    const std::vector<bool>& active,
+    const std::vector<bool>& minimized,
+    int hoveredRow,
+    float dpiScale,
+    float opacity)
+{
+    if (!rt_ || !dwrite_ || titles.empty()
+        || rect.right <= rect.left || rect.bottom <= rect.top)
+    {
+        return;
+    }
+
+    const D2D1_MATRIX_3X2_F previous =
+        DockTransform(edge_, logicalWidth_, logicalHeight_).Matrix();
+    rt_->SetTransform(D2D1::Matrix3x2F::Identity());
+
+    const float alpha = ClampF(opacity, 0.0f, 1.0f);
+    const float radius = 10.0f * dpiScale;
+    const float rowHeight =
+        (rect.bottom - rect.top) / static_cast<float>(titles.size());
+
+    ComPtr<ID2D1SolidColorBrush> fill;
+    ComPtr<ID2D1SolidColorBrush> border;
+    ComPtr<ID2D1SolidColorBrush> ink;
+    ComPtr<ID2D1SolidColorBrush> mutedInk;
+    ComPtr<ID2D1SolidColorBrush> hover;
+    ComPtr<ID2D1SolidColorBrush> activeDot;
+
+    rt_->CreateSolidColorBrush(
+        D2D1::ColorF(0.10f, 0.11f, 0.13f, 0.96f * alpha),
+        fill.AddressOf());
+    rt_->CreateSolidColorBrush(
+        D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.18f * alpha),
+        border.AddressOf());
+    rt_->CreateSolidColorBrush(
+        D2D1::ColorF(0.96f, 0.97f, 0.99f, 0.98f * alpha),
+        ink.AddressOf());
+    rt_->CreateSolidColorBrush(
+        D2D1::ColorF(0.76f, 0.79f, 0.84f, 0.72f * alpha),
+        mutedInk.AddressOf());
+    rt_->CreateSolidColorBrush(
+        D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f * alpha),
+        hover.AddressOf());
+    rt_->CreateSolidColorBrush(
+        D2D1::ColorF(0.22f, 0.68f, 1.0f, 0.95f * alpha),
+        activeDot.AddressOf());
+
+    if (!fill || !border || !ink || !mutedInk || !hover || !activeDot)
+    {
+        rt_->SetTransform(previous);
+        return;
+    }
+
+    const D2D1_ROUNDED_RECT panel = D2D1::RoundedRect(rect, radius, radius);
+    rt_->FillRoundedRectangle(panel, fill.Get());
+    rt_->DrawRoundedRectangle(panel, border.Get(), 1.0f * dpiScale);
+
+    ComPtr<IDWriteTextFormat> format;
+    if (FAILED(dwrite_->CreateTextFormat(
+            L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            13.0f * dpiScale, L"", format.AddressOf())))
+    {
+        rt_->SetTransform(previous);
+        return;
+    }
+
+    format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
+    DWRITE_TRIMMING trimming{};
+    trimming.granularity = DWRITE_TRIMMING_GRANULARITY_CHARACTER;
+    ComPtr<IDWriteInlineObject> ellipsis;
+    if (SUCCEEDED(dwrite_->CreateEllipsisTrimmingSign(
+            format.Get(), ellipsis.AddressOf())))
+    {
+        format->SetTrimming(&trimming, ellipsis.Get());
+    }
+
+    const float padX = 16.0f * dpiScale;
+    const float dotRadius = 3.0f * dpiScale;
+    const float dotX = rect.left + 10.0f * dpiScale;
+
+    for (size_t i = 0; i < titles.size(); ++i)
+    {
+        const float top = rect.top + rowHeight * static_cast<float>(i);
+        const float bottom = top + rowHeight;
+        const D2D1_RECT_F row = D2D1::RectF(
+            rect.left + 4.0f * dpiScale,
+            top + 2.0f * dpiScale,
+            rect.right - 4.0f * dpiScale,
+            bottom - 2.0f * dpiScale);
+
+        if (static_cast<int>(i) == hoveredRow)
+        {
+            rt_->FillRoundedRectangle(
+                D2D1::RoundedRect(row, 7.0f * dpiScale, 7.0f * dpiScale),
+                hover.Get());
+        }
+
+        if (i < active.size() && active[i])
+        {
+            rt_->FillEllipse(
+                D2D1::Ellipse(D2D1::Point2F(dotX, top + rowHeight * 0.5f),
+                              dotRadius, dotRadius),
+                activeDot.Get());
+        }
+
+        const float textLeft = rect.left + padX + 4.0f * dpiScale;
+        const D2D1_RECT_F textRect = D2D1::RectF(
+            textLeft, top,
+            rect.right - 12.0f * dpiScale, bottom);
+
+        rt_->DrawTextW(
+            titles[i].c_str(), static_cast<UINT32>(titles[i].size()),
+            format.Get(), textRect,
+            (i < minimized.size() && minimized[i])
+                ? mutedInk.Get() : ink.Get(),
+            D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
+    rt_->SetTransform(previous);
+}
+
 void DockRenderer::DrawPlateRim(const D2D1_RECT_F& rect,
                                 float radius,
                                 float opacity,
