@@ -33,7 +33,7 @@ public:
     WindowPreview(const WindowPreview&) = delete;
     WindowPreview& operator=(const WindowPreview&) = delete;
 
-    bool Initialize(HINSTANCE instance);
+    bool Initialize(HINSTANCE instance, HWND owner);
     void Shutdown();
 
     void Show(const RECT& screenRect,
@@ -59,7 +59,14 @@ private:
     void Paint();
 
     HINSTANCE instance_ = nullptr;
+    HWND owner_ = nullptr;
     HWND hwnd_ = nullptr;
+
+    // Ordinary popup HWND is required by DWM thumbnails. Use a D2D DC target
+    // only for our own card chrome so thumbnail frames/hover stay antialiased.
+    ComPtr<ID2D1Factory> d2dFactory_;
+    ComPtr<ID2D1DCRenderTarget> d2dTarget_;
+
     std::vector<Entry> entries_;
     std::vector<HTHUMBNAIL> thumbnails_;
     std::vector<RECT> thumbnailRects_;
