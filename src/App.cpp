@@ -4468,6 +4468,7 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"淡入淡出时长", L"Fade duration"},
         {L"气泡比例", L"Tooltip scale"},
         {L"气泡圆角", L"Tooltip corner radius"},
+        {L"运行应用预览沿用这些设置", L"Running-app previews use these settings"},
         {L"保存", L"Save"},
         {L"取消", L"Cancel"},
         {L"固定宽度（进入时展开）", L"Fixed width (expand on hover)"},
@@ -5908,6 +5909,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             kIdTooltipScale, 158, 132, 140, 50, 188,
             static_cast<int>(std::lround(config_.settings.tooltipScale * 100.0f)));
         settings_.tooltipScaleLabel = makeLabel(L"", 306, 136, 60);
+        HWND tooltipPreviewNote =
+            makeLabel(L"运行应用预览沿用这些设置", 22, 170, 300);
         HWND tooltipCornerCaption = makeLabel(L"气泡圆角", 22, 202, 120);
         settings_.tooltipCornerSlider = makeSlider(
             kIdTooltipCorner, 158, 198, 140, 0, 40,
@@ -5980,6 +5983,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             MarkDialogTabPage(tooltipOpacityCaption, 3);
             MarkDialogTabPage(tooltipFadeCaption, 3);
             MarkDialogTabPage(tooltipScaleCaption, 3);
+            MarkDialogTabPage(tooltipPreviewNote, 3);
             MarkDialogTabPage(settings_.tooltipOpacitySlider, 3);
             MarkDialogTabPage(settings_.tooltipOpacityLabel, 3);
             MarkDialogTabPage(settings_.tooltipFadeSlider, 3);
