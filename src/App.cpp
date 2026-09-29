@@ -299,6 +299,108 @@ bool IsWindows11OrLater()
     return windows11;
 }
 
+struct VisibleTaskbarContext
+{
+    RECT monitor{};
+    DockEdge edge = DockEdge::Bottom;
+    int inset = 0;
+};
+
+BOOL CALLBACK FindVisibleTaskbarInset(HWND hwnd, LPARAM parameter)
+{
+    auto* context = reinterpret_cast<VisibleTaskbarContext*>(parameter);
+    if (!context || !IsWindowVisible(hwnd))
+    {
+        return TRUE;
+    }
+
+    wchar_t className[128]{};
+    GetClassNameW(hwnd, className, ARRAYSIZE(className));
+    if (wcscmp(className, L"Shell_TrayWnd") != 0
+        && wcscmp(className, L"Shell_SecondaryTrayWnd") != 0)
+    {
+        return TRUE;
+    }
+
+    RECT rect{};
+    if (!GetWindowRect(hwnd, &rect))
+    {
+        return TRUE;
+    }
+
+    const RECT& monitor = context->monitor;
+    const LONG overlapLeft = (std::max)(rect.left, monitor.left);
+    const LONG overlapTop = (std::max)(rect.top, monitor.top);
+    const LONG overlapRight = (std::min)(rect.right, monitor.right);
+    const LONG overlapBottom = (std::min)(rect.bottom, monitor.bottom);
+
+    if (overlapRight <= overlapLeft || overlapBottom <= overlapTop)
+    {
+        return TRUE;
+    }
+
+    int inset = 0;
+    switch (context->edge)
+    {
+    case DockEdge::Top:
+        if (rect.top <= monitor.top + 2
+            && rect.bottom > monitor.top)
+        {
+            inset = static_cast<int>(
+                overlapBottom - monitor.top);
+        }
+        break;
+
+    case DockEdge::Left:
+        if (rect.left <= monitor.left + 2
+            && rect.right > monitor.left)
+        {
+            inset = static_cast<int>(
+                overlapRight - monitor.left);
+        }
+        break;
+
+    case DockEdge::Right:
+        if (rect.right >= monitor.right - 2
+            && rect.left < monitor.right)
+        {
+            inset = static_cast<int>(
+                monitor.right - overlapLeft);
+        }
+        break;
+
+    case DockEdge::Bottom:
+    default:
+        if (rect.bottom >= monitor.bottom - 2
+            && rect.top < monitor.bottom)
+        {
+            inset = static_cast<int>(
+                monitor.bottom - overlapTop);
+        }
+        break;
+    }
+
+    // Auto-hidden taskbars leave only a one- or two-pixel activation strip.
+    // Ignore that strip; only react when Explorer has actually revealed the
+    // taskbar (for example because Start/Search was opened).
+    if (inset >= 6)
+    {
+        context->inset = (std::max)(context->inset, inset);
+    }
+
+    return TRUE;
+}
+
+int VisibleTaskbarInset(const RECT& monitor, DockEdge edge)
+{
+    VisibleTaskbarContext context;
+    context.monitor = monitor;
+    context.edge = edge;
+    EnumWindows(FindVisibleTaskbarInset,
+                reinterpret_cast<LPARAM>(&context));
+    return context.inset;
+}
+
 void ArmTimer(HANDLE timer, int milliseconds)
 {
     LARGE_INTEGER due{};
