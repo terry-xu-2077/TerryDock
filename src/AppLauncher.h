@@ -18,6 +18,9 @@ public:
     /// Returns false when no suitable window is currently open.
     static bool ActivateRunningWindow(const std::wstring& processName);
 
+    /// Restores and foregrounds this exact top-level window.
+    static bool ActivateWindow(HWND hwnd);
+
     /// Same as Launch but used by the "open" context menu entry.
     static bool Open(const std::wstring& path);
 
