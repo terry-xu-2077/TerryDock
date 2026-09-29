@@ -166,7 +166,7 @@ bool WindowPreview::Initialize(HINSTANCE instance, HWND owner)
     RegisterClassExW(&windowClass);
 
     hwnd_ = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kWindowPreviewClass,
         L"LightDock window preview",
         WS_POPUP,
@@ -175,11 +175,6 @@ bool WindowPreview::Initialize(HINSTANCE instance, HWND owner)
         nullptr,
         instance_,
         this);
-
-    if (hwnd_)
-    {
-        SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
-    }
 
     return hwnd_ != nullptr;
 }
@@ -283,9 +278,8 @@ void WindowPreview::UpdateThumbnailRects()
     const int previewBottom = (std::min)(
         height, previewTop + previewHeight);
 
-    // Whole preview bubble opacity is applied at the destination HWND, so
-    // keep DWM thumbnails internally opaque and avoid multiplying alpha twice.
-    constexpr BYTE thumbnailOpacity = 255;
+    const BYTE thumbnailOpacity = static_cast<BYTE>(std::lround(
+        255.0f * ClampF(opacity_, 0.0f, 1.0f)));
 
     for (size_t i = 0; i < thumbnails_.size(); ++i)
     {
@@ -433,12 +427,6 @@ void WindowPreview::Show(const RECT& screenRect,
     menuScale_ = nextMenuScale;
     cornerRadius_ = nextCornerRadius;
     opacity_ = nextOpacity;
-    if (!wasVisible || opacityChanged)
-    {
-        const BYTE windowAlpha = static_cast<BYTE>(std::lround(
-            255.0f * opacity_));
-        SetLayeredWindowAttributes(hwnd_, 0, windowAlpha, LWA_ALPHA);
-    }
     lastClientWidth_ = width;
     lastClientHeight_ = height;
 
