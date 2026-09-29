@@ -434,6 +434,135 @@ void SendShellShortcut(bool search)
     SendInput(count, inputs, sizeof(INPUT));
 }
 
+bool IsMatchingShellPopupProcess(HWND hwnd, bool search)
+{
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (processId == 0)
+    {
+        return false;
+    }
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                 FALSE, processId);
+    if (!process)
+    {
+        return false;
+    }
+
+    wchar_t path[32768]{};
+    DWORD pathLength = ARRAYSIZE(path);
+    const BOOL gotPath = QueryFullProcessImageNameW(
+        process, 0, path, &pathLength);
+    CloseHandle(process);
+
+    if (!gotPath || pathLength == 0)
+    {
+        return false;
+    }
+
+    const std::wstring name =
+        GetFileName(std::wstring(path, pathLength));
+
+    if (search)
+    {
+        return EqualsIgnoreCase(name, L"SearchHost.exe")
+            || EqualsIgnoreCase(name, L"SearchApp.exe")
+            || EqualsIgnoreCase(name, L"SearchUI.exe");
+    }
+
+    return EqualsIgnoreCase(name, L"StartMenuExperienceHost.exe")
+        || EqualsIgnoreCase(name, L"ShellExperienceHost.exe");
+}
+
+struct ShellPopupWindowSearch
+{
+    bool search = false;
+    HMONITOR monitor = nullptr;
+    HWND foreground = nullptr;
+    HWND best = nullptr;
+    std::uint64_t bestScore = 0;
+};
+
+BOOL CALLBACK FindShellPopupWindow(HWND hwnd, LPARAM parameter)
+{
+    auto* search =
+        reinterpret_cast<ShellPopupWindowSearch*>(parameter);
+    if (!search || !IsWindowVisible(hwnd) || IsIconic(hwnd))
+    {
+        return TRUE;
+    }
+
+    DWORD cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(
+            hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+        && cloaked != 0)
+    {
+        return TRUE;
+    }
+
+    if (!IsMatchingShellPopupProcess(hwnd, search->search))
+    {
+        return TRUE;
+    }
+
+    if (search->monitor
+        && MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+            != search->monitor)
+    {
+        return TRUE;
+    }
+
+    RECT rect{};
+    if (!GetVisibleWindowBounds(hwnd, rect))
+    {
+        return TRUE;
+    }
+
+    const LONG width = rect.right - rect.left;
+    const LONG height = rect.bottom - rect.top;
+    if (width < 160 || height < 120)
+    {
+        return TRUE;
+    }
+
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (search->monitor
+        && GetMonitorInfoW(search->monitor, &monitorInfo))
+    {
+        const LONG monitorWidth =
+            monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;
+        const LONG monitorHeight =
+            monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top;
+
+        // Ignore transparent/full-monitor shell host surfaces. We only want
+        // the compact Start/Search popup that the user actually sees.
+        if (width >= monitorWidth * 95 / 100
+            && height >= monitorHeight * 95 / 100)
+        {
+            return TRUE;
+        }
+    }
+
+    std::uint64_t score =
+        static_cast<std::uint64_t>(width)
+        * static_cast<std::uint64_t>(height);
+
+    if (hwnd == search->foreground)
+    {
+        score += (1ull << 62);
+    }
+
+    if (!search->best || score > search->bestScore)
+    {
+        search->best = hwnd;
+        search->bestScore = score;
+    }
+
+    return TRUE;
+}
+
 /// DPI of the monitor a dialog lives on (falls back to the system DPI).
 int DialogDpi(HWND hwnd)
 {
@@ -551,7 +680,9 @@ int App::Run(HINSTANCE instance)
 
     while (running_)
     {
-        ArmTimer(timer, animating_ ? frameIntervalMs_ : kIdleIntervalMs);
+        ArmTimer(timer,
+                 (animating_ || shellPopupPlacementPending_)
+                    ? frameIntervalMs_ : kIdleIntervalMs);
 
         MsgWaitForMultipleObjectsEx(
             1, &timer, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
@@ -579,6 +710,7 @@ int App::Run(HINSTANCE instance)
         lastFrame_ = now;
 
         CheckPointer();
+        UpdateShellPopupPlacement();
 
         if (now - lastPoll_ >= std::chrono::duration<double>(kPollIntervalSeconds))
         {
@@ -950,13 +1082,15 @@ void App::LaunchApplication(size_t index)
 
     if (item.kind == DockItemKind::StartButton)
     {
-        SendShellShortcut(false);
+        BeginShellPopupPlacement(
+            false, mousePhysicalX_, mousePhysicalY_);
         return;
     }
 
     if (item.kind == DockItemKind::SearchButton)
     {
-        SendShellShortcut(true);
+        BeginShellPopupPlacement(
+            true, mousePhysicalX_, mousePhysicalY_);
         return;
     }
 
