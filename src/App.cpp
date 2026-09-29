@@ -5529,8 +5529,15 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             setSlider(settings_.autoHideDelaySlider, defaults.autoHideDelayMs);
             setSlider(settings_.autoHideSpeedSlider,
                       defaults.autoHideAnimationMs);
+            UINT systemHoverMs = 0;
+            const int defaultWindowMenuDelay =
+                SystemParametersInfoW(
+                    SPI_GETMOUSEHOVERTIME, 0, &systemHoverMs, 0)
+                    && systemHoverMs > 0
+                ? std::clamp(static_cast<int>(systemHoverMs), 0, 1500)
+                : defaults.windowMenuHoverDelayMs;
             setSlider(settings_.windowMenuDelaySlider,
-                      defaults.windowMenuHoverDelayMs);
+                      defaultWindowMenuDelay);
             setSlider(settings_.dockCornerSlider,
                       static_cast<int>(std::lround(defaults.cornerRadius)));
             setSlider(settings_.tooltipOpacitySlider,
