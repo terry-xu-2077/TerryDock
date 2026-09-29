@@ -2593,7 +2593,10 @@ void App::OnMouseMove(float x, float y)
         const float dy = y - dragStartY_;
         const float threshold = 8.0f * dockScale_;
 
-        if (dx * dx + dy * dy >= threshold * threshold)
+        if (dx * dx + dy * dy >= threshold * threshold
+            && pressedIndex_ < static_cast<int>(items_.size())
+            && items_[static_cast<size_t>(pressedIndex_)]->kind
+                == DockItemKind::Pinned)
         {
             draggingIndex_ = pressedIndex_;
             pressedIndex_ = -1;
@@ -2702,7 +2705,9 @@ void App::OnMouseButton(int button, bool down, float x, float y)
 void App::FinishIconDrag(float x, float y)
 {
     const int from = draggingIndex_;
-    if (from < 0 || from >= static_cast<int>(items_.size()))
+    if (from < 0 || from >= static_cast<int>(items_.size())
+        || items_[static_cast<size_t>(from)]->kind
+            != DockItemKind::Pinned)
     {
         return;
     }
@@ -2732,14 +2737,41 @@ void App::FinishIconDrag(float x, float y)
     // Count the centres to the left of the drop point, excluding the item
     // being dragged. This gives the insertion index directly for both
     // leftward and rightward moves.
-    int target = 0;
+    int firstPinned = -1;
+    int pinnedCount = 0;
+    int beforeDrop = 0;
+
     for (int i = 0; i < static_cast<int>(items_.size()); ++i)
     {
+        if (items_[static_cast<size_t>(i)]->kind != DockItemKind::Pinned)
+        {
+            continue;
+        }
+
+        if (firstPinned < 0)
+        {
+            firstPinned = i;
+        }
+
         if (i != from && x > items_[static_cast<size_t>(i)]->centerX)
         {
-            ++target;
+            ++beforeDrop;
         }
+        ++pinnedCount;
     }
+
+    if (firstPinned < 0 || pinnedCount <= 1)
+    {
+        return;
+    }
+
+    int target = firstPinned + beforeDrop;
+    if (target > from)
+    {
+        --target;
+    }
+    target = std::clamp(target, firstPinned,
+                        firstPinned + pinnedCount - 1);
 
     if (target == from)
     {
@@ -3463,7 +3495,7 @@ void App::HandleMenuCommand(UINT id)
     case kMenuOpen:
         if (menuIndex_ >= 0)
         {
-            AppLauncher::Open(items_[static_cast<size_t>(menuIndex_)]->targetPath);
+            LaunchApplication(static_cast<size_t>(menuIndex_));
         }
 
         break;
@@ -3488,8 +3520,9 @@ void App::HandleMenuCommand(UINT id)
                 *items_[static_cast<size_t>(menuIndex_)];
             if (item.kind == DockItemKind::RunningTransient)
             {
-                AddApplication(item.resolvedPath.empty()
-                    ? item.targetPath : item.resolvedPath);
+                const std::wstring path = item.resolvedPath.empty()
+                    ? item.targetPath : item.resolvedPath;
+                AddApplication(path);
             }
         }
 
