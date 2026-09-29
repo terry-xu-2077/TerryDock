@@ -94,26 +94,13 @@ BOOL CALLBACK FindApplicationWindow(HWND hwnd, LPARAM parameter)
 
 } // namespace
 
-bool AppLauncher::ActivateRunningWindow(const std::wstring& processName)
+bool AppLauncher::ActivateWindow(HWND target)
 {
-    if (processName.empty())
-    {
-        return false;
-    }
-
-    WindowSearch search;
-    search.processName = GetFileName(processName);
-    search.foreground = GetForegroundWindow();
-    EnumWindows(FindApplicationWindow, reinterpret_cast<LPARAM>(&search));
-
-    HWND target = search.minimized ? search.minimized : search.candidate;
     if (!target || !IsWindow(target))
     {
         return false;
     }
 
-    // SW_RESTORE also un-maximizes a maximized window. Only restore windows
-    // that are actually minimized; preserve the user's maximized state.
     if (IsIconic(target))
     {
         ShowWindowAsync(target, SW_RESTORE);
@@ -126,6 +113,7 @@ bool AppLauncher::ActivateRunningWindow(const std::wstring& processName)
     {
         ShowWindowAsync(target, SW_SHOWNOACTIVATE);
     }
+
     BringWindowToTop(target);
 
     const DWORD targetThread = GetWindowThreadProcessId(target, nullptr);
@@ -133,6 +121,7 @@ bool AppLauncher::ActivateRunningWindow(const std::wstring& processName)
     const DWORD foregroundThread = foreground
         ? GetWindowThreadProcessId(foreground, nullptr) : 0;
     const DWORD currentThread = GetCurrentThreadId();
+
     const bool attachForeground = foregroundThread != 0
         && foregroundThread != currentThread
         && AttachThreadInput(currentThread, foregroundThread, TRUE) != FALSE;
@@ -157,7 +146,24 @@ bool AppLauncher::ActivateRunningWindow(const std::wstring& processName)
     {
         FlashWindow(target, TRUE);
     }
+
     return true;
+}
+
+bool AppLauncher::ActivateRunningWindow(const std::wstring& processName)
+{
+    if (processName.empty())
+    {
+        return false;
+    }
+
+    WindowSearch search;
+    search.processName = GetFileName(processName);
+    search.foreground = GetForegroundWindow();
+    EnumWindows(FindApplicationWindow, reinterpret_cast<LPARAM>(&search));
+
+    HWND target = search.minimized ? search.minimized : search.candidate;
+    return ActivateWindow(target);
 }
 
 bool AppLauncher::Launch(const std::wstring& path, const std::wstring& arguments)
