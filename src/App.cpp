@@ -301,12 +301,29 @@ bool IsWindows11OrLater()
 
 std::wstring WindowTitleWithoutApplicationName(
     const std::wstring& title,
-    const std::wstring& applicationName)
+    const std::wstring& applicationName,
+    const std::wstring& processName)
 {
-    if (title.empty() || applicationName.empty()
-        || EqualsIgnoreCase(title, applicationName))
+    if (title.empty())
     {
         return title;
+    }
+
+    std::vector<std::wstring> candidates;
+    if (!applicationName.empty())
+    {
+        candidates.push_back(applicationName);
+    }
+
+    // Explorer's executable metadata and its localized window-title suffix
+    // are not always the same string. Cover the common shell labels so
+    // "TerryDock - 文件资源管理器" becomes simply "TerryDock".
+    if (EqualsIgnoreCase(processName, L"explorer.exe"))
+    {
+        candidates.emplace_back(L"文件资源管理器");
+        candidates.emplace_back(L"资源管理器");
+        candidates.emplace_back(L"File Explorer");
+        candidates.emplace_back(L"Windows Explorer");
     }
 
     static constexpr const wchar_t* separators[] =
@@ -314,23 +331,31 @@ std::wstring WindowTitleWithoutApplicationName(
         L" - ", L" – ", L" — ", L" | "
     };
 
-    for (const wchar_t* separator : separators)
+    for (const std::wstring& candidate : candidates)
     {
-        const std::wstring suffix =
-            std::wstring(separator) + applicationName;
-        if (title.size() > suffix.size()
-            && _wcsicmp(title.c_str() + title.size() - suffix.size(),
-                        suffix.c_str()) == 0)
+        if (candidate.empty() || EqualsIgnoreCase(title, candidate))
         {
-            return title.substr(0, title.size() - suffix.size());
+            continue;
         }
 
-        const std::wstring prefix =
-            applicationName + separator;
-        if (title.size() > prefix.size()
-            && _wcsnicmp(title.c_str(), prefix.c_str(), prefix.size()) == 0)
+        for (const wchar_t* separator : separators)
         {
-            return title.substr(prefix.size());
+            const std::wstring suffix =
+                std::wstring(separator) + candidate;
+            if (title.size() > suffix.size()
+                && _wcsicmp(title.c_str() + title.size() - suffix.size(),
+                            suffix.c_str()) == 0)
+            {
+                return title.substr(0, title.size() - suffix.size());
+            }
+
+            const std::wstring prefix =
+                candidate + separator;
+            if (title.size() > prefix.size()
+                && _wcsnicmp(title.c_str(), prefix.c_str(), prefix.size()) == 0)
+            {
+                return title.substr(prefix.size());
+            }
         }
     }
 
@@ -2890,7 +2915,7 @@ void App::Render()
                 entry.title = window.title.empty()
                     ? item.name
                     : WindowTitleWithoutApplicationName(
-                        window.title, item.name);
+                        window.title, item.name, item.processName);
                 entry.active = window.active;
                 entry.minimized = window.minimized;
                 previewEntries.push_back(std::move(entry));
