@@ -2606,13 +2606,21 @@ void App::WakeAnimation()
 
 bool App::HitTest(float x, float y)
 {
-    const D2D1_POINT_2F logical = dockTransform_.ToLogical(x, y);
-    x = logical.x;
-    y = logical.y;
     if (modal_ || fullscreenActive_ || exitRequested_)
     {
         return false;
     }
+
+    // The hover window stack lives outside the panel itself but must remain
+    // interactive so the pointer can travel from the icon into the menu.
+    if (PointInWindowMenu(x, y))
+    {
+        return true;
+    }
+
+    const D2D1_POINT_2F logical = dockTransform_.ToLogical(x, y);
+    x = logical.x;
+    y = logical.y;
 
     // The dock only reacts over the icon row. The padding at either end and
     // the shadow margins stay transparent, so the magnified state releases
