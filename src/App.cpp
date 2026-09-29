@@ -2475,6 +2475,10 @@ void App::CheckPointer()
     const RECT bounds = window_.GetBounds();
     const float physicalX = static_cast<float>(cursor.x - bounds.left);
     const float physicalY = static_cast<float>(cursor.y - bounds.top);
+    mousePhysicalX_ = physicalX;
+    mousePhysicalY_ = physicalY;
+
+    const bool overWindowMenu = PointInWindowMenu(physicalX, physicalY);
     const D2D1_POINT_2F logical = dockTransform_.ToLogical(physicalX, physicalY);
     const float x = logical.x;
     const float y = logical.y;
@@ -2577,8 +2581,11 @@ void App::CheckPointer()
         if (!mouseActive_)
         {
             mouseActive_ = true;
-            mouseX_ = x;
-            mouseY_ = y;
+            if (!overWindowMenu)
+            {
+                mouseX_ = x;
+                mouseY_ = y;
+            }
             WakeAnimation();
         }
     }
@@ -2588,7 +2595,7 @@ void App::CheckPointer()
         WakeAnimation();
     }
 
-    if (inside)
+    if (inside && !overWindowMenu)
     {
         mouseY_ = y;
     }
