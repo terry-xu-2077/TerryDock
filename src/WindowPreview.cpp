@@ -361,7 +361,15 @@ void WindowPreview::Show(const RECT& screenRect,
         return;
     }
 
+    const float nextDpiScale = (std::max)(dpiScale, 1.0f);
+    const float nextMenuScale = ClampF(menuScale, 0.75f, 1.25f);
+    const float nextCornerRadius = ClampF(cornerRadius, 0.0f, 32.0f);
+    const float nextThumbnailScale =
+        ClampF(thumbnailScale, 0.6f, 1.4f);
+
     bool sourcesChanged = entries_.size() != entries.size();
+    bool contentChanged = sourcesChanged;
+
     if (!sourcesChanged)
     {
         for (size_t i = 0; i < entries.size(); ++i)
@@ -369,43 +377,93 @@ void WindowPreview::Show(const RECT& screenRect,
             if (entries_[i].hwnd != entries[i].hwnd)
             {
                 sourcesChanged = true;
+                contentChanged = true;
                 break;
+            }
+
+            if (entries_[i].title != entries[i].title
+                || entries_[i].active != entries[i].active
+                || entries_[i].minimized != entries[i].minimized)
+            {
+                contentChanged = true;
             }
         }
     }
 
+    const bool wasVisible = visible_;
+    const bool sizeChanged =
+        !wasVisible || width != lastClientWidth_ || height != lastClientHeight_;
+    const bool hoverChanged = hoveredRow_ != hoveredRow;
+
+    const bool scaleChanged =
+        std::fabs(dpiScale_ - nextDpiScale) > 0.0001f
+        || std::fabs(menuScale_ - nextMenuScale) > 0.0001f
+        || std::fabs(thumbnailScale_ - nextThumbnailScale) > 0.0001f;
+    const bool cornerChanged =
+        std::fabs(cornerRadius_ - nextCornerRadius) > 0.0001f;
+
+    RECT currentBounds{};
+    GetWindowRect(hwnd_, &currentBounds);
+    const bool positionChanged =
+        !wasVisible
+        || currentBounds.left != screenRect.left
+        || currentBounds.top != screenRect.top;
+
     entries_ = entries;
     hoveredRow_ = hoveredRow;
-    dpiScale_ = (std::max)(dpiScale, 1.0f);
-    menuScale_ = ClampF(menuScale, 0.75f, 1.25f);
-    cornerRadius_ = ClampF(cornerRadius, 0.0f, 32.0f);
-    thumbnailScale_ = ClampF(thumbnailScale, 0.6f, 1.4f);
+    dpiScale_ = nextDpiScale;
+    menuScale_ = nextMenuScale;
+    cornerRadius_ = nextCornerRadius;
+    thumbnailScale_ = nextThumbnailScale;
+    lastClientWidth_ = width;
+    lastClientHeight_ = height;
 
-    const bool wasVisible = visible_;
-    SetWindowPos(
-        hwnd_,
-        wasVisible ? nullptr : HWND_TOPMOST,
-        screenRect.left, screenRect.top,
-        width, height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW
-            | (wasVisible ? SWP_NOZORDER : 0));
+    // While the Dock animates, this function is called every frame. Moving an
+    // already-visible popup does not require repainting its client area.
+    // Avoiding redundant SetWindowPos invalidation is what keeps GDI text from
+    // flashing while the DWM thumbnails continue compositing independently.
+    if (!wasVisible)
+    {
+        SetWindowPos(
+            hwnd_, HWND_TOPMOST,
+            screenRect.left, screenRect.top,
+            width, height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+    else if (positionChanged || sizeChanged)
+    {
+        UINT flags = SWP_NOACTIVATE | SWP_NOZORDER;
+        if (!sizeChanged)
+        {
+            flags |= SWP_NOSIZE;
+        }
+
+        SetWindowPos(
+            hwnd_, nullptr,
+            screenRect.left, screenRect.top,
+            width, height,
+            flags);
+    }
 
     const int radius = ScalePx(
         cornerRadius_, dpiScale_ * menuScale_);
 
-    // The Dock itself uses per-pixel alpha + Direct2D, so its rounded corners
-    // are naturally anti-aliased. This preview is an ordinary HWND because
-    // DWM live thumbnails need a native destination window. On Windows 11,
-    // let DWM clip and outline that HWND so the corners receive the same
-    // compositor antialiasing. Older Windows falls back to the integer HRGN.
-    nativeRoundedCorners_ =
-        ApplyNativeRoundedCorners(hwnd_, cornerRadius_);
-
-    if (nativeRoundedCorners_)
+    // DWM corner state only needs to change when the popup first appears or
+    // when the user edits the corner setting. Reapplying it every animation
+    // frame can itself trigger non-client recomposition.
+    if (!wasVisible || cornerChanged)
     {
-        SetWindowRgn(hwnd_, nullptr, TRUE);
+        nativeRoundedCorners_ =
+            ApplyNativeRoundedCorners(hwnd_, cornerRadius_);
+
+        if (nativeRoundedCorners_)
+        {
+            SetWindowRgn(hwnd_, nullptr, TRUE);
+        }
     }
-    else
+
+    if (!nativeRoundedCorners_
+        && (!wasVisible || sizeChanged || cornerChanged))
     {
         HRGN region = CreateRoundRectRgn(
             0, 0, width + 1, height + 1,
@@ -419,18 +477,37 @@ void WindowPreview::Show(const RECT& screenRect,
         }
     }
 
+    const bool layoutChanged = sizeChanged || scaleChanged;
+
     if (sourcesChanged)
     {
         RebuildThumbnails();
     }
-    else
+    else if (layoutChanged)
     {
         UpdateThumbnailRects();
     }
 
     visible_ = true;
-    InvalidateRect(hwnd_, nullptr, FALSE);
-    UpdateWindow(hwnd_);
+
+    // Text, rounded frames and hover chrome are static window content. Repaint
+    // only when that content actually changes; pure popup movement is handled
+    // by the compositor and should not touch the client pixels at all.
+    const bool needsClientRepaint =
+        !wasVisible || contentChanged || hoverChanged
+        || layoutChanged || cornerChanged;
+
+    if (needsClientRepaint)
+    {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+
+        // Paint synchronously only for first reveal so the popup never shows
+        // a blank frame. Subsequent updates are allowed to coalesce naturally.
+        if (!wasVisible)
+        {
+            UpdateWindow(hwnd_);
+        }
+    }
 }
 
 void WindowPreview::Hide()
