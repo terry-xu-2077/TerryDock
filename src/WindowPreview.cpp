@@ -200,10 +200,13 @@ void WindowPreview::UpdateThumbnailRects()
     }
 
     const int rowHeight = height / static_cast<int>(entries_.size());
-    const int left = ScalePx(10.0f, dpiScale_);
-    const int previewSlotWidth = ScalePx(112.0f, dpiScale_);
-    const int verticalPad = ScalePx(7.0f, dpiScale_);
-    const int maxWidth = ScalePx(104.0f, dpiScale_);
+    const float uiScale = dpiScale_ * menuScale_;
+    const int left = ScalePx(10.0f, uiScale);
+    const int previewSlotWidth = ScalePx(
+        112.0f * thumbnailScale_, uiScale);
+    const int verticalPad = ScalePx(7.0f, uiScale);
+    const int maxWidth = ScalePx(
+        104.0f * thumbnailScale_, uiScale);
     const int maxHeight = (std::max)(1, rowHeight - verticalPad * 2);
 
     for (size_t i = 0; i < thumbnails_.size(); ++i)
@@ -263,7 +266,10 @@ void WindowPreview::UpdateThumbnailRects()
 void WindowPreview::Show(const RECT& screenRect,
                          const std::vector<Entry>& entries,
                          int hoveredRow,
-                         float dpiScale)
+                         float dpiScale,
+                         float menuScale,
+                         float cornerRadius,
+                         float thumbnailScale)
 {
     if (!hwnd_ && !Initialize(instance_ ? instance_ : GetModuleHandleW(nullptr)))
     {
@@ -294,6 +300,9 @@ void WindowPreview::Show(const RECT& screenRect,
     entries_ = entries;
     hoveredRow_ = hoveredRow;
     dpiScale_ = (std::max)(dpiScale, 1.0f);
+    menuScale_ = ClampF(menuScale, 0.75f, 1.25f);
+    cornerRadius_ = ClampF(cornerRadius, 0.0f, 32.0f);
+    thumbnailScale_ = ClampF(thumbnailScale, 0.6f, 1.4f);
 
     SetWindowPos(
         hwnd_, HWND_TOPMOST,
@@ -301,7 +310,8 @@ void WindowPreview::Show(const RECT& screenRect,
         width, height,
         SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
 
-    const int radius = ScalePx(10.0f, dpiScale_);
+    const int radius = ScalePx(
+        cornerRadius_, dpiScale_ * menuScale_);
     HRGN region = CreateRoundRectRgn(
         0, 0, width + 1, height + 1,
         radius * 2, radius * 2);
@@ -374,8 +384,28 @@ void WindowPreview::Paint()
     RECT client{};
     GetClientRect(hwnd_, &client);
 
-    HBRUSH background = CreateSolidBrush(RGB(29, 31, 35));
-    FillRect(dc, &client, background);
+    const float uiScale = dpiScale_ * menuScale_;
+    const int radius = (std::max)(
+        1, ScalePx(cornerRadius_, uiScale));
+    const int diameter = radius * 2;
+
+    // Match DockRenderer::DrawTooltip: pale blue-white body, cool gray-blue
+    // border and dark ink. The popup is a normal HWND so these are the same
+    // base colours without per-pixel alpha.
+    const COLORREF backgroundColor = RGB(245, 250, 255);
+    const COLORREF borderColor = RGB(184, 199, 214);
+    const COLORREF textColor = RGB(26, 36, 46);
+    const COLORREF mutedTextColor = RGB(112, 124, 136);
+    const COLORREF hoverColor = RGB(226, 235, 244);
+    const COLORREF activeColor = RGB(56, 173, 255);
+
+    HBRUSH background = CreateSolidBrush(backgroundColor);
+    HGDIOBJ oldBrush = SelectObject(dc, background);
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    RoundRect(dc, 0, 0, client.right, client.bottom,
+              diameter, diameter);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
     DeleteObject(background);
 
     if (!entries_.empty())
@@ -383,15 +413,13 @@ void WindowPreview::Paint()
         const int rowHeight =
             (client.bottom - client.top)
             / static_cast<int>(entries_.size());
-        const int thumbnailArea =
-            ScalePx(132.0f, dpiScale_);
-        const int textRightPad =
-            ScalePx(14.0f, dpiScale_);
-        const int activeRadius =
-            ScalePx(3.0f, dpiScale_);
+        const int thumbnailArea = ScalePx(
+            132.0f * thumbnailScale_, uiScale);
+        const int textRightPad = ScalePx(14.0f, uiScale);
+        const int activeRadius = ScalePx(3.0f, uiScale);
 
         HFONT font = CreateFontW(
-            -ScalePx(16.0f, dpiScale_),
+            -ScalePx(16.0f, uiScale),
             0, 0, 0, FW_NORMAL,
             FALSE, FALSE, FALSE,
             DEFAULT_CHARSET,
@@ -412,38 +440,47 @@ void WindowPreview::Paint()
             if (static_cast<int>(i) == hoveredRow_)
             {
                 RECT rowRect{
-                    ScalePx(4.0f, dpiScale_),
-                    top + ScalePx(3.0f, dpiScale_),
-                    client.right - ScalePx(4.0f, dpiScale_),
-                    bottom - ScalePx(3.0f, dpiScale_)};
-                HBRUSH hover = CreateSolidBrush(RGB(48, 51, 57));
-                FillRect(dc, &rowRect, hover);
+                    ScalePx(4.0f, uiScale),
+                    top + ScalePx(3.0f, uiScale),
+                    client.right - ScalePx(4.0f, uiScale),
+                    bottom - ScalePx(3.0f, uiScale)};
+
+                HBRUSH hover = CreateSolidBrush(hoverColor);
+                HGDIOBJ previousBrush = SelectObject(dc, hover);
+                HGDIOBJ previousPen =
+                    SelectObject(dc, GetStockObject(NULL_PEN));
+                const int hoverRadius = ScalePx(7.0f, uiScale);
+                RoundRect(dc,
+                          rowRect.left, rowRect.top,
+                          rowRect.right, rowRect.bottom,
+                          hoverRadius * 2, hoverRadius * 2);
+                SelectObject(dc, previousPen);
+                SelectObject(dc, previousBrush);
                 DeleteObject(hover);
             }
 
             if (entries_[i].active)
             {
-                const int cx = ScalePx(9.0f, dpiScale_);
+                const int cx = ScalePx(9.0f, uiScale);
                 const int cy = top + rowHeight / 2;
-                HBRUSH dot = CreateSolidBrush(RGB(66, 171, 255));
-                HGDIOBJ oldBrush = SelectObject(dc, dot);
-                HGDIOBJ oldPen = SelectObject(
-                    dc, GetStockObject(NULL_PEN));
+                HBRUSH dot = CreateSolidBrush(activeColor);
+                HGDIOBJ previousBrush = SelectObject(dc, dot);
+                HGDIOBJ previousPen =
+                    SelectObject(dc, GetStockObject(NULL_PEN));
                 Ellipse(dc,
                         cx - activeRadius,
                         cy - activeRadius,
                         cx + activeRadius + 1,
                         cy + activeRadius + 1);
-                SelectObject(dc, oldPen);
-                SelectObject(dc, oldBrush);
+                SelectObject(dc, previousPen);
+                SelectObject(dc, previousBrush);
                 DeleteObject(dot);
             }
 
             SetTextColor(
                 dc,
                 entries_[i].minimized
-                    ? RGB(165, 169, 176)
-                    : RGB(242, 244, 248));
+                    ? mutedTextColor : textColor);
 
             RECT textRect{
                 thumbnailArea,
@@ -470,9 +507,24 @@ void WindowPreview::Paint()
         }
     }
 
-    HBRUSH border = CreateSolidBrush(RGB(72, 76, 84));
-    FrameRect(dc, &client, border);
-    DeleteObject(border);
+    // Draw the outline inside the window region. FrameRect drew on the
+    // clipped outer edge, so its pixels disappeared exactly at the rounded
+    // corners. The inset RoundRect keeps a continuous stroke all the way
+    // around the curve.
+    const int strokeWidth = (std::max)(1, ScalePx(1.0f, dpiScale_));
+    const int inset = (std::max)(1, strokeWidth);
+    HPEN borderPen = CreatePen(PS_SOLID, strokeWidth, borderColor);
+    HGDIOBJ previousPen = SelectObject(dc, borderPen);
+    HGDIOBJ previousBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+    RoundRect(dc,
+              inset, inset,
+              client.right - inset,
+              client.bottom - inset,
+              (std::max)(2, diameter - inset * 2),
+              (std::max)(2, diameter - inset * 2));
+    SelectObject(dc, previousBrush);
+    SelectObject(dc, previousPen);
+    DeleteObject(borderPen);
 
     EndPaint(hwnd_, &paint);
 }
