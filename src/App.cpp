@@ -2143,25 +2143,37 @@ void App::Render()
 
 void App::PollProcesses()
 {
-    if (items_.empty())
-    {
-        return;
-    }
+    RefreshRunningApplications();
 
+    std::vector<DockItem*> pinned;
     std::vector<std::wstring> names;
+    pinned.reserve(items_.size());
     names.reserve(items_.size());
 
-    for (const auto& item : items_)
+    for (auto& item : items_)
     {
+        if (item->kind == DockItemKind::RunningTransient)
+        {
+            item->running = true;
+            continue;
+        }
+
+        if (item->kind != DockItemKind::Pinned)
+        {
+            item->running = false;
+            continue;
+        }
+
+        pinned.push_back(item.get());
         names.push_back(item->processName);
     }
 
     std::vector<bool> running;
     ProcessMonitor::Query(names, running);
 
-    for (size_t i = 0; i < items_.size() && i < running.size(); ++i)
+    for (size_t i = 0; i < pinned.size() && i < running.size(); ++i)
     {
-        DockItem& item = *items_[i];
+        DockItem& item = *pinned[i];
 
         if (running[i] && item.launching)
         {
@@ -2173,6 +2185,118 @@ void App::PollProcesses()
             item.running = running[i];
             needsRender_ = true;
         }
+    }
+}
+
+void App::RefreshRunningApplications()
+{
+    const std::vector<std::wstring> paths =
+        FindRunningTaskbarApplications();
+
+    std::vector<std::wstring> previousPaths;
+    std::vector<std::unique_ptr<DockItem>> persistent;
+    std::vector<std::unique_ptr<DockItem>> previousTransient;
+
+    persistent.reserve(items_.size());
+    previousTransient.reserve(items_.size());
+
+    for (auto& item : items_)
+    {
+        if (item->kind == DockItemKind::RunningTransient)
+        {
+            previousPaths.push_back(item->resolvedPath.empty()
+                ? item->targetPath : item->resolvedPath);
+            previousTransient.push_back(std::move(item));
+        }
+        else
+        {
+            persistent.push_back(std::move(item));
+        }
+    }
+
+    std::vector<std::unique_ptr<DockItem>> nextTransient;
+    nextTransient.reserve(paths.size());
+
+    for (const std::wstring& path : paths)
+    {
+        auto existing = std::find_if(
+            previousTransient.begin(), previousTransient.end(),
+            [&](const std::unique_ptr<DockItem>& item)
+            {
+                if (!item)
+                {
+                    return false;
+                }
+
+                const std::wstring& itemPath = item->resolvedPath.empty()
+                    ? item->targetPath : item->resolvedPath;
+                return EqualsIgnoreCase(itemPath, path);
+            });
+
+        if (existing != previousTransient.end())
+        {
+            (*existing)->running = true;
+            nextTransient.push_back(std::move(*existing));
+            continue;
+        }
+
+        AppInfo info = icons_.Inspect(path, 256);
+        auto item = std::make_unique<DockItem>();
+        item->kind = DockItemKind::RunningTransient;
+        item->id = L"__running_" + MakeStableId(path);
+        item->name = info.name.empty() ? GetFileStem(path) : info.name;
+        item->targetPath = path;
+        item->resolvedPath =
+            info.resolvedPath.empty() ? path : info.resolvedPath;
+        item->processName = info.processName.empty()
+            ? GetFileName(item->resolvedPath) : info.processName;
+        item->iconSource = info.icon;
+        item->running = true;
+
+        if (item->iconSource)
+        {
+            const bool circular =
+                icons_.IsCircularIcon(item->iconSource.Get());
+            item->plate.enabled = !circular;
+            item->plate.iconScale = circular ? 0.0f : 0.85f;
+        }
+
+        item->scale = 1.0f;
+        item->scaleSpring.Reset(1.0f);
+        item->bounceSpring.Reset(0.0f);
+        nextTransient.push_back(std::move(item));
+    }
+
+    const bool changed = previousPaths.size() != paths.size()
+        || !std::equal(
+            previousPaths.begin(), previousPaths.end(), paths.begin(),
+            paths.end(),
+            [](const std::wstring& a, const std::wstring& b)
+            {
+                return EqualsIgnoreCase(a, b);
+            });
+
+    items_.clear();
+    items_.reserve(persistent.size() + nextTransient.size());
+
+    for (auto& item : persistent)
+    {
+        items_.push_back(std::move(item));
+    }
+    for (auto& item : nextTransient)
+    {
+        items_.push_back(std::move(item));
+    }
+
+    RebuildItemPointers();
+
+    if (changed)
+    {
+        pressedIndex_ = -1;
+        draggingIndex_ = -1;
+        UpdateSurfaceAndGeometry();
+        RepositionWindow();
+        WakeAnimation();
     }
 }
 
@@ -3499,9 +3623,10 @@ std::vector<std::wstring> App::FindRunningTaskbarApplications() const
         const bool alreadyAdded = std::any_of(
             items_.begin(), items_.end(), [&path, &id](const auto& item)
             {
-                return item->id == id
-                    || EqualsIgnoreCase(item->targetPath, path)
-                    || EqualsIgnoreCase(item->resolvedPath, path);
+                return item->kind == DockItemKind::Pinned
+                    && (item->id == id
+                        || EqualsIgnoreCase(item->targetPath, path)
+                        || EqualsIgnoreCase(item->resolvedPath, path));
             });
         if (!alreadyAdded)
         {
