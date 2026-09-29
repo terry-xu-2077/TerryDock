@@ -2235,10 +2235,8 @@ void App::RefreshRunningApplications()
     const std::vector<std::wstring> paths =
         FindRunningTaskbarApplications();
 
-    std::vector<std::wstring> previousPaths;
     std::vector<std::unique_ptr<DockItem>> persistent;
     std::vector<std::unique_ptr<DockItem>> previousTransient;
-
     persistent.reserve(items_.size());
     previousTransient.reserve(items_.size());
 
@@ -2246,8 +2244,6 @@ void App::RefreshRunningApplications()
     {
         if (item->kind == DockItemKind::RunningTransient)
         {
-            previousPaths.push_back(item->resolvedPath.empty()
-                ? item->targetPath : item->resolvedPath);
             previousTransient.push_back(std::move(item));
         }
         else
@@ -2256,33 +2252,58 @@ void App::RefreshRunningApplications()
         }
     }
 
+    std::vector<bool> matched(paths.size(), false);
     std::vector<std::unique_ptr<DockItem>> nextTransient;
     nextTransient.reserve(paths.size());
 
-    for (const std::wstring& path : paths)
+    bool changed = previousTransient.size() != paths.size();
+
+    // Preserve the existing right-side order for apps that are still open.
+    // EnumWindows follows Z-order, which changes every time the user focuses
+    // another window; using that order directly would make the dock icons
+    // constantly shuffle. New apps are appended to the end instead.
+    for (auto& item : previousTransient)
     {
-        auto existing = std::find_if(
-            previousTransient.begin(), previousTransient.end(),
-            [&](const std::unique_ptr<DockItem>& item)
-            {
-                if (!item)
-                {
-                    return false;
-                }
-
-                const std::wstring& itemPath = item->resolvedPath.empty()
-                    ? item->targetPath : item->resolvedPath;
-                return EqualsIgnoreCase(itemPath, path);
-            });
-
-        if (existing != previousTransient.end())
+        if (!item)
         {
-            (*existing)->running = true;
-            nextTransient.push_back(std::move(*existing));
             continue;
         }
 
+        const std::wstring itemPath = item->resolvedPath.empty()
+            ? item->targetPath : item->resolvedPath;
+
+        size_t match = paths.size();
+        for (size_t i = 0; i < paths.size(); ++i)
+        {
+            if (!matched[i] && EqualsIgnoreCase(itemPath, paths[i]))
+            {
+                match = i;
+                break;
+            }
+        }
+
+        if (match < paths.size())
+        {
+            matched[match] = true;
+            item->running = true;
+            nextTransient.push_back(std::move(item));
+        }
+        else
+        {
+            changed = true;
+        }
+    }
+
+    for (size_t i = 0; i < paths.size(); ++i)
+    {
+        if (matched[i])
+        {
+            continue;
+        }
+
+        const std::wstring& path = paths[i];
         AppInfo info = icons_.Inspect(path, 256);
+
         auto item = std::make_unique<DockItem>();
         item->kind = DockItemKind::RunningTransient;
         item->id = L"__running_" + MakeStableId(path);
@@ -2307,16 +2328,8 @@ void App::RefreshRunningApplications()
         item->scaleSpring.Reset(1.0f);
         item->bounceSpring.Reset(0.0f);
         nextTransient.push_back(std::move(item));
+        changed = true;
     }
-
-    const bool changed = previousPaths.size() != paths.size()
-        || !std::equal(
-            previousPaths.begin(), previousPaths.end(), paths.begin(),
-            paths.end(),
-            [](const std::wstring& a, const std::wstring& b)
-            {
-                return EqualsIgnoreCase(a, b);
-            });
 
     items_.clear();
     items_.reserve(persistent.size() + nextTransient.size());
