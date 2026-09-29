@@ -552,9 +552,15 @@ void WindowPreview::InvalidateHoverTransition(int oldRow, int newRow)
     const int titleHeight = ScalePx(20.0f, uiScale);
     const int titleGap = ScalePx(3.0f, uiScale);
     const int previewHeight = ScalePx(77.0f, uiScale);
+    const int frameBottomPad = ScalePx(5.0f, uiScale);
+    const int appNameHeight = ScalePx(22.0f, uiScale);
+    const int appBottomPad = ScalePx(5.0f, uiScale);
     const int previewTop = topPad + titleHeight + titleGap;
     const int previewBottom = (std::min)(
         height, previewTop + previewHeight);
+    const int frameBottom = (std::min)(
+        height - appNameHeight - appBottomPad,
+        previewBottom + frameBottomPad);
 
     auto invalidateRow = [&](int row)
     {
@@ -563,12 +569,16 @@ void WindowPreview::InvalidateHoverTransition(int oldRow, int newRow)
             return;
         }
 
+        // Hover now outlines the entire card, including its title. Repaint
+        // the full card bounds instead of only the thumbnail area; otherwise
+        // the top edge keeps the previous hover state until a full repaint.
+        const int repaintPad = ScalePx(4.0f, uiScale);
         RECT area{
             row * itemWidth,
-            (std::max)(0, previewTop - ScalePx(5.0f, uiScale)),
+            (std::max)(0, topPad - repaintPad),
             row + 1 == static_cast<int>(entries_.size())
                 ? width : (row + 1) * itemWidth,
-            (std::min)(height, previewBottom + ScalePx(5.0f, uiScale))};
+            (std::min)(height, frameBottom + repaintPad)};
 
         InvalidateRect(hwnd_, &area, FALSE);
     };
