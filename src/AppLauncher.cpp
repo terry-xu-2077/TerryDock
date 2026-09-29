@@ -18,6 +18,109 @@ struct WindowSearch
     HWND minimized = nullptr;
 };
 
+struct ActivationRequest
+{
+    HWND target = nullptr;
+};
+
+DWORD WINAPI ActivateWindowWorker(void* parameter)
+{
+    std::unique_ptr<ActivationRequest> request(
+        static_cast<ActivationRequest*>(parameter));
+    if (!request || !request->target || !IsWindow(request->target))
+    {
+        return 0;
+    }
+
+    const HWND target = request->target;
+
+    // Queue visibility changes first. These calls never wait on the target
+    // UI thread, so even a busy/hung application cannot stall LightDock.
+    if (IsIconic(target))
+    {
+        ShowWindowAsync(target, SW_RESTORE);
+    }
+    else if (IsZoomed(target))
+    {
+        ShowWindowAsync(target, SW_SHOWMAXIMIZED);
+    }
+    else
+    {
+        ShowWindowAsync(target, SW_SHOW);
+    }
+
+    const HWND foreground = GetForegroundWindow();
+    const DWORD currentThread = GetCurrentThreadId();
+    const DWORD targetThread = GetWindowThreadProcessId(target, nullptr);
+    const DWORD foregroundThread = foreground
+        ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+
+    const bool attachForeground =
+        foregroundThread != 0
+        && foregroundThread != currentThread
+        && AttachThreadInput(
+            currentThread, foregroundThread, TRUE) != FALSE;
+
+    const bool attachTarget =
+        targetThread != 0
+        && targetThread != currentThread
+        && targetThread != foregroundThread
+        && AttachThreadInput(
+            currentThread, targetThread, TRUE) != FALSE;
+
+    // This is the exact HWND represented by the clicked preview card.
+    // Perform the stronger foreground sequence off LightDock's UI thread so
+    // multi-window apps reliably switch to the requested window without
+    // making the Dock depend on that application's responsiveness.
+    BringWindowToTop(target);
+    SetWindowPos(
+        target, HWND_TOP,
+        0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+            | SWP_ASYNCWINDOWPOS);
+    SetForegroundWindow(target);
+    SetActiveWindow(target);
+
+    if (attachTarget)
+    {
+        AttachThreadInput(currentThread, targetThread, FALSE);
+    }
+    if (attachForeground)
+    {
+        AttachThreadInput(currentThread, foregroundThread, FALSE);
+    }
+
+    if (GetForegroundWindow() != target)
+    {
+        using SwitchToThisWindowFn = void (WINAPI*)(HWND, BOOL);
+        static SwitchToThisWindowFn switchToThisWindow = []()
+            -> SwitchToThisWindowFn
+        {
+            HMODULE user32 = GetModuleHandleW(L"user32.dll");
+            return user32
+                ? reinterpret_cast<SwitchToThisWindowFn>(
+                    GetProcAddress(user32, "SwitchToThisWindow"))
+                : nullptr;
+        }();
+
+        if (switchToThisWindow)
+        {
+            switchToThisWindow(target, TRUE);
+        }
+        else
+        {
+            FLASHWINFO flash{};
+            flash.cbSize = sizeof(flash);
+            flash.hwnd = target;
+            flash.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
+            flash.uCount = 2;
+            FlashWindowEx(&flash);
+        }
+    }
+
+    return 0;
+}
+
 BOOL CALLBACK FindApplicationWindow(HWND hwnd, LPARAM parameter)
 {
     auto* search = reinterpret_cast<WindowSearch*>(parameter);
@@ -101,39 +204,36 @@ bool AppLauncher::ActivateWindow(HWND target)
         return false;
     }
 
-    // Never synchronously manipulate another application's input queue here.
-    // A hung/busy target must not be able to stall LightDock's render loop.
-    // ShowWindowAsync and SWP_ASYNCWINDOWPOS queue the work to the target
-    // thread instead of waiting for it to process window messages.
-    if (IsIconic(target))
+    auto* request = new (std::nothrow) ActivationRequest{};
+    if (!request)
     {
-        ShowWindowAsync(target, SW_RESTORE);
+        return false;
     }
-    else if (IsZoomed(target))
-    {
-        ShowWindowAsync(target, SW_SHOWMAXIMIZED);
-    }
-    else
-    {
-        ShowWindowAsync(target, SW_SHOWNOACTIVATE);
-    }
+    request->target = target;
 
-    SetWindowPos(
-        target,
-        HWND_TOP,
-        0, 0, 0, 0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
-            | SWP_ASYNCWINDOWPOS);
-
-    const BOOL foreground = SetForegroundWindow(target);
-    if (!foreground)
+    // Use a system worker thread for exact-window activation. The old
+    // fully-async foreground sequence returned immediately but was too weak
+    // for minimized/multi-window applications; doing the robust sequence on
+    // the Dock UI thread fixed activation but let a busy application freeze
+    // the Dock. This keeps both properties.
+    if (!QueueUserWorkItem(
+            ActivateWindowWorker,
+            request,
+            WT_EXECUTELONGFUNCTION))
     {
-        FLASHWINFO flash{};
-        flash.cbSize = sizeof(flash);
-        flash.hwnd = target;
-        flash.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
-        flash.uCount = 2;
-        FlashWindowEx(&flash);
+        delete request;
+
+        // Last-resort non-blocking fallback.
+        if (IsIconic(target))
+        {
+            ShowWindowAsync(target, SW_RESTORE);
+        }
+        else
+        {
+            ShowWindowAsync(target, SW_SHOW);
+        }
+        SetForegroundWindow(target);
+        return true;
     }
 
     return true;
