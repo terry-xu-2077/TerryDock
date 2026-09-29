@@ -247,6 +247,193 @@ D2D1_COLOR_F DerivedPlateBottom(const D2D1_COLOR_F& top)
         top.r * 0.92f, top.g * 0.92f, top.b * 0.92f, 1.0f);
 }
 
+enum class SystemDockGlyph
+{
+    Start,
+    Search,
+};
+
+ComPtr<IWICBitmap> CreateSystemDockGlyph(IWICImagingFactory* wic,
+                                         SystemDockGlyph glyph)
+{
+    if (!wic)
+    {
+        return {};
+    }
+
+    constexpr UINT kSize = 256;
+    ComPtr<IWICBitmap> bitmap;
+    if (FAILED(wic->CreateBitmap(
+            kSize, kSize, GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapCacheOnLoad, bitmap.AddressOf())))
+    {
+        return {};
+    }
+
+    WICRect area{0, 0, static_cast<INT>(kSize), static_cast<INT>(kSize)};
+    ComPtr<IWICBitmapLock> lock;
+    if (FAILED(bitmap->Lock(&area, WICBitmapLockWrite, lock.AddressOf())))
+    {
+        return {};
+    }
+
+    UINT stride = 0;
+    UINT byteCount = 0;
+    BYTE* pixels = nullptr;
+    if (FAILED(lock->GetStride(&stride))
+        || FAILED(lock->GetDataPointer(&byteCount, &pixels))
+        || !pixels)
+    {
+        return {};
+    }
+
+    std::memset(pixels, 0, byteCount);
+
+    auto writePixel = [&](int x, int y, BYTE r, BYTE g, BYTE b, float coverage)
+    {
+        if (x < 0 || x >= static_cast<int>(kSize)
+            || y < 0 || y >= static_cast<int>(kSize))
+        {
+            return;
+        }
+
+        coverage = ClampF(coverage, 0.0f, 1.0f);
+        BYTE* pixel = pixels + static_cast<size_t>(y) * stride
+            + static_cast<size_t>(x) * 4;
+        const BYTE alpha = static_cast<BYTE>(
+            std::lround(coverage * 255.0f));
+
+        if (alpha <= pixel[3])
+        {
+            return;
+        }
+
+        pixel[3] = alpha;
+        pixel[2] = static_cast<BYTE>(
+            (static_cast<unsigned int>(r) * alpha + 127) / 255);
+        pixel[1] = static_cast<BYTE>(
+            (static_cast<unsigned int>(g) * alpha + 127) / 255);
+        pixel[0] = static_cast<BYTE>(
+            (static_cast<unsigned int>(b) * alpha + 127) / 255);
+    };
+
+    if (glyph == SystemDockGlyph::Start)
+    {
+        // Four clean Windows panes, deliberately drawn rather than taken from
+        // a system executable so Windows 10/11 icon resource changes cannot
+        // break the Dock button.
+        constexpr BYTE r = 0;
+        constexpr BYTE g = 164;
+        constexpr BYTE b = 239;
+        const int left = 48;
+        const int top = 48;
+        const int pane = 74;
+        const int gap = 10;
+
+        for (int py = 0; py < 2; ++py)
+        {
+            for (int px = 0; px < 2; ++px)
+            {
+                const int x0 = left + px * (pane + gap);
+                const int y0 = top + py * (pane + gap);
+
+                for (int y = y0; y < y0 + pane; ++y)
+                {
+                    for (int x = x0; x < x0 + pane; ++x)
+                    {
+                        writePixel(x, y, r, g, b, 1.0f);
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        // Anti-aliased magnifier built from a circular ring and a rounded
+        // diagonal handle.
+        constexpr BYTE r = 224;
+        constexpr BYTE g = 226;
+        constexpr BYTE b = 230;
+        constexpr float cx = 108.0f;
+        constexpr float cy = 108.0f;
+        constexpr float radius = 58.0f;
+        constexpr float thickness = 18.0f;
+        constexpr float hx0 = 149.0f;
+        constexpr float hy0 = 149.0f;
+        constexpr float hx1 = 207.0f;
+        constexpr float hy1 = 207.0f;
+        constexpr float handleRadius = 9.0f;
+
+        const float vx = hx1 - hx0;
+        const float vy = hy1 - hy0;
+        const float vv = vx * vx + vy * vy;
+
+        for (int y = 28; y < 228; ++y)
+        {
+            for (int x = 28; x < 228; ++x)
+            {
+                const float fx = static_cast<float>(x) + 0.5f;
+                const float fy = static_cast<float>(y) + 0.5f;
+
+                const float dx = fx - cx;
+                const float dy = fy - cy;
+                const float radial = std::sqrt(dx * dx + dy * dy);
+                const float ringDistance =
+                    std::fabs(radial - radius) - thickness * 0.5f;
+                const float ringCoverage =
+                    ClampF(1.0f - ringDistance, 0.0f, 1.0f);
+
+                const float wx = fx - hx0;
+                const float wy = fy - hy0;
+                const float t = ClampF((wx * vx + wy * vy) / vv,
+                                       0.0f, 1.0f);
+                const float qx = hx0 + vx * t;
+                const float qy = hy0 + vy * t;
+                const float lx = fx - qx;
+                const float ly = fy - qy;
+                const float lineDistance =
+                    std::sqrt(lx * lx + ly * ly) - handleRadius;
+                const float lineCoverage =
+                    ClampF(1.0f - lineDistance, 0.0f, 1.0f);
+
+                writePixel(x, y, r, g, b,
+                           (std::max)(ringCoverage, lineCoverage));
+            }
+        }
+    }
+
+    return bitmap;
+}
+
+void SendShellShortcut(bool search)
+{
+    INPUT inputs[4]{};
+    UINT count = 0;
+
+    inputs[count].type = INPUT_KEYBOARD;
+    inputs[count].ki.wVk = VK_LWIN;
+    ++count;
+
+    if (search)
+    {
+        inputs[count].type = INPUT_KEYBOARD;
+        inputs[count].ki.wVk = L'S';
+        ++count;
+
+        inputs[count].type = INPUT_KEYBOARD;
+        inputs[count].ki.wVk = L'S';
+        inputs[count].ki.dwFlags = KEYEVENTF_KEYUP;
+        ++count;
+    }
+
+    inputs[count].type = INPUT_KEYBOARD;
+    inputs[count].ki.wVk = VK_LWIN;
+    inputs[count].ki.dwFlags = KEYEVENTF_KEYUP;
+    ++count;
+
+    SendInput(count, inputs, sizeof(INPUT));
+}
+
 /// DPI of the monitor a dialog lives on (falls back to the system DPI).
 int DialogDpi(HWND hwnd)
 {
