@@ -1678,8 +1678,7 @@ void App::UpdateDockWindowPosition()
     // the auto-hidden Windows taskbar too; treating that as permanent inset
     // made LightDock pop up floating above the taskbar instead of from the
     // physical screen edge.
-    const bool shellUiOpen =
-        shellPopupPlacementPending_ || IsWindowsShellUiForeground();
+    const bool shellUiOpen = shellPopupPlacementPending_;
     const int visibleTaskbarInset =
         config_.settings.autoHide && shellUiOpen
         ? VisibleTaskbarInset(monitorRect, config_.settings.dockEdge)
@@ -2359,8 +2358,7 @@ void App::Tick(double dt)
         : nullptr;
 
     const bool canExpandWindows =
-        hoveredItem && hoveredItem->running
-        && !hoveredItem->windows.empty();
+        hoveredItem && hoveredItem->running;
 
     if (draggingIndex_ >= 0 || !dockReadyForTooltip)
     {
@@ -2430,7 +2428,7 @@ void App::Tick(double dt)
                 return item->id == windowMenuItemId_;
             });
 
-        if (menuItem == items_.end() || (*menuItem)->windows.empty())
+        if (menuItem == items_.end() || !(*menuItem)->running)
         {
             windowMenuVisible_ = false;
             windowMenuHoveredRow_ = -1;
@@ -2837,7 +2835,7 @@ void App::Render()
                 return item->id == windowMenuItemId_;
             });
 
-        if (menuItem != items_.end() && !(*menuItem)->windows.empty())
+        if (menuItem != items_.end() && (*menuItem)->running)
         {
             const DockItem& item = **menuItem;
 
@@ -2866,8 +2864,10 @@ void App::Render()
                 static_cast<size_t>(
                     std::floor(availableWidth / itemWidth)));
             constexpr size_t kMaxVisibleWindowItems = 8;
+            const size_t previewCount = (std::max)(
+                static_cast<size_t>(1), item.windows.size());
             const size_t rowCount = (std::min)(
-                item.windows.size(),
+                previewCount,
                 (std::min)(kMaxVisibleWindowItems, maxVisibleByWidth));
             const float menuWidth =
                 itemWidth * static_cast<float>(rowCount);
@@ -2967,15 +2967,29 @@ void App::Render()
 
             for (size_t i = 0; i < rowCount; ++i)
             {
-                const DockWindowEntry& window = item.windows[i];
                 WindowPreview::Entry entry;
-                entry.hwnd = window.hwnd;
-                entry.title = window.title.empty()
-                    ? item.name
-                    : WindowTitleWithoutApplicationName(
-                        window.title, item.name, item.processName);
-                entry.active = window.active;
-                entry.minimized = window.minimized;
+                if (i < item.windows.size())
+                {
+                    const DockWindowEntry& window = item.windows[i];
+                    entry.hwnd = window.hwnd;
+                    entry.title = window.title.empty()
+                        ? item.name
+                        : WindowTitleWithoutApplicationName(
+                            window.title, item.name, item.processName);
+                    entry.active = window.active;
+                    entry.minimized = window.minimized;
+                }
+                else
+                {
+                    // A running-dot item must still own the preview bubble.
+                    // Some launchers/background-hosted apps expose their HWND
+                    // late (or through a shell host); keep a stable card until
+                    // the next process poll resolves the real window.
+                    entry.hwnd = nullptr;
+                    entry.title = item.name;
+                    entry.active = false;
+                    entry.minimized = false;
+                }
                 previewEntries.push_back(std::move(entry));
             }
 
@@ -3422,7 +3436,7 @@ void App::CheckPointer()
     const bool inside = HitTest(physicalX, physicalY);
 
     if (config_.settings.autoHide
-        && (shellPopupPlacementPending_ || IsWindowsShellUiForeground())
+        && shellPopupPlacementPending_
         && monitorIndex_ >= 0
         && monitorIndex_ < static_cast<int>(monitors_.size()))
     {
