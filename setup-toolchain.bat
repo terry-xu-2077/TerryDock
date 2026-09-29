@@ -13,6 +13,12 @@ set "URL=https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0
 set "EXPECTED_SHA256=C1F52294597C0B73786B2A78EB5D176D89226D2F21875EAB75E783A8B1CEFCC4"
 
 if exist "%CMAKE%" if exist "%GXX%" (
+    rem LightDock embeds its own app manifest. Disable MinGW-w64's automatic
+    rem default manifest so windres/ld do not merge two non-default manifests.
+    for /r "%MINGW_ROOT%\mingw64" %%F in (default-manifest.o) do (
+        if exist "%%~fF" ren "%%~fF" default-manifest.o.disabled >nul 2>nul
+    )
+
     echo [OK] Toolchain is already installed.
     "%CMAKE%" --version | findstr /b /c:"cmake version"
     "%GXX%" --version | findstr /b /c:"g++.exe"
@@ -47,6 +53,11 @@ if errorlevel 1 goto :extract_failed
 del /q "%ARCHIVE%"
 if not exist "%CMAKE%" goto :install_failed
 if not exist "%GXX%" goto :install_failed
+
+rem Disable MinGW-w64's default manifest because LightDock embeds src/app.manifest.
+for /r "%MINGW_ROOT%\mingw64" %%F in (default-manifest.o) do (
+    if exist "%%~fF" ren "%%~fF" default-manifest.o.disabled >nul 2>nul
+)
 
 echo.
 echo [OK] Toolchain installed in:
