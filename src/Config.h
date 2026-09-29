@@ -125,6 +125,12 @@ struct DockSettings
     /// 400 ms matches the familiar Windows taskbar hover cadence.
     int windowMenuHoverDelayMs = 400;
 
+    /// Multi-window preview menu geometry. Its palette deliberately follows
+    /// the name bubble so the Dock has one visual language.
+    float windowMenuScale = 1.0f;
+    float windowMenuCornerRadius = 10.0f;
+    float windowMenuThumbnailScale = 1.0f;
+
     IconBackdrop backdrop;
 
     PanelMode panelMode = PanelMode::Fixed;
