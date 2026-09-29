@@ -791,8 +791,12 @@ void WindowPreview::Paint()
             DEFAULT_PITCH | FF_DONTCARE,
             L"Segoe UI");
 
+        // The application label at the bottom of the preview bubble should
+        // read at the same visual weight as the normal tooltip bubble. It was
+        // still perceptually smaller after inheriting the preview menu scale,
+        // so give just this label another 10% size.
         HFONT appFont = CreateFontW(
-            -ScalePx(14.0f, uiScale),
+            -ScalePx(15.4f, uiScale),
             0, 0, 0, FW_NORMAL,
             FALSE, FALSE, FALSE,
             DEFAULT_CHARSET,
