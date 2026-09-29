@@ -3363,21 +3363,16 @@ void App::Render()
             const bool verticalDock = config_.settings.dockEdge == DockEdge::Left
                 || config_.settings.dockEdge == DockEdge::Right;
             const bool topDock = config_.settings.dockEdge == DockEdge::Top;
-            // Static/no-animation mode keeps icon scale at 1.0 by design,
-            // but the tooltip should retain the same visual size it has when
-            // hovering a magnified icon in the animated modes.
-            const float tooltipVisualScale =
-                config_.settings.panelMode == PanelMode::Static
-                ? metrics_.magnification : item.scale;
-
-            // Ordinary name bubbles should be clearly readable even when
-            // the dock itself is in Static/no-animation mode. The old 0.8
-            // baseline was originally introduced for the preview bubble and
-            // made normal tooltips visibly undersized. Keep preview sizing
-            // unchanged, but render the ordinary name bubble at the full
-            // configured scale (25% larger than the old 0.8 baseline).
+            // Tooltip size must not inherit the icon's animated scale.
+            // Previously this used item.scale, so Static mode rendered at
+            // 1.0x while a magnified hover could jump to ~1.6x. That made the
+            // same tooltip look tiny in one mode and oversized in another.
+            // Give name bubbles one stable visual baseline and let only the
+            // user's Tooltip Scale setting change it.
+            constexpr float kNameBubbleVisualBaseline = 1.25f;
             const float nameBubbleScale =
-                tooltipVisualScale * config_.settings.tooltipScale;
+                kNameBubbleVisualBaseline
+                * config_.settings.tooltipScale;
 
             renderer_.DrawTooltip(
                 item.name,
