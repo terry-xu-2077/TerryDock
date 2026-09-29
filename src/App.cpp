@@ -1569,11 +1569,37 @@ void App::UpdateDockWindowPosition()
         monitorRect = monitors_[static_cast<size_t>(monitorIndex_)].rect;
     }
 
-    // Overlay/auto-hide mode must hug the real monitor edge. rcWork can still
-    // contain a 40-50 px reservation from the Windows taskbar even when that
-    // taskbar is visually hidden, which made LightDock float above the edge.
-    const RECT& anchorRect =
+    // Overlay/auto-hide mode normally hugs the physical monitor edge. If
+    // Explorer temporarily reveals its own taskbar (notably when Start/Search
+    // opens), move LightDock just inside that visible taskbar instead of
+    // letting two shell surfaces fight for the same topmost screen strip.
+    RECT anchorRect =
         config_.settings.autoHide ? monitorRect : work;
+
+    const int visibleTaskbarInset = config_.settings.autoHide
+        ? VisibleTaskbarInset(monitorRect, config_.settings.dockEdge)
+        : 0;
+    lastVisibleTaskbarInset_ = visibleTaskbarInset;
+
+    if (visibleTaskbarInset > 0)
+    {
+        switch (config_.settings.dockEdge)
+        {
+        case DockEdge::Top:
+            anchorRect.top += visibleTaskbarInset;
+            break;
+        case DockEdge::Left:
+            anchorRect.left += visibleTaskbarInset;
+            break;
+        case DockEdge::Right:
+            anchorRect.right -= visibleTaskbarInset;
+            break;
+        case DockEdge::Bottom:
+        default:
+            anchorRect.bottom -= visibleTaskbarInset;
+            break;
+        }
+    }
 
     const int gap = static_cast<int>(std::round(kBottomGap * dockScale_));
     int x = anchorRect.left
@@ -3200,6 +3226,20 @@ void App::CheckPointer()
     const float y = logical.y;
 
     const bool inside = HitTest(physicalX, physicalY);
+
+    if (config_.settings.autoHide
+        && monitorIndex_ >= 0
+        && monitorIndex_ < static_cast<int>(monitors_.size()))
+    {
+        const int taskbarInset = VisibleTaskbarInset(
+            monitors_[static_cast<size_t>(monitorIndex_)].rect,
+            config_.settings.dockEdge);
+
+        if (taskbarInset != lastVisibleTaskbarInset_)
+        {
+            UpdateDockWindowPosition();
+        }
+    }
 
     if (!fullscreenActive_)
     {
