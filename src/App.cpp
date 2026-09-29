@@ -2832,26 +2832,21 @@ void App::Render()
         {
             const DockItem& item = **menuItem;
 
-            // One horizontal strip of preview cards. The thumbnail owns most
-            // of each card; the title is a subordinate single line below it.
-            const float menuScale = ClampF(
-                config_.settings.windowMenuScale, 0.75f, 1.25f);
-            const float thumbnailScale = ClampF(
-                config_.settings.windowMenuThumbnailScale, 0.6f, 1.4f);
-            // New compact baseline: previews are 50% of the previous
-            // footprint. The user-facing thumbnail scale remains relative to
-            // this baseline, so existing 100% configs become compact too.
-            const float itemWidth =
-                100.0f * dpiScale_ * menuScale * thumbnailScale;
-            const float thumbnailHeight =
-                56.0f * dpiScale_ * menuScale * thumbnailScale;
-            const float titleHeight =
-                30.0f * dpiScale_ * menuScale;
-            const float verticalPadding =
-                16.0f * dpiScale_ * menuScale;
-            const float menuHeight =
-                thumbnailHeight + titleHeight + verticalPadding;
-            const float gap = 6.0f * dpiScale_ * menuScale;
+            // The preview menu is the running-app version of the name
+            // bubble. It inherits the bubble's scale, corner radius, opacity
+            // and triangular tail instead of maintaining a separate style.
+            const float bubbleScale = ClampF(
+                config_.settings.tooltipScale * kTooltipScaleBaseline,
+                0.5f, 2.0f);
+            const float uiScale = dpiScale_ * bubbleScale;
+
+            // Compact horizontal cards. Each card frames the window title
+            // above the live thumbnail; the application name is drawn once
+            // beneath the whole strip inside the bubble body.
+            const float itemWidth = 125.0f * uiScale;
+            const float menuHeight = 132.0f * uiScale;
+            const float tailLength = 8.0f * uiScale;
+            const float tipGap = 7.0f * uiScale;
             const float margin = 8.0f * dpiScale_;
 
             const float availableWidth = (std::max)(
@@ -2878,6 +2873,7 @@ void App::Render()
                 dockTransform_.ToPhysical(logicalIcon);
 
             D2D1_RECT_F menu{};
+            D2D1_POINT_2F tailTip{};
             const float iconCenterX =
                 (iconRect.left + iconRect.right) * 0.5f;
             const float iconCenterY =
@@ -2886,27 +2882,38 @@ void App::Render()
             switch (config_.settings.dockEdge)
             {
             case DockEdge::Top:
+                tailTip = D2D1::Point2F(
+                    iconCenterX, iconRect.bottom + tipGap);
                 menu.left = iconCenterX - menuWidth * 0.5f;
-                menu.top = iconRect.bottom + gap;
+                menu.top = tailTip.y + tailLength;
                 menu.right = menu.left + menuWidth;
                 menu.bottom = menu.top + menuHeight;
                 break;
+
             case DockEdge::Left:
-                menu.left = iconRect.right + gap;
+                tailTip = D2D1::Point2F(
+                    iconRect.right + tipGap, iconCenterY);
+                menu.left = tailTip.x + tailLength;
                 menu.top = iconCenterY - menuHeight * 0.5f;
                 menu.right = menu.left + menuWidth;
                 menu.bottom = menu.top + menuHeight;
                 break;
+
             case DockEdge::Right:
-                menu.right = iconRect.left - gap;
+                tailTip = D2D1::Point2F(
+                    iconRect.left - tipGap, iconCenterY);
+                menu.right = tailTip.x - tailLength;
                 menu.left = menu.right - menuWidth;
                 menu.top = iconCenterY - menuHeight * 0.5f;
                 menu.bottom = menu.top + menuHeight;
                 break;
+
             case DockEdge::Bottom:
             default:
+                tailTip = D2D1::Point2F(
+                    iconCenterX, iconRect.top - tipGap);
                 menu.left = iconCenterX - menuWidth * 0.5f;
-                menu.bottom = iconRect.top - gap;
+                menu.bottom = tailTip.y - tailLength;
                 menu.right = menu.left + menuWidth;
                 menu.top = menu.bottom - menuHeight;
                 break;
@@ -2963,6 +2970,12 @@ void App::Render()
                 previewEntries.push_back(std::move(entry));
             }
 
+            // Tail stays in the layered Dock surface so it has exactly the
+            // same antialiasing and colour as an ordinary name bubble.
+            renderer_.DrawBubbleTail(
+                menu, tailTip, config_.settings.dockEdge,
+                uiScale, config_.settings.tooltipOpacity);
+
             const RECT dockBounds = window_.GetBounds();
             const RECT screenMenu{
                 dockBounds.left
@@ -2975,11 +2988,11 @@ void App::Render()
                     + static_cast<LONG>(std::lround(menu.bottom))};
 
             windowPreview_.Show(
-                screenMenu, previewEntries,
+                screenMenu, item.name, previewEntries,
                 windowMenuHoveredRow_, dpiScale_,
-                menuScale,
-                config_.settings.windowMenuCornerRadius,
-                config_.settings.windowMenuThumbnailScale);
+                bubbleScale,
+                config_.settings.tooltipCornerRadius,
+                config_.settings.tooltipOpacity);
         }
     }
 
