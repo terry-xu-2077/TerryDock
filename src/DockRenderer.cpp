@@ -1133,7 +1133,7 @@ void DockRenderer::DrawWindowMenu(
     if (FAILED(dwrite_->CreateTextFormat(
             L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            13.0f * dpiScale, L"", format.AddressOf())))
+            16.0f * dpiScale, L"", format.AddressOf())))
     {
         rt_->SetTransform(previous);
         return;
