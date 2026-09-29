@@ -34,6 +34,13 @@ public:
     /// Loads a cached icon from disk.
     ComPtr<IWICBitmap> LoadFromCache(const std::wstring& file);
 
+    /// Resolves the icon that Windows Shell uses for an AppsFolder/AUMID
+    /// application. This is the right source for packaged/UWP apps whose
+    /// visible taskbar window is hosted by ApplicationFrameHost.exe.
+    ComPtr<IWICBitmap> LoadShellApplicationIcon(
+        const std::wstring& appUserModelId,
+        unsigned int size);
+
     /// Stores an icon in the cache directory as PNG.
     bool SaveToCache(IWICBitmap* bitmap, const std::wstring& file);
 
