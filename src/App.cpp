@@ -805,9 +805,9 @@ void App::AddApplication(const std::wstring& path)
 
     for (const auto& item : items_)
     {
-        if (item->id == id)
+        if (item->kind == DockItemKind::Pinned && item->id == id)
         {
-            return; // already on the dock
+            return; // already pinned on the dock
         }
     }
 
@@ -835,6 +835,7 @@ void App::AddApplication(const std::wstring& path)
     }
 
     auto item = std::make_unique<DockItem>();
+    item->kind = DockItemKind::Pinned;
     item->id = id;
     item->name = info.name;
     item->targetPath = path;
@@ -884,7 +885,28 @@ void App::AddApplication(const std::wstring& path)
     item->scaleSpring.Reset(1.0f);
     item->bounceSpring.Reset(0.0f);
 
-    items_.push_back(std::move(item));
+    // If this app is currently represented by a temporary running icon,
+    // pinning it moves it into the persistent launcher section instead of
+    // leaving a duplicate on the right.
+    items_.erase(
+        std::remove_if(items_.begin(), items_.end(),
+            [&](const std::unique_ptr<DockItem>& existing)
+            {
+                return existing->kind == DockItemKind::RunningTransient
+                    && (EqualsIgnoreCase(existing->resolvedPath,
+                                         info.resolvedPath)
+                        || EqualsIgnoreCase(existing->targetPath,
+                                            info.resolvedPath));
+            }),
+        items_.end());
+
+    auto transientBegin = std::find_if(
+        items_.begin(), items_.end(),
+        [](const std::unique_ptr<DockItem>& existing)
+        {
+            return existing->kind == DockItemKind::RunningTransient;
+        });
+    items_.insert(transientBegin, std::move(item));
     RebuildItemPointers();
 
     SaveConfiguration();
@@ -895,7 +917,8 @@ void App::AddApplication(const std::wstring& path)
 
 void App::RemoveApplication(size_t index)
 {
-    if (index >= items_.size())
+    if (index >= items_.size()
+        || items_[index]->kind != DockItemKind::Pinned)
     {
         return;
     }
@@ -924,6 +947,28 @@ void App::LaunchApplication(size_t index)
     }
 
     DockItem& item = *items_[index];
+
+    if (item.kind == DockItemKind::StartButton)
+    {
+        SendShellShortcut(false);
+        return;
+    }
+
+    if (item.kind == DockItemKind::SearchButton)
+    {
+        SendShellShortcut(true);
+        return;
+    }
+
+    if (item.kind == DockItemKind::RunningTransient)
+    {
+        if (!AppLauncher::ActivateRunningWindow(item.processName))
+        {
+            AppLauncher::Open(item.resolvedPath.empty()
+                ? item.targetPath : item.resolvedPath);
+        }
+        return;
+    }
 
     if (item.running
         && AppLauncher::ActivateRunningWindow(item.processName))
