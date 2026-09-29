@@ -18,8 +18,16 @@ enum class DockItemKind
     StartButton,
     SearchButton,
 
-    /// Temporary icon for an unpinned app that currently owns a taskbar window.
+    /// Temporary icon for an unpinned app that currently owns taskbar windows.
     RunningTransient,
+};
+
+struct DockWindowEntry
+{
+    HWND hwnd = nullptr;
+    std::wstring title;
+    bool minimized = false;
+    bool active = false;
 };
 
 /// A single entry in the dock.
@@ -51,8 +59,12 @@ struct DockItem
     /// Null for pinned launchers and built-in Start/Search buttons.
     HWND windowHandle = nullptr;
 
-    /// Current window title used by transient items for an unambiguous tooltip.
+    /// Current window title used by legacy/single-window transient state.
     std::wstring windowTitle;
+
+    /// Top-level windows currently owned by this application. Dock rendering
+    /// stays one-icon-per-application; this list powers the hover window menu.
+    std::vector<DockWindowEntry> windows;
 
     /// Icon cache file (relative to the icon cache directory).
     std::wstring iconFile;
