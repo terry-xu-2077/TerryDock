@@ -2834,10 +2834,13 @@ void App::Render()
                 config_.settings.windowMenuScale, 0.75f, 1.25f);
             const float thumbnailScale = ClampF(
                 config_.settings.windowMenuThumbnailScale, 0.6f, 1.4f);
+            // New compact baseline: previews are 50% of the previous
+            // footprint. The user-facing thumbnail scale remains relative to
+            // this baseline, so existing 100% configs become compact too.
             const float itemWidth =
-                200.0f * dpiScale_ * menuScale * thumbnailScale;
+                100.0f * dpiScale_ * menuScale * thumbnailScale;
             const float thumbnailHeight =
-                112.0f * dpiScale_ * menuScale * thumbnailScale;
+                56.0f * dpiScale_ * menuScale * thumbnailScale;
             const float titleHeight =
                 30.0f * dpiScale_ * menuScale;
             const float verticalPadding =
