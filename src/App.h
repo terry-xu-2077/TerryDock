@@ -59,6 +59,7 @@ private:
         kMenuLanguageEnglish = 8,
         kMenuAbout = 9,
         kMenuOpenFolder = 10,
+        kMenuPinRunning = 11,
         kMenuAddRunningBase = 1000,
 
         /// Monitor entries start here; kMenuMonitorBase + index.
@@ -89,6 +90,7 @@ private:
     void FinishExternalDrag(bool commit, float x, float y);
     void RemoveApplication(size_t index);
     void LaunchApplication(size_t index);
+    void RefreshRunningApplications();
     void SaveConfiguration() const;
 
     // --- geometry ----------------------------------------------------------
