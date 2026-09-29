@@ -1129,6 +1129,126 @@ void App::LaunchApplication(size_t index)
     WakeAnimation();
 }
 
+void App::BeginShellPopupPlacement(bool search,
+                                   float physicalX,
+                                   float physicalY)
+{
+    if (!window_.Handle())
+    {
+        return;
+    }
+
+    const RECT dockBounds = window_.GetBounds();
+    shellPopupAnchorScreen_.x = dockBounds.left
+        + static_cast<LONG>(std::lround(physicalX));
+    shellPopupAnchorScreen_.y = dockBounds.top
+        + static_cast<LONG>(std::lround(physicalY));
+
+    shellPopupSearch_ = search;
+    shellPopupPlacementPending_ = true;
+    shellPopupPlacementStarted_ = std::chrono::steady_clock::now();
+
+    SendShellShortcut(search);
+}
+
+void App::UpdateShellPopupPlacement()
+{
+    if (!shellPopupPlacementPending_)
+    {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - shellPopupPlacementStarted_);
+
+    // This is deliberately a short-lived compatibility shim. Start/Search
+    // are shell-owned windows, so retry briefly while their opening animation
+    // is still free to overwrite our first SetWindowPos.
+    if (elapsed > std::chrono::milliseconds(900))
+    {
+        shellPopupPlacementPending_ = false;
+        return;
+    }
+
+    const HMONITOR monitor = MonitorFromPoint(
+        shellPopupAnchorScreen_, MONITOR_DEFAULTTONEAREST);
+
+    ShellPopupWindowSearch search;
+    search.search = shellPopupSearch_;
+    search.monitor = monitor;
+    search.foreground = GetForegroundWindow();
+    EnumWindows(FindShellPopupWindow,
+                reinterpret_cast<LPARAM>(&search));
+
+    if (!search.best)
+    {
+        return;
+    }
+
+    RECT popupRect{};
+    if (!GetWindowRect(search.best, &popupRect))
+    {
+        return;
+    }
+
+    const LONG popupWidth = popupRect.right - popupRect.left;
+    const LONG popupHeight = popupRect.bottom - popupRect.top;
+    if (popupWidth <= 0 || popupHeight <= 0)
+    {
+        return;
+    }
+
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo))
+    {
+        return;
+    }
+
+    const RECT& screen = monitorInfo.rcMonitor;
+    const LONG gap = (std::max)(
+        4L, static_cast<LONG>(std::lround(8.0f * dpiScale_)));
+
+    LONG x = popupRect.left;
+    LONG y = popupRect.top;
+
+    switch (config_.settings.dockEdge)
+    {
+    case DockEdge::Top:
+        x = shellPopupAnchorScreen_.x - popupWidth / 2;
+        y = shellPopupAnchorScreen_.y + gap;
+        break;
+
+    case DockEdge::Left:
+        x = shellPopupAnchorScreen_.x + gap;
+        y = shellPopupAnchorScreen_.y - popupHeight / 2;
+        break;
+
+    case DockEdge::Right:
+        x = shellPopupAnchorScreen_.x - popupWidth - gap;
+        y = shellPopupAnchorScreen_.y - popupHeight / 2;
+        break;
+
+    case DockEdge::Bottom:
+    default:
+        x = shellPopupAnchorScreen_.x - popupWidth / 2;
+        y = shellPopupAnchorScreen_.y - popupHeight - gap;
+        break;
+    }
+
+    x = (std::clamp)(
+        x, screen.left, screen.right - popupWidth);
+    y = (std::clamp)(
+        y, screen.top, screen.bottom - popupHeight);
+
+    SetWindowPos(
+        search.best, nullptr,
+        x, y, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+            | SWP_NOOWNERZORDER);
+}
+
 // ---------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------
