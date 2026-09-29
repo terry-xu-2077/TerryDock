@@ -267,12 +267,19 @@ void WindowPreview::UpdateThumbnailRects()
     const float uiScale = dpiScale_ * menuScale_;
     const int itemWidth =
         width / static_cast<int>(entries_.size());
-    const int outerPad = ScalePx(8.0f, uiScale);
-    const int topPad = ScalePx(8.0f, uiScale);
-    const int titleHeight = ScalePx(28.0f, uiScale);
-    const int titleGap = ScalePx(4.0f, uiScale);
-    const int previewBottom =
-        (std::max)(topPad + 1, height - titleHeight - titleGap - outerPad);
+
+    const int frameInset = ScalePx(5.0f, uiScale);
+    const int innerPad = ScalePx(4.0f, uiScale);
+    const int topPad = ScalePx(7.0f, uiScale);
+    const int titleHeight = ScalePx(20.0f, uiScale);
+    const int titleGap = ScalePx(3.0f, uiScale);
+    const int previewHeight = ScalePx(70.0f, uiScale);
+    const int previewTop = topPad + titleHeight + titleGap;
+    const int previewBottom = (std::min)(
+        height, previewTop + previewHeight);
+
+    const BYTE thumbnailOpacity = static_cast<BYTE>(std::lround(
+        255.0f * ClampF(opacity_, 0.0f, 1.0f)));
 
     for (size_t i = 0; i < thumbnails_.size(); ++i)
     {
@@ -296,9 +303,9 @@ void WindowPreview::UpdateThumbnailRects()
             ? width : cardLeft + itemWidth;
 
         const int maxWidth = (std::max)(
-            1, cardRight - cardLeft - outerPad * 2);
+            1, cardRight - cardLeft - frameInset * 2 - innerPad * 2);
         const int maxHeight = (std::max)(
-            1, previewBottom - topPad);
+            1, previewBottom - previewTop - innerPad);
 
         const float scale = (std::min)(
             static_cast<float>(maxWidth) / static_cast<float>(source.cx),
@@ -312,7 +319,7 @@ void WindowPreview::UpdateThumbnailRects()
         const int drawLeft =
             cardLeft + (cardRight - cardLeft - drawWidth) / 2;
         const int drawTop =
-            topPad + (maxHeight - drawHeight) / 2;
+            previewTop + (previewBottom - previewTop - drawHeight) / 2;
 
         const RECT destination{
             drawLeft,
@@ -328,7 +335,7 @@ void WindowPreview::UpdateThumbnailRects()
             | DWM_TNP_OPACITY
             | DWM_TNP_SOURCECLIENTAREAONLY;
         properties.rcDestination = destination;
-        properties.opacity = 255;
+        properties.opacity = thumbnailOpacity;
         properties.fVisible = TRUE;
         properties.fSourceClientAreaOnly = FALSE;
 
@@ -340,12 +347,13 @@ void WindowPreview::UpdateThumbnailRects()
 }
 
 void WindowPreview::Show(const RECT& screenRect,
+                         const std::wstring& applicationName,
                          const std::vector<Entry>& entries,
                          int hoveredRow,
                          float dpiScale,
-                         float menuScale,
+                         float scale,
                          float cornerRadius,
-                         float thumbnailScale)
+                         float opacity)
 {
     if (!hwnd_ && !Initialize(
             instance_ ? instance_ : GetModuleHandleW(nullptr), owner_))
@@ -362,13 +370,13 @@ void WindowPreview::Show(const RECT& screenRect,
     }
 
     const float nextDpiScale = (std::max)(dpiScale, 1.0f);
-    const float nextMenuScale = ClampF(menuScale, 0.75f, 1.25f);
-    const float nextCornerRadius = ClampF(cornerRadius, 0.0f, 32.0f);
-    const float nextThumbnailScale =
-        ClampF(thumbnailScale, 0.6f, 1.4f);
+    const float nextMenuScale = ClampF(scale, 0.5f, 2.0f);
+    const float nextCornerRadius = ClampF(cornerRadius, 0.0f, 40.0f);
+    const float nextOpacity = ClampF(opacity, 0.0f, 1.0f);
 
     bool sourcesChanged = entries_.size() != entries.size();
-    bool contentChanged = sourcesChanged;
+    bool contentChanged = sourcesChanged
+        || applicationName_ != applicationName;
 
     if (!sourcesChanged)
     {
@@ -397,10 +405,11 @@ void WindowPreview::Show(const RECT& screenRect,
 
     const bool scaleChanged =
         std::fabs(dpiScale_ - nextDpiScale) > 0.0001f
-        || std::fabs(menuScale_ - nextMenuScale) > 0.0001f
-        || std::fabs(thumbnailScale_ - nextThumbnailScale) > 0.0001f;
+        || std::fabs(menuScale_ - nextMenuScale) > 0.0001f;
     const bool cornerChanged =
         std::fabs(cornerRadius_ - nextCornerRadius) > 0.0001f;
+    const bool opacityChanged =
+        std::fabs(opacity_ - nextOpacity) > 0.0001f;
 
     RECT currentBounds{};
     GetWindowRect(hwnd_, &currentBounds);
@@ -411,19 +420,16 @@ void WindowPreview::Show(const RECT& screenRect,
 
     const int previousHoveredRow = hoveredRow_;
 
+    applicationName_ = applicationName;
     entries_ = entries;
     hoveredRow_ = hoveredRow;
     dpiScale_ = nextDpiScale;
     menuScale_ = nextMenuScale;
     cornerRadius_ = nextCornerRadius;
-    thumbnailScale_ = nextThumbnailScale;
+    opacity_ = nextOpacity;
     lastClientWidth_ = width;
     lastClientHeight_ = height;
 
-    // While the Dock animates, this function is called every frame. Moving an
-    // already-visible popup does not require repainting its client area.
-    // Avoiding redundant SetWindowPos invalidation is what keeps GDI text from
-    // flashing while the DWM thumbnails continue compositing independently.
     if (!wasVisible)
     {
         SetWindowPos(
@@ -450,9 +456,6 @@ void WindowPreview::Show(const RECT& screenRect,
     const int radius = ScalePx(
         cornerRadius_, dpiScale_ * menuScale_);
 
-    // DWM corner state only needs to change when the popup first appears or
-    // when the user edits the corner setting. Reapplying it every animation
-    // frame can itself trigger non-client recomposition.
     if (!wasVisible || cornerChanged)
     {
         nativeRoundedCorners_ =
@@ -485,25 +488,20 @@ void WindowPreview::Show(const RECT& screenRect,
     {
         RebuildThumbnails();
     }
-    else if (layoutChanged)
+    else if (layoutChanged || opacityChanged)
     {
         UpdateThumbnailRects();
     }
 
     visible_ = true;
 
-    // Text, rounded frames and hover chrome are static window content. Repaint
-    // only when that content actually changes; pure popup movement is handled
-    // by the compositor and should not touch the client pixels at all.
     const bool needsFullClientRepaint =
-        !wasVisible || contentChanged || layoutChanged || cornerChanged;
+        !wasVisible || contentChanged || layoutChanged
+        || cornerChanged || opacityChanged;
 
     if (needsFullClientRepaint)
     {
         InvalidateRect(hwnd_, nullptr, FALSE);
-
-        // Paint synchronously only for first reveal so the popup never shows
-        // a blank frame. Subsequent updates are allowed to coalesce naturally.
         if (!wasVisible)
         {
             UpdateWindow(hwnd_);
@@ -550,14 +548,13 @@ void WindowPreview::InvalidateHoverTransition(int oldRow, int newRow)
     const float uiScale = dpiScale_ * menuScale_;
     const int itemWidth =
         width / static_cast<int>(entries_.size());
-    const int titleHeight = ScalePx(28.0f, uiScale);
-    const int titleBottomPad = ScalePx(5.0f, uiScale);
-
-    // Hover chrome now lives only around the preview area. Keep the title
-    // strip out of the invalid region so GDI text is never erased/repainted
-    // when the pointer moves between cards.
-    const int previewBottom = (std::max)(
-        0, height - titleHeight - titleBottomPad);
+    const int topPad = ScalePx(7.0f, uiScale);
+    const int titleHeight = ScalePx(20.0f, uiScale);
+    const int titleGap = ScalePx(3.0f, uiScale);
+    const int previewHeight = ScalePx(70.0f, uiScale);
+    const int previewTop = topPad + titleHeight + titleGap;
+    const int previewBottom = (std::min)(
+        height, previewTop + previewHeight);
 
     auto invalidateRow = [&](int row)
     {
@@ -568,10 +565,10 @@ void WindowPreview::InvalidateHoverTransition(int oldRow, int newRow)
 
         RECT area{
             row * itemWidth,
-            0,
+            (std::max)(0, previewTop - ScalePx(5.0f, uiScale)),
             row + 1 == static_cast<int>(entries_.size())
                 ? width : (row + 1) * itemWidth,
-            previewBottom};
+            (std::min)(height, previewBottom + ScalePx(5.0f, uiScale))};
 
         InvalidateRect(hwnd_, &area, FALSE);
     };
@@ -621,19 +618,16 @@ void WindowPreview::Paint()
         1, ScalePx(cornerRadius_, uiScale));
     const int diameter = radius * 2;
 
-    // Match DockRenderer::DrawTooltip.
     const COLORREF backgroundColor = RGB(245, 250, 255);
     const COLORREF borderColor = RGB(184, 199, 214);
     const COLORREF textColor = RGB(26, 36, 46);
     const COLORREF mutedTextColor = RGB(112, 124, 136);
-    const COLORREF hoverColor = RGB(226, 235, 244);
     const COLORREF activeColor = RGB(56, 173, 255);
 
     HBRUSH background = CreateSolidBrush(backgroundColor);
 
     if (nativeRoundedCorners_)
     {
-        // DWM supplies the antialiased outer clip and native border.
         FillRect(dc, &client, background);
     }
     else
@@ -647,8 +641,28 @@ void WindowPreview::Paint()
     }
     DeleteObject(background);
 
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    const int itemWidth = entries_.empty()
+        ? width : width / static_cast<int>(entries_.size());
+
+    const int topPad = ScalePx(7.0f, uiScale);
+    const int frameInset = ScalePx(5.0f, uiScale);
+    const int titleHeight = ScalePx(20.0f, uiScale);
+    const int titleGap = ScalePx(3.0f, uiScale);
+    const int previewHeight = ScalePx(70.0f, uiScale);
+    const int frameBottomPad = ScalePx(5.0f, uiScale);
+    const int appNameHeight = ScalePx(22.0f, uiScale);
+    const int appBottomPad = ScalePx(5.0f, uiScale);
+    const int previewTop = topPad + titleHeight + titleGap;
+    const int previewBottom = (std::min)(
+        height, previewTop + previewHeight);
+    const int frameBottom = (std::min)(
+        height - appNameHeight - appBottomPad,
+        previewBottom + frameBottomPad);
+
     bool antialiasedChrome = false;
-    if (d2dFactory_)
+    if (d2dFactory_ && !entries_.empty())
     {
         if (!d2dTarget_)
         {
@@ -665,17 +679,13 @@ void WindowPreview::Paint()
                 &properties, d2dTarget_.AddressOf());
         }
 
-        if (d2dTarget_
-            && SUCCEEDED(d2dTarget_->BindDC(dc, &client)))
+        if (d2dTarget_ && SUCCEEDED(d2dTarget_->BindDC(dc, &client)))
         {
-            ComPtr<ID2D1SolidColorBrush> hoverBrush;
             ComPtr<ID2D1SolidColorBrush> frameFillBrush;
             ComPtr<ID2D1SolidColorBrush> frameBorderBrush;
+            ComPtr<ID2D1SolidColorBrush> hoverBorderBrush;
             ComPtr<ID2D1SolidColorBrush> activeBrush;
 
-            d2dTarget_->CreateSolidColorBrush(
-                D2D1::ColorF(0.886f, 0.922f, 0.957f, 1.0f),
-                hoverBrush.AddressOf());
             d2dTarget_->CreateSolidColorBrush(
                 D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f),
                 frameFillBrush.AddressOf());
@@ -683,81 +693,76 @@ void WindowPreview::Paint()
                 D2D1::ColorF(0.72f, 0.78f, 0.84f, 1.0f),
                 frameBorderBrush.AddressOf());
             d2dTarget_->CreateSolidColorBrush(
+                D2D1::ColorF(0.22f, 0.68f, 1.0f, 0.95f),
+                hoverBorderBrush.AddressOf());
+            d2dTarget_->CreateSolidColorBrush(
                 D2D1::ColorF(0.22f, 0.68f, 1.0f, 1.0f),
                 activeBrush.AddressOf());
 
-            if (hoverBrush && frameFillBrush
-                && frameBorderBrush && activeBrush)
+            if (frameFillBrush && frameBorderBrush
+                && hoverBorderBrush && activeBrush)
             {
                 d2dTarget_->BeginDraw();
                 d2dTarget_->SetAntialiasMode(
                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-                const float width =
-                    static_cast<float>(client.right - client.left);
-                const float itemWidth = entries_.empty()
-                    ? width : width / static_cast<float>(entries_.size());
-                const float cardInset = 3.0f * uiScale;
-                const float hoverRadius = 8.0f * uiScale;
-                const float framePad = 4.0f * uiScale;
                 const float frameRadius = 9.0f * uiScale;
                 const float frameStroke =
                     (std::max)(1.0f, 1.0f * dpiScale_);
+                const float hoverStroke =
+                    (std::max)(1.5f, 2.0f * dpiScale_);
                 const float activeRadiusF = 3.0f * uiScale;
 
                 for (size_t i = 0; i < entries_.size(); ++i)
                 {
                     const float left =
-                        static_cast<float>(i) * itemWidth;
+                        static_cast<float>(i * itemWidth);
                     const float right = (i + 1 == entries_.size())
-                        ? width : left + itemWidth;
+                        ? static_cast<float>(width)
+                        : static_cast<float>((i + 1) * itemWidth);
 
-                    if (static_cast<int>(i) == hoveredRow_)
-                    {
-                        const float titleTop =
-                            static_cast<float>(client.bottom
-                                - ScalePx(28.0f, uiScale)
-                                - ScalePx(5.0f, uiScale));
-                        const D2D1_RECT_F card = D2D1::RectF(
-                            left + cardInset,
-                            cardInset,
-                            right - cardInset,
-                            (std::max)(cardInset, titleTop - cardInset));
-                        d2dTarget_->FillRoundedRectangle(
-                            D2D1::RoundedRect(
-                                card, hoverRadius, hoverRadius),
-                            hoverBrush.Get());
-                    }
+                    const D2D1_RECT_F frame = D2D1::RectF(
+                        left + static_cast<float>(frameInset),
+                        static_cast<float>(topPad),
+                        right - static_cast<float>(frameInset),
+                        static_cast<float>(frameBottom));
 
-                    if (i < thumbnailRects_.size())
+                    d2dTarget_->FillRoundedRectangle(
+                        D2D1::RoundedRect(frame, frameRadius, frameRadius),
+                        frameFillBrush.Get());
+                    d2dTarget_->DrawRoundedRectangle(
+                        D2D1::RoundedRect(frame, frameRadius, frameRadius),
+                        frameBorderBrush.Get(),
+                        frameStroke);
+
+                    if (static_cast<int>(i) == hoveredRow_
+                        && i < thumbnailRects_.size())
                     {
                         const RECT& thumb = thumbnailRects_[i];
                         if (thumb.right > thumb.left
                             && thumb.bottom > thumb.top)
                         {
-                            const D2D1_RECT_F frame = D2D1::RectF(
-                                static_cast<float>(thumb.left) - framePad,
-                                static_cast<float>(thumb.top) - framePad,
-                                static_cast<float>(thumb.right) + framePad,
-                                static_cast<float>(thumb.bottom) + framePad);
-
-                            d2dTarget_->FillRoundedRectangle(
-                                D2D1::RoundedRect(
-                                    frame, frameRadius, frameRadius),
-                                frameFillBrush.Get());
+                            const float pad = 2.0f * uiScale;
+                            const D2D1_RECT_F hoverFrame = D2D1::RectF(
+                                static_cast<float>(thumb.left) - pad,
+                                static_cast<float>(thumb.top) - pad,
+                                static_cast<float>(thumb.right) + pad,
+                                static_cast<float>(thumb.bottom) + pad);
                             d2dTarget_->DrawRoundedRectangle(
                                 D2D1::RoundedRect(
-                                    frame, frameRadius, frameRadius),
-                                frameBorderBrush.Get(),
-                                frameStroke);
+                                    hoverFrame,
+                                    5.0f * uiScale,
+                                    5.0f * uiScale),
+                                hoverBorderBrush.Get(),
+                                hoverStroke);
                         }
                     }
 
                     if (entries_[i].active)
                     {
                         const D2D1_POINT_2F center = D2D1::Point2F(
-                            left + 9.0f * uiScale,
-                            9.0f * uiScale);
+                            left + 10.0f * uiScale,
+                            static_cast<float>(topPad) + 9.0f * uiScale);
                         d2dTarget_->FillEllipse(
                             D2D1::Ellipse(
                                 center, activeRadiusF, activeRadiusF),
@@ -777,17 +782,8 @@ void WindowPreview::Paint()
 
     if (!entries_.empty())
     {
-        const int width = client.right - client.left;
-        const int height = client.bottom - client.top;
-        const int itemWidth =
-            width / static_cast<int>(entries_.size());
-        const int outerPad = ScalePx(8.0f, uiScale);
-        const int titleHeight = ScalePx(28.0f, uiScale);
-        const int titleBottomPad = ScalePx(5.0f, uiScale);
-        const int activeRadius = ScalePx(3.0f, uiScale);
-
-        HFONT font = CreateFontW(
-            -ScalePx(14.0f, uiScale),
+        HFONT titleFont = CreateFontW(
+            -ScalePx(13.0f, uiScale),
             0, 0, 0, FW_NORMAL,
             FALSE, FALSE, FALSE,
             DEFAULT_CHARSET,
@@ -797,7 +793,19 @@ void WindowPreview::Paint()
             DEFAULT_PITCH | FF_DONTCARE,
             L"Segoe UI");
 
-        HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
+        HFONT appFont = CreateFontW(
+            -ScalePx(13.0f, uiScale),
+            0, 0, 0, FW_SEMIBOLD,
+            FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE,
+            L"Segoe UI");
+
+        HGDIOBJ oldFont = titleFont
+            ? SelectObject(dc, titleFont) : nullptr;
         SetBkMode(dc, TRANSPARENT);
 
         for (size_t i = 0; i < entries_.size(); ++i)
@@ -806,80 +814,26 @@ void WindowPreview::Paint()
             const int right = (i + 1 == entries_.size())
                 ? width : left + itemWidth;
 
-            if (!antialiasedChrome
-                && static_cast<int>(i) == hoveredRow_)
+            if (!antialiasedChrome)
             {
-                const int titleTop =
-                    height - titleHeight - titleBottomPad;
-                RECT cardRect{
-                    left + ScalePx(3.0f, uiScale),
-                    ScalePx(3.0f, uiScale),
-                    right - ScalePx(3.0f, uiScale),
-                    (std::max)(ScalePx(3.0f, uiScale),
-                               titleTop - ScalePx(3.0f, uiScale))};
-
-                HBRUSH hover = CreateSolidBrush(hoverColor);
-                HGDIOBJ previousBrush = SelectObject(dc, hover);
-                HGDIOBJ previousPen =
-                    SelectObject(dc, GetStockObject(NULL_PEN));
-                const int hoverRadius = ScalePx(7.0f, uiScale);
+                RECT frame{
+                    left + frameInset,
+                    topPad,
+                    right - frameInset,
+                    frameBottom};
+                HBRUSH frameFill = CreateSolidBrush(RGB(255, 255, 255));
+                HPEN framePen = CreatePen(PS_SOLID, 1, borderColor);
+                HGDIOBJ previousBrush = SelectObject(dc, frameFill);
+                HGDIOBJ previousPen = SelectObject(dc, framePen);
+                const int frameRadius = ScalePx(9.0f, uiScale);
                 RoundRect(dc,
-                          cardRect.left, cardRect.top,
-                          cardRect.right, cardRect.bottom,
-                          hoverRadius * 2, hoverRadius * 2);
+                          frame.left, frame.top,
+                          frame.right, frame.bottom,
+                          frameRadius * 2, frameRadius * 2);
                 SelectObject(dc, previousPen);
                 SelectObject(dc, previousBrush);
-                DeleteObject(hover);
-            }
-
-            if (!antialiasedChrome && entries_[i].active)
-            {
-                const int cx = left + outerPad;
-                const int cy = outerPad;
-                HBRUSH dot = CreateSolidBrush(activeColor);
-                HGDIOBJ previousBrush = SelectObject(dc, dot);
-                HGDIOBJ previousPen =
-                    SelectObject(dc, GetStockObject(NULL_PEN));
-                Ellipse(dc,
-                        cx - activeRadius,
-                        cy - activeRadius,
-                        cx + activeRadius + 1,
-                        cy + activeRadius + 1);
-                SelectObject(dc, previousPen);
-                SelectObject(dc, previousBrush);
-                DeleteObject(dot);
-            }
-
-            if (!antialiasedChrome
-                && i < thumbnailRects_.size())
-            {
-                const RECT& thumbnail = thumbnailRects_[i];
-                if (thumbnail.right > thumbnail.left
-                    && thumbnail.bottom > thumbnail.top)
-                {
-                    const int pad = ScalePx(4.0f, uiScale);
-                    RECT frame{
-                        thumbnail.left - pad,
-                        thumbnail.top - pad,
-                        thumbnail.right + pad,
-                        thumbnail.bottom + pad};
-                    HBRUSH frameFill = CreateSolidBrush(RGB(255, 255, 255));
-                    HPEN framePen = CreatePen(
-                        PS_SOLID, 1, borderColor);
-                    HGDIOBJ previousBrush =
-                        SelectObject(dc, frameFill);
-                    HGDIOBJ previousPen =
-                        SelectObject(dc, framePen);
-                    const int frameRadius = ScalePx(9.0f, uiScale);
-                    RoundRect(dc,
-                              frame.left, frame.top,
-                              frame.right, frame.bottom,
-                              frameRadius * 2, frameRadius * 2);
-                    SelectObject(dc, previousPen);
-                    SelectObject(dc, previousBrush);
-                    DeleteObject(framePen);
-                    DeleteObject(frameFill);
-                }
+                DeleteObject(framePen);
+                DeleteObject(frameFill);
             }
 
             SetTextColor(
@@ -887,11 +841,9 @@ void WindowPreview::Paint()
                 entries_[i].minimized
                     ? mutedTextColor : textColor);
 
-            int textLeft = left + outerPad;
-            int textRight = right - outerPad;
+            int textLeft = left + frameInset + ScalePx(4.0f, uiScale);
+            int textRight = right - frameInset - ScalePx(4.0f, uiScale);
 
-            // The title is subordinate to the preview: constrain it to the
-            // actual rendered thumbnail width, not the whole card width.
             if (i < thumbnailRects_.size())
             {
                 const RECT& thumbnail = thumbnailRects_[i];
@@ -902,35 +854,56 @@ void WindowPreview::Paint()
                 }
             }
 
-            RECT textRect{
+            RECT titleRect{
                 textLeft,
-                height - titleHeight - titleBottomPad,
+                topPad,
                 textRight,
-                height - titleBottomPad};
+                topPad + titleHeight};
 
             DrawTextW(
                 dc,
                 entries_[i].title.c_str(),
                 static_cast<int>(entries_[i].title.size()),
-                &textRect,
+                &titleRect,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE
                     | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
+
+        if (appFont)
+        {
+            SelectObject(dc, appFont);
+        }
+
+        SetTextColor(dc, textColor);
+        RECT appNameRect{
+            ScalePx(8.0f, uiScale),
+            frameBottom,
+            width - ScalePx(8.0f, uiScale),
+            height - appBottomPad};
+        DrawTextW(
+            dc,
+            applicationName_.c_str(),
+            static_cast<int>(applicationName_.size()),
+            &appNameRect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE
+                | DT_END_ELLIPSIS | DT_NOPREFIX);
 
         if (oldFont)
         {
             SelectObject(dc, oldFont);
         }
-        if (font)
+        if (titleFont)
         {
-            DeleteObject(font);
+            DeleteObject(titleFont);
+        }
+        if (appFont)
+        {
+            DeleteObject(appFont);
         }
     }
 
     if (!nativeRoundedCorners_)
     {
-        // Win10 fallback: keep an inset outline. The outer HRGN is binary,
-        // so only Win11's compositor-native path can be perfectly antialiased.
         const int strokeWidth = (std::max)(1, ScalePx(1.0f, dpiScale_));
         const int inset = (std::max)(1, strokeWidth);
         HPEN borderPen = CreatePen(PS_SOLID, strokeWidth, borderColor);
