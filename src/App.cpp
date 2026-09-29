@@ -3714,6 +3714,7 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"图标大小", L"Icon size"},
         {L"图标间距", L"Icon spacing"},
         {L"放大倍率", L"Magnification"},
+        {L"多窗口菜单延迟", L"Multi-window menu delay"},
         {L"自动隐藏/覆盖模式（不占用桌面下方空间）", L"Auto-hide/overlay (does not reserve screen space)"},
         {L"自动隐藏/覆盖模式", L"Auto-hide/overlay mode"},
         {L"收回延迟", L"Hide delay"},
@@ -4652,6 +4653,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         kIdStrokeWidth,
         kIdStrokeOpacity,
         kIdOverallScale,
+        kIdWindowMenuDelay = 2700,
 
         kIdSave = 241,
         kIdCancel,
@@ -4738,6 +4740,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                == BST_CHECKED;
         s.autoHideDelayMs = sliderValue(settings_.autoHideDelaySlider);
         s.autoHideAnimationMs = sliderValue(settings_.autoHideSpeedSlider);
+        s.windowMenuHoverDelayMs =
+            sliderValue(settings_.windowMenuDelaySlider);
         s.magnification =
             static_cast<float>(sliderValue(settings_.magnifySlider)) / 10.0f;
         s.cornerRadius = static_cast<float>(sliderValue(settings_.dockCornerSlider));
@@ -4854,6 +4858,10 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         swprintf(text, 48, L"%d ms",
                  sliderValue(settings_.autoHideSpeedSlider));
         SetWindowTextW(settings_.autoHideSpeedLabel, text);
+
+        swprintf(text, 48, L"%d ms",
+                 sliderValue(settings_.windowMenuDelaySlider));
+        SetWindowTextW(settings_.windowMenuDelayLabel, text);
     };
 
     switch (message)
@@ -5026,27 +5034,33 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         settings_.spacingLabel = makeLabel(L"", 306, 116, 60);
         settings_.magnifyLabel = makeLabel(L"", 306, 144, 60);
 
+        HWND windowMenuDelayCaption =
+            makeLabel(L"多窗口菜单延迟", 22, 178, 130);
+        settings_.windowMenuDelaySlider = makeSlider(
+            kIdWindowMenuDelay, 158, 174, 140, 0, 1500,
+            config_.settings.windowMenuHoverDelayMs);
+        settings_.windowMenuDelayLabel = makeLabel(L"", 306, 178, 65);
+
         settings_.autoHideBox = makeCheck(
             L"自动隐藏/覆盖模式（不占用停靠边空间）",
-            config_.settings.autoHide, kIdAutoHide, 22, 172, 340);
+            config_.settings.autoHide, kIdAutoHide, 22, 218, 340);
         HWND autoHideDelayCaption =
-            makeLabel(L"收回延迟", 22, 212, 120);
+            makeLabel(L"收回延迟", 22, 258, 120);
         settings_.autoHideDelaySlider = makeSlider(
-            kIdFullscreenHideDelay, 158, 208, 140, 0, 5000,
+            kIdFullscreenHideDelay, 158, 254, 140, 0, 5000,
             config_.settings.autoHideDelayMs);
-        settings_.autoHideDelayLabel = makeLabel(L"", 306, 212, 65);
+        settings_.autoHideDelayLabel = makeLabel(L"", 306, 258, 65);
         HWND autoHideSpeedCaption =
-            makeLabel(L"自动隐藏动画时长", 22, 244, 130);
+            makeLabel(L"自动隐藏动画时长", 22, 290, 130);
         settings_.autoHideSpeedSlider = makeSlider(
-            kIdFullscreenHideSpeed, 158, 240, 140, 0, 1000,
+            kIdFullscreenHideSpeed, 158, 286, 140, 0, 1000,
             config_.settings.autoHideAnimationMs);
-        settings_.autoHideSpeedLabel = makeLabel(L"", 306, 244, 65);
-        // Divider inside the Behavior tab: general dock interaction above,
-        // auto-hide timing below. Tag it explicitly so tab classification
-        // never moves it into the Background page.
+        settings_.autoHideSpeedLabel = makeLabel(L"", 306, 290, 65);
+        // Divider inside the Behavior tab: hover/window interaction above,
+        // auto-hide timing below.
         HWND behaviorSeparator = CreateWindowExW(
             0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(22), S(168), S(430), S(2), hwnd, nullptr, instance_, nullptr);
+            S(22), S(212), S(430), S(2), hwnd, nullptr, instance_, nullptr);
         MarkDialogTabPage(behaviorSeparator, 0);
 
         // --- panel background ------------------------------------------------
@@ -5212,6 +5226,9 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
 
             // These controls are laid out in the behavior page's final
             // coordinates, below the original compact interaction rows.
+            MarkDialogTabPage(settings_.windowMenuDelaySlider, 0);
+            MarkDialogTabPage(settings_.windowMenuDelayLabel, 0);
+            MarkDialogTabPage(windowMenuDelayCaption, 0);
             MarkDialogTabPage(settings_.autoHideDelaySlider, 0);
             MarkDialogTabPage(settings_.autoHideBox, 0);
             MarkDialogTabPage(dockEdgeCaption, 0);
@@ -5508,6 +5525,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             setSlider(settings_.autoHideDelaySlider, defaults.autoHideDelayMs);
             setSlider(settings_.autoHideSpeedSlider,
                       defaults.autoHideAnimationMs);
+            setSlider(settings_.windowMenuDelaySlider,
+                      defaults.windowMenuHoverDelayMs);
             setSlider(settings_.dockCornerSlider,
                       static_cast<int>(std::lround(defaults.cornerRadius)));
             setSlider(settings_.tooltipOpacitySlider,
