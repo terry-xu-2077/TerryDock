@@ -6,6 +6,7 @@
 #include <commdlg.h>
 #include <dwmapi.h>
 #include <mmsystem.h>
+#include <propsys.h>
 #include <shlobj.h>
 
 #include <cmath>
@@ -251,6 +252,150 @@ std::wstring WindowProcessName(HWND hwnd)
     return gotPath && pathLength > 0
         ? GetFileName(std::wstring(path, pathLength))
         : std::wstring();
+}
+
+
+std::wstring PropertyStoreString(
+    IPropertyStore* store,
+    const PROPERTYKEY& key)
+{
+    if (!store)
+    {
+        return {};
+    }
+
+    PROPVARIANT value{};
+    PropVariantInit(&value);
+
+    std::wstring result;
+    if (SUCCEEDED(store->GetValue(key, &value)))
+    {
+        if (value.vt == VT_LPWSTR && value.pwszVal)
+        {
+            result = value.pwszVal;
+        }
+        else if (value.vt == VT_BSTR && value.bstrVal)
+        {
+            result.assign(value.bstrVal, SysStringLen(value.bstrVal));
+        }
+    }
+
+    PropVariantClear(&value);
+    return result;
+}
+
+std::wstring ResolveIndirectShellString(const std::wstring& value)
+{
+    if (value.empty())
+    {
+        return {};
+    }
+
+    wchar_t resolved[1024]{};
+    if (SUCCEEDED(SHLoadIndirectString(
+            value.c_str(), resolved, ARRAYSIZE(resolved), nullptr))
+        && resolved[0] != L'\0')
+    {
+        return resolved;
+    }
+
+    // Some Win32 property stores return a direct display name instead of an
+    // indirect @... resource reference.
+    return value.front() == L'@' ? std::wstring() : value;
+}
+
+std::wstring LocalizedApplicationNameFromWindow(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+    {
+        return {};
+    }
+
+    // AppUserModel property-set GUID. Keep the PROPERTYKEYs local instead of
+    // depending on propkey.h versions that differ across MinGW SDK releases.
+    static const PROPERTYKEY kRelaunchDisplayName =
+    {
+        {0x9F4C2855, 0x9F79, 0x4B39,
+         {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}},
+        4
+    };
+    static const PROPERTYKEY kAppUserModelId =
+    {
+        {0x9F4C2855, 0x9F79, 0x4B39,
+         {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}},
+        5
+    };
+
+    using GetStoreFn = HRESULT (WINAPI*)(HWND, REFIID, void**);
+    static GetStoreFn getStore = []() -> GetStoreFn
+    {
+        HMODULE shell = GetModuleHandleW(L"shell32.dll");
+        if (!shell)
+        {
+            shell = LoadLibraryW(L"shell32.dll");
+        }
+
+        return shell
+            ? reinterpret_cast<GetStoreFn>(
+                GetProcAddress(shell, "SHGetPropertyStoreForWindow"))
+            : nullptr;
+    }();
+
+    if (!getStore)
+    {
+        return {};
+    }
+
+    ComPtr<IPropertyStore> store;
+    if (FAILED(getStore(
+            hwnd, IID_IPropertyStore,
+            reinterpret_cast<void**>(store.AddressOf())))
+        || !store)
+    {
+        return {};
+    }
+
+    const std::wstring displayResource =
+        PropertyStoreString(store.Get(), kRelaunchDisplayName);
+    if (const std::wstring localized =
+            ResolveIndirectShellString(displayResource);
+        !localized.empty())
+    {
+        return localized;
+    }
+
+    // Packaged applications usually expose an AUMID even when the relaunch
+    // display-name property is absent. Resolve the corresponding AppsFolder
+    // shell item; SIGDN_NORMALDISPLAY follows the current Windows UI language.
+    const std::wstring appUserModelId =
+        PropertyStoreString(store.Get(), kAppUserModelId);
+    if (appUserModelId.empty())
+    {
+        return {};
+    }
+
+    const std::wstring parsingName =
+        L"shell:AppsFolder\\" + appUserModelId;
+
+    ComPtr<IShellItem> shellItem;
+    if (FAILED(SHCreateItemFromParsingName(
+            parsingName.c_str(), nullptr,
+            IID_PPV_ARGS(shellItem.AddressOf())))
+        || !shellItem)
+    {
+        return {};
+    }
+
+    wchar_t* name = nullptr;
+    if (FAILED(shellItem->GetDisplayName(SIGDN_NORMALDISPLAY, &name))
+        || !name)
+    {
+        return {};
+    }
+
+    std::wstring localized(name);
+    CoTaskMemFree(name);
+    return localized;
 }
 
 bool IsWindowsShellUiWindow(HWND hwnd)
@@ -3013,8 +3158,12 @@ void App::Render()
                 dockBounds.top
                     + static_cast<LONG>(std::lround(menu.bottom))};
 
+            const std::wstring& previewApplicationName =
+                item.runtimeApplicationName.empty()
+                ? item.name : item.runtimeApplicationName;
+
             windowPreview_.Show(
-                screenMenu, item.name, previewEntries,
+                screenMenu, previewApplicationName, previewEntries,
                 windowMenuHoveredRow_, dpiScale_,
                 bubbleScale,
                 config_.settings.tooltipCornerRadius,
@@ -3156,6 +3305,8 @@ void App::PollProcesses()
                 entry.minimized = IsIconic(hwnd) != FALSE;
                 entry.active = hwnd == GetForegroundWindow();
                 item.windows.push_back(std::move(entry));
+                item.runtimeApplicationName =
+                    LocalizedApplicationNameFromWindow(hwnd);
             }
         }
 
@@ -3188,6 +3339,7 @@ void App::RefreshRunningApplications()
         if (item->kind == DockItemKind::Pinned)
         {
             item->windows.clear();
+            item->runtimeApplicationName.clear();
         }
     }
 
@@ -3224,6 +3376,11 @@ void App::RefreshRunningApplications()
 
         if (DockItem* pinned = pinnedForPath(window.path))
         {
+            if (pinned->runtimeApplicationName.empty())
+            {
+                pinned->runtimeApplicationName =
+                    LocalizedApplicationNameFromWindow(window.hwnd);
+            }
             pinned->windows.push_back(std::move(entry));
             continue;
         }
@@ -3309,6 +3466,10 @@ void App::RefreshRunningApplications()
             ? nullptr : item->windows.front().hwnd;
         item->windowTitle = item->windows.empty()
             ? std::wstring() : item->windows.front().title;
+        item->runtimeApplicationName = item->windows.empty()
+            ? std::wstring()
+            : LocalizedApplicationNameFromWindow(
+                item->windows.front().hwnd);
         contentChanged = true;
         nextTransient.push_back(std::move(item));
     }
@@ -3339,6 +3500,10 @@ void App::RefreshRunningApplications()
             ? nullptr : item->windows.front().hwnd;
         item->windowTitle = item->windows.empty()
             ? std::wstring() : item->windows.front().title;
+        item->runtimeApplicationName = item->windows.empty()
+            ? std::wstring()
+            : LocalizedApplicationNameFromWindow(
+                item->windows.front().hwnd);
 
         if (item->iconSource)
         {
