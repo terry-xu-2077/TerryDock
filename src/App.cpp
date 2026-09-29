@@ -2340,7 +2340,8 @@ void App::Tick(double dt)
         : nullptr;
 
     const bool canExpandWindows =
-        hoveredItem && hoveredItem->windows.size() >= 2;
+        hoveredItem && hoveredItem->running
+        && !hoveredItem->windows.empty();
 
     if (draggingIndex_ >= 0 || !dockReadyForTooltip)
     {
@@ -2429,7 +2430,7 @@ void App::Tick(double dt)
                 return item->id == windowMenuItemId_;
             });
 
-        if (menuItem == items_.end() || (*menuItem)->windows.size() < 2)
+        if (menuItem == items_.end() || (*menuItem)->windows.empty())
         {
             windowMenuVisible_ = false;
             windowMenuHoveredRow_ = -1;
@@ -2444,9 +2445,12 @@ void App::Tick(double dt)
         tooltipItemId_ = items_[static_cast<size_t>(tooltipIndex)]->id;
     }
 
-    const bool suppressTooltip = windowMenuVisible_
-        && (pointerOnWindowMenu
-            || (hoveredItem && hoveredItem->id == windowMenuItemId_));
+    // A running app with at least one real top-level window uses the preview
+    // bubble as its tooltip. Do not show the ordinary name bubble first and
+    // then replace it a moment later.
+    const bool suppressTooltip =
+        canExpandWindows
+        || (windowMenuVisible_ && pointerOnWindowMenu);
     const float tooltipTarget =
         tooltipIndex >= 0 && !suppressTooltip ? 1.0f : 0.0f;
     const float fadeSeconds = ClampF(
@@ -2824,7 +2828,7 @@ void App::Render()
                 return item->id == windowMenuItemId_;
             });
 
-        if (menuItem != items_.end() && (*menuItem)->windows.size() >= 2)
+        if (menuItem != items_.end() && !(*menuItem)->windows.empty())
         {
             const DockItem& item = **menuItem;
 
