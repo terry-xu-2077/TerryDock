@@ -2229,6 +2229,131 @@ void App::Render()
         }
     }
 
+    windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
+    windowMenuVisibleRows_ = 0;
+    windowMenuRowHeight_ = 0.0f;
+
+    if (windowMenuVisible_ && !windowMenuItemId_.empty())
+    {
+        const auto menuItem = std::find_if(
+            items_.begin(), items_.end(), [this](const auto& item)
+            {
+                return item->id == windowMenuItemId_;
+            });
+
+        if (menuItem != items_.end() && (*menuItem)->windows.size() >= 2)
+        {
+            const DockItem& item = **menuItem;
+            constexpr size_t kMaxVisibleWindowRows = 18;
+            const size_t rowCount =
+                (std::min)(item.windows.size(), kMaxVisibleWindowRows);
+
+            const float rowHeight = 30.0f * dockScale_;
+            const float menuWidth = 320.0f * dockScale_;
+            const float menuHeight = rowHeight * static_cast<float>(rowCount);
+            const float gap = 10.0f * dockScale_;
+            const float margin = 8.0f * dockScale_;
+
+            const float bottom = item.baselineBottom + item.bounceOffset;
+            const D2D1_RECT_F logicalIcon = D2D1::RectF(
+                item.centerX - item.size * 0.5f,
+                bottom - item.size,
+                item.centerX + item.size * 0.5f,
+                bottom);
+            const D2D1_RECT_F iconRect =
+                dockTransform_.ToPhysical(logicalIcon);
+
+            D2D1_RECT_F menu{};
+            const float iconCenterX =
+                (iconRect.left + iconRect.right) * 0.5f;
+            const float iconCenterY =
+                (iconRect.top + iconRect.bottom) * 0.5f;
+
+            switch (config_.settings.dockEdge)
+            {
+            case DockEdge::Top:
+                menu.left = iconCenterX - menuWidth * 0.5f;
+                menu.top = iconRect.bottom + gap;
+                menu.right = menu.left + menuWidth;
+                menu.bottom = menu.top + menuHeight;
+                break;
+            case DockEdge::Left:
+                menu.left = iconRect.right + gap;
+                menu.top = iconCenterY - menuHeight * 0.5f;
+                menu.right = menu.left + menuWidth;
+                menu.bottom = menu.top + menuHeight;
+                break;
+            case DockEdge::Right:
+                menu.right = iconRect.left - gap;
+                menu.left = menu.right - menuWidth;
+                menu.top = iconCenterY - menuHeight * 0.5f;
+                menu.bottom = menu.top + menuHeight;
+                break;
+            case DockEdge::Bottom:
+            default:
+                menu.left = iconCenterX - menuWidth * 0.5f;
+                menu.bottom = iconRect.top - gap;
+                menu.right = menu.left + menuWidth;
+                menu.top = menu.bottom - menuHeight;
+                break;
+            }
+
+            const float surfaceWidth =
+                static_cast<float>(renderer_.Width());
+            const float surfaceHeight =
+                static_cast<float>(renderer_.Height());
+
+            if (menu.left < margin)
+            {
+                const float shift = margin - menu.left;
+                menu.left += shift;
+                menu.right += shift;
+            }
+            if (menu.right > surfaceWidth - margin)
+            {
+                const float shift = menu.right - (surfaceWidth - margin);
+                menu.left -= shift;
+                menu.right -= shift;
+            }
+            if (menu.top < margin)
+            {
+                const float shift = margin - menu.top;
+                menu.top += shift;
+                menu.bottom += shift;
+            }
+            if (menu.bottom > surfaceHeight - margin)
+            {
+                const float shift = menu.bottom - (surfaceHeight - margin);
+                menu.top -= shift;
+                menu.bottom -= shift;
+            }
+
+            windowMenuBounds_ = menu;
+            windowMenuVisibleRows_ = static_cast<int>(rowCount);
+            windowMenuRowHeight_ = rowHeight;
+
+            std::vector<std::wstring> titles;
+            std::vector<bool> active;
+            std::vector<bool> minimized;
+            titles.reserve(rowCount);
+            active.reserve(rowCount);
+            minimized.reserve(rowCount);
+
+            for (size_t i = 0; i < rowCount; ++i)
+            {
+                const DockWindowEntry& window = item.windows[i];
+                titles.push_back(window.title.empty()
+                    ? item.name : window.title);
+                active.push_back(window.active);
+                minimized.push_back(window.minimized);
+            }
+
+            renderer_.DrawWindowMenu(
+                menu, titles, active, minimized,
+                windowMenuHoveredRow_, dockScale_, 1.0f);
+        }
+    }
+
     // The label is rendered in the same layered surface as the dock, so it
     // follows the icon's animated centre and size without a separate window.
     if (tooltipOpacity_ > 0.003f && !tooltipItemId_.empty())
