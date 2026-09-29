@@ -3120,6 +3120,28 @@ void App::PollProcesses()
     for (size_t i = 0; i < pinned.size() && i < running.size(); ++i)
     {
         DockItem& item = *pinned[i];
+
+        // Keep the black-dot contract useful: if the process scanner says an
+        // app is running but the strict taskbar-window pass found nothing,
+        // make one more pass for a normal visible top-level HWND. This gives
+        // single-window/running pinned apps a DWM preview whenever Windows
+        // exposes an actual window for them.
+        if (running[i] && item.windows.empty())
+        {
+            if (HWND hwnd = AppLauncher::FindRunningWindow(item.processName))
+            {
+                wchar_t title[512]{};
+                GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+
+                DockWindowEntry entry;
+                entry.hwnd = hwnd;
+                entry.title = title;
+                entry.minimized = IsIconic(hwnd) != FALSE;
+                entry.active = hwnd == GetForegroundWindow();
+                item.windows.push_back(std::move(entry));
+            }
+        }
+
         const bool isRunning = running[i] || !item.windows.empty();
 
         if (isRunning && item.launching)
