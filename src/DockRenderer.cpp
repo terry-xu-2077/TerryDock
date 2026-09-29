@@ -1084,7 +1084,7 @@ void DockRenderer::DrawBubbleTail(const D2D1_RECT_F& body,
         DockTransform(edge_, logicalWidth_, logicalHeight_).Matrix();
     rt_->SetTransform(D2D1::Matrix3x2F::Identity());
 
-    const float safeScale = ClampF(scale, 0.5f, 2.0f);
+    const float safeScale = ClampF(scale, 0.5f, 4.0f);
     const float halfBase = 8.0f * safeScale;
     const float alpha = ClampF(opacity, 0.0f, 1.0f);
 
