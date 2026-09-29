@@ -150,11 +150,11 @@ bool AppLauncher::ActivateWindow(HWND target)
     return true;
 }
 
-bool AppLauncher::ActivateRunningWindow(const std::wstring& processName)
+HWND AppLauncher::FindRunningWindow(const std::wstring& processName)
 {
     if (processName.empty())
     {
-        return false;
+        return nullptr;
     }
 
     WindowSearch search;
@@ -162,8 +162,12 @@ bool AppLauncher::ActivateRunningWindow(const std::wstring& processName)
     search.foreground = GetForegroundWindow();
     EnumWindows(FindApplicationWindow, reinterpret_cast<LPARAM>(&search));
 
-    HWND target = search.minimized ? search.minimized : search.candidate;
-    return ActivateWindow(target);
+    return search.minimized ? search.minimized : search.candidate;
+}
+
+bool AppLauncher::ActivateRunningWindow(const std::wstring& processName)
+{
+    return ActivateWindow(FindRunningWindow(processName));
 }
 
 bool AppLauncher::Launch(const std::wstring& path, const std::wstring& arguments)
