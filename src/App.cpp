@@ -3363,16 +3363,24 @@ void App::Render()
             const bool verticalDock = config_.settings.dockEdge == DockEdge::Left
                 || config_.settings.dockEdge == DockEdge::Right;
             const bool topDock = config_.settings.dockEdge == DockEdge::Top;
+            // Static/no-animation mode keeps icon scale at 1.0 by design,
+            // but the tooltip should retain the same visual size it has when
+            // hovering a magnified icon in the animated modes.
+            const float tooltipVisualScale =
+                config_.settings.panelMode == PanelMode::Static
+                ? metrics_.magnification : item.scale;
+
             renderer_.DrawTooltip(
                 item.name,
                 item.centerX,
                 verticalDock ? item.baselineBottom
                     : topDock ? item.baselineBottom + 7.0f * dockScale_
                     : item.baselineBottom - item.size - 7.0f * dockScale_,
-                item.scale * config_.settings.tooltipScale
+                tooltipVisualScale * config_.settings.tooltipScale
                     * kTooltipScaleBaseline,
                 dockScale_,
-                config_.settings.tooltipCornerRadius * dockScale_ * item.scale
+                config_.settings.tooltipCornerRadius * dockScale_
+                    * tooltipVisualScale
                     * config_.settings.tooltipScale
                     * kTooltipScaleBaseline,
                 tooltipOpacity_, topDock);
@@ -4266,12 +4274,26 @@ void App::OnMouseMove(float x, float y)
     mouseY_ = y;
 
     // A short movement threshold keeps an ordinary click from becoming a
-    // reorder operation. Once crossed, capture the mouse so the drag can be
-    // completed even if the pointer leaves the panel's rounded hit region.
+    // reorder operation. Measure *real screen-pointer travel*, not the
+    // pointer's logical position inside the animated dock. Hover growth,
+    // launch bounce and dock repositioning can all move the icon/window under
+    // a stationary mouse; those visual motions must never start a drag.
     if (pressedIndex_ >= 0 && draggingIndex_ < 0)
     {
-        const float dx = x - dragStartX_;
-        const float dy = y - dragStartY_;
+        POINT cursor{};
+        if (!GetCursorPos(&cursor))
+        {
+            const RECT bounds = window_.GetBounds();
+            cursor.x = bounds.left
+                + static_cast<LONG>(std::lround(mousePhysicalX_));
+            cursor.y = bounds.top
+                + static_cast<LONG>(std::lround(mousePhysicalY_));
+        }
+
+        const float dx = static_cast<float>(
+            cursor.x - dragStartScreen_.x);
+        const float dy = static_cast<float>(
+            cursor.y - dragStartScreen_.y);
         const float threshold = 8.0f * dockScale_;
 
         if (dx * dx + dy * dy >= threshold * threshold
@@ -4367,6 +4389,15 @@ void App::OnMouseButton(int button, bool down, float x, float y)
         pressedIndex_ = IndexAtPoint(x, y);
         dragStartX_ = x;
         dragStartY_ = y;
+
+        if (!GetCursorPos(&dragStartScreen_))
+        {
+            const RECT bounds = window_.GetBounds();
+            dragStartScreen_.x = bounds.left
+                + static_cast<LONG>(std::lround(mousePhysicalX_));
+            dragStartScreen_.y = bounds.top
+                + static_cast<LONG>(std::lround(mousePhysicalY_));
+        }
 
         if (pressedIndex_ >= 0)
         {
