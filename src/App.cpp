@@ -1023,7 +1023,7 @@ bool App::Initialize(HINSTANCE instance)
     // Thumbnail previews are an enhancement, not a startup dependency.
     // If the helper window cannot be created on a particular Windows/DWM
     // configuration, keep LightDock running and simply omit thumbnails.
-    windowPreview_.Initialize(instance);
+    windowPreview_.Initialize(instance, window_.Handle());
 
     DetectRefreshRate();
     RefreshMonitors();
