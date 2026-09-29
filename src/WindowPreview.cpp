@@ -569,18 +569,50 @@ void WindowPreview::InvalidateHoverTransition(int oldRow, int newRow)
             return;
         }
 
-        // Hover now outlines the entire card, including its title. Repaint
-        // the full card bounds instead of only the thumbnail area; otherwise
-        // the top edge keeps the previous hover state until a full repaint.
-        const int repaintPad = ScalePx(4.0f, uiScale);
-        RECT area{
-            row * itemWidth,
-            (std::max)(0, topPad - repaintPad),
-            row + 1 == static_cast<int>(entries_.size())
-                ? width : (row + 1) * itemWidth,
+        // Hover only changes the card outline. Invalidating the whole card
+        // made GDI clear and redraw the window title on every left/right
+        // hover step, which produced a visible title flash. Repaint only the
+        // thin border strips around the rounded card so the title/thumbnail
+        // interior stays completely untouched.
+        const int frameInset = ScalePx(5.0f, uiScale);
+        const int repaintPad = (std::max)(2, ScalePx(3.0f, uiScale));
+
+        const int cardLeft = row * itemWidth;
+        const int cardRight = row + 1 == static_cast<int>(entries_.size())
+            ? width : (row + 1) * itemWidth;
+
+        const int frameLeft = cardLeft + frameInset;
+        const int frameRight = cardRight - frameInset;
+        const int frameTop = topPad;
+
+        RECT top{
+            (std::max)(0, frameLeft - repaintPad),
+            (std::max)(0, frameTop - repaintPad),
+            (std::min)(width, frameRight + repaintPad),
+            (std::min)(height, frameTop + repaintPad + 1)};
+
+        RECT bottom{
+            (std::max)(0, frameLeft - repaintPad),
+            (std::max)(0, frameBottom - repaintPad - 1),
+            (std::min)(width, frameRight + repaintPad),
             (std::min)(height, frameBottom + repaintPad)};
 
-        InvalidateRect(hwnd_, &area, FALSE);
+        RECT left{
+            (std::max)(0, frameLeft - repaintPad),
+            (std::max)(0, frameTop),
+            (std::min)(width, frameLeft + repaintPad + 1),
+            (std::min)(height, frameBottom)};
+
+        RECT right{
+            (std::max)(0, frameRight - repaintPad - 1),
+            (std::max)(0, frameTop),
+            (std::min)(width, frameRight + repaintPad),
+            (std::min)(height, frameBottom)};
+
+        InvalidateRect(hwnd_, &top, FALSE);
+        InvalidateRect(hwnd_, &bottom, FALSE);
+        InvalidateRect(hwnd_, &left, FALSE);
+        InvalidateRect(hwnd_, &right, FALSE);
     };
 
     invalidateRow(oldRow);
