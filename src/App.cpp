@@ -5397,6 +5397,21 @@ std::vector<App::RunningWindowInfo> App::FindRunningTaskbarWindows() const
         info.hwnd = record.hwnd;
         info.path = std::move(record.path);
         info.title = std::move(record.title);
+
+        info.appUserModelId =
+            ApplicationUserModelIdFromWindow(info.hwnd);
+        if (!info.appUserModelId.empty())
+        {
+            info.applicationName =
+                LocalizedApplicationNameFromAumid(
+                    info.appUserModelId);
+        }
+        if (info.applicationName.empty())
+        {
+            info.applicationName =
+                LocalizedApplicationNameFromWindow(info.hwnd);
+        }
+
         result.push_back(std::move(info));
     }
 
