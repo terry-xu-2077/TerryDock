@@ -2976,7 +2976,9 @@ int App::IndexAtPoint(float x, float y) const
 
 bool App::PointInWindowMenu(float physicalX, float physicalY) const
 {
-    if (!windowMenuVisible_)
+    if (!windowMenuVisible_
+        || windowMenuBounds_.right <= windowMenuBounds_.left
+        || windowMenuBounds_.bottom <= windowMenuBounds_.top)
     {
         return false;
     }
