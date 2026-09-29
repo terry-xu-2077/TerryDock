@@ -3162,8 +3162,11 @@ void App::Render()
             // Preview cards are 10% larger than the previous compact
             // version so live content stays readable without changing the
             // bubble visual language.
-            const float itemWidth = 137.5f * uiScale;
-            const float menuHeight = 139.0f * uiScale;
+            // Previous +10% was visually muted by the preview bubble's
+            // 0.8 baseline scale. Increase the physical card/menu dimensions
+            // another 10% so the change is clearly visible.
+            const float itemWidth = 151.25f * uiScale;
+            const float menuHeight = 152.0f * uiScale;
             const float tailLength = 8.0f * uiScale;
             const float tipGap = 7.0f * uiScale;
             const float margin = 8.0f * dpiScale_;
@@ -3685,9 +3688,19 @@ void App::RefreshRunningApplications()
             item->name = group.applicationName;
         }
 
-        if (!item->windows.empty()
+        const bool hostedShellApp =
+            EqualsIgnoreCase(
+                GetFileName(group.path),
+                L"ApplicationFrameHost.exe");
+
+        if (hostedShellApp
+            && !item->windows.empty()
             && (identityChanged || !item->runtimeWindowIconLoaded))
         {
+            // Only hosted Windows Shell/UWP frames need the taskbar HICON
+            // workaround. Ordinary Win32 apps (DingTalk, Chrome, Adobe, etc.)
+            // keep their high-resolution executable/resource icon instead of
+            // being replaced by a 32/48 px window icon.
             if (ComPtr<IWICBitmap> windowIcon =
                     icons_.LoadWindowIcon(
                         item->windows.front().hwnd, 256))
@@ -3707,6 +3720,25 @@ void App::RefreshRunningApplications()
                 {
                     item->iconSource = std::move(shellIcon);
                     item->runtimeWindowIconLoaded = false;
+                    item->icon.Reset();
+                    item->iconBitmapScale = 0.0f;
+                    item->iconCornerFraction = -1.0f;
+                }
+            }
+        }
+        else if (!hostedShellApp)
+        {
+            item->runtimeWindowIconLoaded = false;
+
+            // If this transient icon was created by an older build using a
+            // low-resolution window HICON, restore the normal executable
+            // resource icon on the next process refresh.
+            if (identityChanged || !item->iconSource)
+            {
+                AppInfo refreshed = icons_.Inspect(group.path, 256);
+                if (refreshed.icon)
+                {
+                    item->iconSource = refreshed.icon;
                     item->icon.Reset();
                     item->iconBitmapScale = 0.0f;
                     item->iconCornerFraction = -1.0f;
@@ -3745,7 +3777,12 @@ void App::RefreshRunningApplications()
         item->processName = info.processName.empty()
             ? GetFileName(item->resolvedPath) : info.processName;
 
-        if (!group.windows.empty())
+        const bool hostedShellApp =
+            EqualsIgnoreCase(
+                GetFileName(group.path),
+                L"ApplicationFrameHost.exe");
+
+        if (hostedShellApp && !group.windows.empty())
         {
             item->iconSource =
                 icons_.LoadWindowIcon(
@@ -3754,7 +3791,8 @@ void App::RefreshRunningApplications()
                 static_cast<bool>(item->iconSource);
         }
 
-        if (!item->iconSource
+        if (hostedShellApp
+            && !item->iconSource
             && !group.appUserModelId.empty())
         {
             item->iconSource =
@@ -3765,6 +3803,8 @@ void App::RefreshRunningApplications()
 
         if (!item->iconSource)
         {
+            // Normal EXE apps keep the original high-resolution extraction
+            // path. Do not replace it with the low-resolution WM_GETICON copy.
             item->iconSource = info.icon;
             item->runtimeWindowIconLoaded = false;
         }
