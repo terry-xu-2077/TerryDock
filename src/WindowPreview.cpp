@@ -78,6 +78,58 @@ DwmThumbnailApi& ThumbnailApi()
     return api;
 }
 
+bool ApplyNativeRoundedCorners(HWND hwnd, float radius)
+{
+    if (!hwnd)
+    {
+        return false;
+    }
+
+    using SetWindowAttributeFn =
+        HRESULT (WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+
+    HMODULE module = GetModuleHandleW(L"dwmapi.dll");
+    if (!module)
+    {
+        module = LoadLibraryW(L"dwmapi.dll");
+    }
+    if (!module)
+    {
+        return false;
+    }
+
+    auto setAttribute = reinterpret_cast<SetWindowAttributeFn>(
+        GetProcAddress(module, "DwmSetWindowAttribute"));
+    if (!setAttribute)
+    {
+        return false;
+    }
+
+    // Values are stable on Windows 11 but may be missing from older MinGW
+    // headers, so keep the ABI constants local.
+    constexpr DWORD kWindowCornerPreference = 33;
+    constexpr DWORD kBorderColor = 34;
+    constexpr int kDoNotRound = 1;
+    constexpr int kRound = 2;
+    constexpr int kRoundSmall = 3;
+
+    const int preference = radius <= 0.5f ? kDoNotRound
+        : radius <= 8.0f ? kRoundSmall : kRound;
+
+    const HRESULT cornerResult = setAttribute(
+        hwnd, kWindowCornerPreference,
+        &preference, sizeof(preference));
+
+    if (FAILED(cornerResult))
+    {
+        return false;
+    }
+
+    const COLORREF border = RGB(184, 199, 214);
+    setAttribute(hwnd, kBorderColor, &border, sizeof(border));
+    return true;
+}
+
 } // namespace
 
 WindowPreview::~WindowPreview()
@@ -184,6 +236,8 @@ void WindowPreview::RebuildThumbnails()
 
 void WindowPreview::UpdateThumbnailRects()
 {
+    thumbnailRects_.assign(entries_.size(), RECT{});
+
     if (!hwnd_ || entries_.empty())
     {
         return;
@@ -199,15 +253,15 @@ void WindowPreview::UpdateThumbnailRects()
         return;
     }
 
-    const int rowHeight = height / static_cast<int>(entries_.size());
     const float uiScale = dpiScale_ * menuScale_;
-    const int left = ScalePx(10.0f, uiScale);
-    const int previewSlotWidth = ScalePx(
-        112.0f * thumbnailScale_, uiScale);
-    const int verticalPad = ScalePx(7.0f, uiScale);
-    const int maxWidth = ScalePx(
-        104.0f * thumbnailScale_, uiScale);
-    const int maxHeight = (std::max)(1, rowHeight - verticalPad * 2);
+    const int itemWidth =
+        width / static_cast<int>(entries_.size());
+    const int outerPad = ScalePx(8.0f, uiScale);
+    const int topPad = ScalePx(8.0f, uiScale);
+    const int titleHeight = ScalePx(28.0f, uiScale);
+    const int titleGap = ScalePx(4.0f, uiScale);
+    const int previewBottom =
+        (std::max)(topPad + 1, height - titleHeight - titleGap - outerPad);
 
     for (size_t i = 0; i < thumbnails_.size(); ++i)
     {
@@ -226,6 +280,15 @@ void WindowPreview::UpdateThumbnailRects()
             continue;
         }
 
+        const int cardLeft = static_cast<int>(i) * itemWidth;
+        const int cardRight = (i + 1 == entries_.size())
+            ? width : cardLeft + itemWidth;
+
+        const int maxWidth = (std::max)(
+            1, cardRight - cardLeft - outerPad * 2);
+        const int maxHeight = (std::max)(
+            1, previewBottom - topPad);
+
         const float scale = (std::min)(
             static_cast<float>(maxWidth) / static_cast<float>(source.cx),
             static_cast<float>(maxHeight) / static_cast<float>(source.cy));
@@ -235,11 +298,17 @@ void WindowPreview::UpdateThumbnailRects()
         const int drawHeight = (std::max)(
             1, static_cast<int>(std::lround(source.cy * scale)));
 
-        const int rowTop = static_cast<int>(i) * rowHeight;
-        const int slotLeft = left;
-        const int slotTop = rowTop + (rowHeight - drawHeight) / 2;
         const int drawLeft =
-            slotLeft + (previewSlotWidth - drawWidth) / 2;
+            cardLeft + (cardRight - cardLeft - drawWidth) / 2;
+        const int drawTop =
+            topPad + (maxHeight - drawHeight) / 2;
+
+        const RECT destination{
+            drawLeft,
+            drawTop,
+            drawLeft + drawWidth,
+            drawTop + drawHeight};
+        thumbnailRects_[i] = destination;
 
         DWM_THUMBNAIL_PROPERTIES properties{};
         properties.dwFlags =
@@ -247,11 +316,7 @@ void WindowPreview::UpdateThumbnailRects()
             | DWM_TNP_VISIBLE
             | DWM_TNP_OPACITY
             | DWM_TNP_SOURCECLIENTAREAONLY;
-        properties.rcDestination = RECT{
-            drawLeft,
-            slotTop,
-            drawLeft + drawWidth,
-            slotTop + drawHeight};
+        properties.rcDestination = destination;
         properties.opacity = 255;
         properties.fVisible = TRUE;
         properties.fSourceClientAreaOnly = FALSE;
@@ -312,14 +377,30 @@ void WindowPreview::Show(const RECT& screenRect,
 
     const int radius = ScalePx(
         cornerRadius_, dpiScale_ * menuScale_);
-    HRGN region = CreateRoundRectRgn(
-        0, 0, width + 1, height + 1,
-        radius * 2, radius * 2);
-    if (region)
+
+    // The Dock itself uses per-pixel alpha + Direct2D, so its rounded corners
+    // are naturally anti-aliased. This preview is an ordinary HWND because
+    // DWM live thumbnails need a native destination window. On Windows 11,
+    // let DWM clip and outline that HWND so the corners receive the same
+    // compositor antialiasing. Older Windows falls back to the integer HRGN.
+    nativeRoundedCorners_ =
+        ApplyNativeRoundedCorners(hwnd_, cornerRadius_);
+
+    if (nativeRoundedCorners_)
     {
-        if (!SetWindowRgn(hwnd_, region, TRUE))
+        SetWindowRgn(hwnd_, nullptr, TRUE);
+    }
+    else
+    {
+        HRGN region = CreateRoundRectRgn(
+            0, 0, width + 1, height + 1,
+            radius * 2, radius * 2);
+        if (region)
         {
-            DeleteObject(region);
+            if (!SetWindowRgn(hwnd_, region, TRUE))
+            {
+                DeleteObject(region);
+            }
         }
     }
 
@@ -389,9 +470,7 @@ void WindowPreview::Paint()
         1, ScalePx(cornerRadius_, uiScale));
     const int diameter = radius * 2;
 
-    // Match DockRenderer::DrawTooltip: pale blue-white body, cool gray-blue
-    // border and dark ink. The popup is a normal HWND so these are the same
-    // base colours without per-pixel alpha.
+    // Match DockRenderer::DrawTooltip.
     const COLORREF backgroundColor = RGB(245, 250, 255);
     const COLORREF borderColor = RGB(184, 199, 214);
     const COLORREF textColor = RGB(26, 36, 46);
@@ -400,26 +479,36 @@ void WindowPreview::Paint()
     const COLORREF activeColor = RGB(56, 173, 255);
 
     HBRUSH background = CreateSolidBrush(backgroundColor);
-    HGDIOBJ oldBrush = SelectObject(dc, background);
-    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-    RoundRect(dc, 0, 0, client.right, client.bottom,
-              diameter, diameter);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
+
+    if (nativeRoundedCorners_)
+    {
+        // DWM supplies the antialiased outer clip and native border.
+        FillRect(dc, &client, background);
+    }
+    else
+    {
+        HGDIOBJ oldBrush = SelectObject(dc, background);
+        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+        RoundRect(dc, 0, 0, client.right, client.bottom,
+                  diameter, diameter);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+    }
     DeleteObject(background);
 
     if (!entries_.empty())
     {
-        const int rowHeight =
-            (client.bottom - client.top)
-            / static_cast<int>(entries_.size());
-        const int thumbnailArea = ScalePx(
-            132.0f * thumbnailScale_, uiScale);
-        const int textRightPad = ScalePx(14.0f, uiScale);
+        const int width = client.right - client.left;
+        const int height = client.bottom - client.top;
+        const int itemWidth =
+            width / static_cast<int>(entries_.size());
+        const int outerPad = ScalePx(8.0f, uiScale);
+        const int titleHeight = ScalePx(28.0f, uiScale);
+        const int titleBottomPad = ScalePx(5.0f, uiScale);
         const int activeRadius = ScalePx(3.0f, uiScale);
 
         HFONT font = CreateFontW(
-            -ScalePx(16.0f, uiScale),
+            -ScalePx(14.0f, uiScale),
             0, 0, 0, FW_NORMAL,
             FALSE, FALSE, FALSE,
             DEFAULT_CHARSET,
@@ -434,16 +523,17 @@ void WindowPreview::Paint()
 
         for (size_t i = 0; i < entries_.size(); ++i)
         {
-            const int top = static_cast<int>(i) * rowHeight;
-            const int bottom = top + rowHeight;
+            const int left = static_cast<int>(i) * itemWidth;
+            const int right = (i + 1 == entries_.size())
+                ? width : left + itemWidth;
 
             if (static_cast<int>(i) == hoveredRow_)
             {
-                RECT rowRect{
-                    ScalePx(4.0f, uiScale),
-                    top + ScalePx(3.0f, uiScale),
-                    client.right - ScalePx(4.0f, uiScale),
-                    bottom - ScalePx(3.0f, uiScale)};
+                RECT cardRect{
+                    left + ScalePx(3.0f, uiScale),
+                    ScalePx(3.0f, uiScale),
+                    right - ScalePx(3.0f, uiScale),
+                    height - ScalePx(3.0f, uiScale)};
 
                 HBRUSH hover = CreateSolidBrush(hoverColor);
                 HGDIOBJ previousBrush = SelectObject(dc, hover);
@@ -451,8 +541,8 @@ void WindowPreview::Paint()
                     SelectObject(dc, GetStockObject(NULL_PEN));
                 const int hoverRadius = ScalePx(7.0f, uiScale);
                 RoundRect(dc,
-                          rowRect.left, rowRect.top,
-                          rowRect.right, rowRect.bottom,
+                          cardRect.left, cardRect.top,
+                          cardRect.right, cardRect.bottom,
                           hoverRadius * 2, hoverRadius * 2);
                 SelectObject(dc, previousPen);
                 SelectObject(dc, previousBrush);
@@ -461,8 +551,8 @@ void WindowPreview::Paint()
 
             if (entries_[i].active)
             {
-                const int cx = ScalePx(9.0f, uiScale);
-                const int cy = top + rowHeight / 2;
+                const int cx = left + outerPad;
+                const int cy = outerPad;
                 HBRUSH dot = CreateSolidBrush(activeColor);
                 HGDIOBJ previousBrush = SelectObject(dc, dot);
                 HGDIOBJ previousPen =
@@ -482,18 +572,33 @@ void WindowPreview::Paint()
                 entries_[i].minimized
                     ? mutedTextColor : textColor);
 
+            int textLeft = left + outerPad;
+            int textRight = right - outerPad;
+
+            // The title is subordinate to the preview: constrain it to the
+            // actual rendered thumbnail width, not the whole card width.
+            if (i < thumbnailRects_.size())
+            {
+                const RECT& thumbnail = thumbnailRects_[i];
+                if (thumbnail.right > thumbnail.left)
+                {
+                    textLeft = thumbnail.left;
+                    textRight = thumbnail.right;
+                }
+            }
+
             RECT textRect{
-                thumbnailArea,
-                top,
-                client.right - textRightPad,
-                bottom};
+                textLeft,
+                height - titleHeight - titleBottomPad,
+                textRight,
+                height - titleBottomPad};
 
             DrawTextW(
                 dc,
                 entries_[i].title.c_str(),
                 static_cast<int>(entries_[i].title.size()),
                 &textRect,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE
                     | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
 
@@ -507,24 +612,25 @@ void WindowPreview::Paint()
         }
     }
 
-    // Draw the outline inside the window region. FrameRect drew on the
-    // clipped outer edge, so its pixels disappeared exactly at the rounded
-    // corners. The inset RoundRect keeps a continuous stroke all the way
-    // around the curve.
-    const int strokeWidth = (std::max)(1, ScalePx(1.0f, dpiScale_));
-    const int inset = (std::max)(1, strokeWidth);
-    HPEN borderPen = CreatePen(PS_SOLID, strokeWidth, borderColor);
-    HGDIOBJ previousPen = SelectObject(dc, borderPen);
-    HGDIOBJ previousBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-    RoundRect(dc,
-              inset, inset,
-              client.right - inset,
-              client.bottom - inset,
-              (std::max)(2, diameter - inset * 2),
-              (std::max)(2, diameter - inset * 2));
-    SelectObject(dc, previousBrush);
-    SelectObject(dc, previousPen);
-    DeleteObject(borderPen);
+    if (!nativeRoundedCorners_)
+    {
+        // Win10 fallback: keep an inset outline. The outer HRGN is binary,
+        // so only Win11's compositor-native path can be perfectly antialiased.
+        const int strokeWidth = (std::max)(1, ScalePx(1.0f, dpiScale_));
+        const int inset = (std::max)(1, strokeWidth);
+        HPEN borderPen = CreatePen(PS_SOLID, strokeWidth, borderColor);
+        HGDIOBJ previousPen = SelectObject(dc, borderPen);
+        HGDIOBJ previousBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+        RoundRect(dc,
+                  inset, inset,
+                  client.right - inset,
+                  client.bottom - inset,
+                  (std::max)(2, diameter - inset * 2),
+                  (std::max)(2, diameter - inset * 2));
+        SelectObject(dc, previousBrush);
+        SelectObject(dc, previousPen);
+        DeleteObject(borderPen);
+    }
 
     EndPaint(hwnd_, &paint);
 }
