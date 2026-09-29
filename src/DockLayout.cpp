@@ -72,8 +72,7 @@ SurfaceMargins ComputeMargins(const LayoutMetrics& metrics, DockEdge edge)
     // Horizontal docks also reserve enough transparent surface for the
     // multi-window hover stack. The window itself remains click-through
     // outside the visible dock/menu hit regions.
-    const float tooltipRoom = (verticalDock ? 520.0f : 520.0f)
-        * metrics.dpiScale;
+    const float tooltipRoom = 520.0f * metrics.dpiScale;
 
     SurfaceMargins margins;
     // Keep enough horizontal canvas for the name bubble above either outer
