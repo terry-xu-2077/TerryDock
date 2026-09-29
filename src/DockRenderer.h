@@ -84,6 +84,15 @@ public:
                       float opacity,
                       bool arrowUp = false);
 
+    /// Upright window list drawn in physical surface coordinates.
+    void DrawWindowMenu(const D2D1_RECT_F& rect,
+                        const std::vector<std::wstring>& titles,
+                        const std::vector<bool>& active,
+                        const std::vector<bool>& minimized,
+                        int hoveredRow,
+                        float dpiScale,
+                        float opacity);
+
     /// Thin inner highlight rim along a plate's rounded edge. Drawn on top
     /// of the icon so full bleed tiles (clipped by the same radius) get the
     /// macOS style bright edge. The gradient runs top bright to bottom dim,
