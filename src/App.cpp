@@ -2833,8 +2833,9 @@ void App::Render()
             const float availableWidth = (std::max)(
                 itemWidth,
                 static_cast<float>(renderer_.Width()) - margin * 2.0f);
-            const size_t maxVisibleByWidth = (std::max<size_t>)(
-                1, static_cast<size_t>(
+            const size_t maxVisibleByWidth = (std::max)(
+                static_cast<size_t>(1),
+                static_cast<size_t>(
                     std::floor(availableWidth / itemWidth)));
             constexpr size_t kMaxVisibleWindowItems = 8;
             const size_t rowCount = (std::min)(
