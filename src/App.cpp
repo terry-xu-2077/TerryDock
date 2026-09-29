@@ -4495,7 +4495,6 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"背景栏", L"Dock background"},
         {L"图标", L"Icons"},
         {L"气泡", L"Tooltips"},
-        {L"窗口菜单", L"Window menu"},
         {L"快捷方式", L"Shortcut"},
         {L"图标外观", L"Icon appearance"},
         {L"自动隐藏/覆盖", L"Auto-hide/overlay"},
