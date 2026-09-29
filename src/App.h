@@ -101,6 +101,8 @@ private:
     void RemoveApplication(size_t index);
     void LaunchApplication(size_t index);
     void RefreshRunningApplications();
+    void BeginShellPopupPlacement(bool search, float physicalX, float physicalY);
+    void UpdateShellPopupPlacement();
     void SaveConfiguration() const;
 
     // --- geometry ----------------------------------------------------------
@@ -349,6 +351,11 @@ private:
     int dragTargetIndex_ = -1;
     int dragVisualTargetIndex_ = -1;
     int menuIndex_ = -1;
+
+    bool shellPopupPlacementPending_ = false;
+    bool shellPopupSearch_ = false;
+    POINT shellPopupAnchorScreen_{};
+    std::chrono::steady_clock::time_point shellPopupPlacementStarted_{};
 
     bool externalDragActive_ = false;
     std::vector<std::wstring> externalDragPaths_;
