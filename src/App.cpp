@@ -1237,10 +1237,12 @@ void App::UpdateShellPopupPlacement()
         break;
     }
 
-    x = (std::clamp)(
-        x, screen.left, screen.right - popupWidth);
-    y = (std::clamp)(
-        y, screen.top, screen.bottom - popupHeight);
+    const LONG maxX = (std::max)(
+        screen.left, screen.right - popupWidth);
+    const LONG maxY = (std::max)(
+        screen.top, screen.bottom - popupHeight);
+    x = (std::clamp)(x, screen.left, maxX);
+    y = (std::clamp)(y, screen.top, maxY);
 
     SetWindowPos(
         search.best, nullptr,
