@@ -3609,7 +3609,19 @@ void App::HandleMenuCommand(UINT id)
     case kMenuLanguageChinese:
     case kMenuLanguageEnglish:
         config_.settings.englishLanguage = id == kMenuLanguageEnglish;
+        for (auto& item : items_)
+        {
+            if (item->kind == DockItemKind::StartButton)
+            {
+                item->name = UiText(L"开始");
+            }
+            else if (item->kind == DockItemKind::SearchButton)
+            {
+                item->name = UiText(L"搜索");
+            }
+        }
         SaveConfiguration();
+        needsRender_ = true;
         break;
 
     case kMenuAbout:
