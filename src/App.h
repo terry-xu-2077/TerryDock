@@ -352,6 +352,12 @@ private:
     int draggingIndex_ = -1;
     float dragStartX_ = 0.0f;
     float dragStartY_ = 0.0f;
+
+    /// Drag recognition is based on the physical screen pointer, never on the
+    /// animated icon/dock geometry. This prevents hover/bounce/repositioning
+    /// from turning a stationary click into a reorder drag.
+    POINT dragStartScreen_{};
+
     float dragGrabX_ = 0.0f;
     float dragGrabY_ = 0.0f;
     float dragLift_ = 0.0f;
