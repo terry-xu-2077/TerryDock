@@ -2461,15 +2461,16 @@ void App::PollProcesses()
     for (size_t i = 0; i < pinned.size() && i < running.size(); ++i)
     {
         DockItem& item = *pinned[i];
+        const bool isRunning = running[i] || !item.windows.empty();
 
-        if (running[i] && item.launching)
+        if (isRunning && item.launching)
         {
             item.launching = false;
         }
 
-        if (running[i] != item.running)
+        if (isRunning != item.running)
         {
-            item.running = running[i];
+            item.running = isRunning;
             needsRender_ = true;
         }
     }
