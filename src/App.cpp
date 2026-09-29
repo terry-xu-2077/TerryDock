@@ -3018,8 +3018,9 @@ void App::OnMouseMove(float x, float y)
     mousePhysicalX_ = x;
     mousePhysicalY_ = y;
 
+    const bool overWindowMenu = PointInWindowMenu(x, y);
     const int windowRow = WindowMenuRowAt(x, y);
-    if (windowRow >= 0)
+    if (overWindowMenu)
     {
         if (windowMenuHoveredRow_ != windowRow)
         {
