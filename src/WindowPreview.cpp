@@ -137,7 +137,7 @@ WindowPreview::~WindowPreview()
     Shutdown();
 }
 
-bool WindowPreview::Initialize(HINSTANCE instance)
+bool WindowPreview::Initialize(HINSTANCE instance, HWND owner)
 {
     if (hwnd_)
     {
@@ -145,6 +145,14 @@ bool WindowPreview::Initialize(HINSTANCE instance)
     }
 
     instance_ = instance;
+    owner_ = owner;
+
+    if (!d2dFactory_)
+    {
+        D2D1CreateFactory(
+            D2D1_FACTORY_TYPE_SINGLE_THREADED,
+            IID_PPV_ARGS(d2dFactory_.AddressOf()));
+    }
 
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
@@ -158,12 +166,12 @@ bool WindowPreview::Initialize(HINSTANCE instance)
     RegisterClassExW(&windowClass);
 
     hwnd_ = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kWindowPreviewClass,
         L"LightDock window preview",
         WS_POPUP,
         0, 0, 1, 1,
-        nullptr,
+        owner_,
         nullptr,
         instance_,
         this);
@@ -181,6 +189,9 @@ void WindowPreview::Shutdown()
         hwnd_ = nullptr;
     }
 
+    d2dTarget_.Reset();
+    d2dFactory_.Reset();
+    owner_ = nullptr;
     visible_ = false;
     entries_.clear();
 }
@@ -336,7 +347,8 @@ void WindowPreview::Show(const RECT& screenRect,
                          float cornerRadius,
                          float thumbnailScale)
 {
-    if (!hwnd_ && !Initialize(instance_ ? instance_ : GetModuleHandleW(nullptr)))
+    if (!hwnd_ && !Initialize(
+            instance_ ? instance_ : GetModuleHandleW(nullptr), owner_))
     {
         return;
     }
@@ -370,10 +382,10 @@ void WindowPreview::Show(const RECT& screenRect,
     thumbnailScale_ = ClampF(thumbnailScale, 0.6f, 1.4f);
 
     SetWindowPos(
-        hwnd_, HWND_TOPMOST,
+        hwnd_, HWND_TOP,
         screenRect.left, screenRect.top,
         width, height,
-        SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
     const int radius = ScalePx(
         cornerRadius_, dpiScale_ * menuScale_);
