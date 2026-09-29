@@ -235,7 +235,7 @@ private:
         HWND tabControl = nullptr;
         HWND pageViewport = nullptr;
         std::vector<ScrollChild> scrollChildren;
-        int pageContentBottom[5]{};
+        int pageContentBottom[4]{};
         int pageScrollPosition = 0;
         HWND spacingSlider = nullptr;
         HWND spacingLabel = nullptr;
@@ -262,15 +262,6 @@ private:
         HWND autoHideSpeedLabel = nullptr;
         HWND windowMenuDelaySlider = nullptr;
         HWND windowMenuDelayLabel = nullptr;
-
-        // Multi-window preview menu. Colours intentionally inherit the
-        // tooltip bubble palette; these controls only shape the menu.
-        HWND windowMenuScaleSlider = nullptr;
-        HWND windowMenuScaleLabel = nullptr;
-        HWND windowMenuCornerSlider = nullptr;
-        HWND windowMenuCornerLabel = nullptr;
-        HWND windowMenuThumbnailSlider = nullptr;
-        HWND windowMenuThumbnailLabel = nullptr;
 
         HWND dockCornerSlider = nullptr;
         HWND dockCornerLabel = nullptr;
