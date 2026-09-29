@@ -4330,6 +4330,7 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"背景栏", L"Dock background"},
         {L"图标", L"Icons"},
         {L"气泡", L"Tooltips"},
+        {L"窗口菜单", L"Window menu"},
         {L"关于", L"About"},
         {L"背景栏模式", L"Panel mode"},
         {L"固定宽度（进入时展开）", L"Fixed width (expand on hover)"},
@@ -4366,6 +4367,11 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"淡入淡出时长", L"Fade duration"},
         {L"气泡比例", L"Tooltip scale"},
         {L"气泡圆角", L"Tooltip corner radius"},
+        {L"窗口预览菜单", L"Window preview menu"},
+        {L"菜单比例", L"Menu scale"},
+        {L"菜单圆角", L"Menu corner radius"},
+        {L"缩略图比例", L"Thumbnail scale"},
+        {L"配色沿用名称气泡", L"Uses the name-tooltip palette"},
         {L"保存", L"Save"},
         {L"取消", L"Cancel"},
         {L"固定宽度（进入时展开）", L"Fixed width (expand on hover)"},
@@ -4393,6 +4399,7 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"背景栏", L"Dock background"},
         {L"图标", L"Icons"},
         {L"气泡", L"Tooltips"},
+        {L"窗口菜单", L"Window menu"},
         {L"快捷方式", L"Shortcut"},
         {L"图标外观", L"Icon appearance"},
         {L"自动隐藏/覆盖", L"Auto-hide/overlay"},
@@ -5283,6 +5290,9 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         kIdStrokeOpacity,
         kIdOverallScale,
         kIdWindowMenuDelay = 2700,
+        kIdWindowMenuScale,
+        kIdWindowMenuCorner,
+        kIdWindowMenuThumbnail,
 
         kIdSave = 241,
         kIdCancel,
@@ -5371,6 +5381,12 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         s.autoHideAnimationMs = sliderValue(settings_.autoHideSpeedSlider);
         s.windowMenuHoverDelayMs =
             sliderValue(settings_.windowMenuDelaySlider);
+        s.windowMenuScale = static_cast<float>(
+            sliderValue(settings_.windowMenuScaleSlider)) / 100.0f;
+        s.windowMenuCornerRadius = static_cast<float>(
+            sliderValue(settings_.windowMenuCornerSlider));
+        s.windowMenuThumbnailScale = static_cast<float>(
+            sliderValue(settings_.windowMenuThumbnailSlider)) / 100.0f;
         s.magnification =
             static_cast<float>(sliderValue(settings_.magnifySlider)) / 10.0f;
         s.cornerRadius = static_cast<float>(sliderValue(settings_.dockCornerSlider));
@@ -5491,6 +5507,18 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         swprintf(text, 48, L"%d ms",
                  sliderValue(settings_.windowMenuDelaySlider));
         SetWindowTextW(settings_.windowMenuDelayLabel, text);
+
+        swprintf(text, 48, L"%d%%",
+                 sliderValue(settings_.windowMenuScaleSlider));
+        SetWindowTextW(settings_.windowMenuScaleLabel, text);
+
+        swprintf(text, 48, L"%d px",
+                 sliderValue(settings_.windowMenuCornerSlider));
+        SetWindowTextW(settings_.windowMenuCornerLabel, text);
+
+        swprintf(text, 48, L"%d%%",
+                 sliderValue(settings_.windowMenuThumbnailSlider));
+        SetWindowTextW(settings_.windowMenuThumbnailLabel, text);
     };
 
     switch (message)
@@ -5826,6 +5854,35 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                 config_.settings.tooltipCornerRadius)));
         settings_.tooltipCornerLabel = makeLabel(L"", 306, 202, 60);
 
+        // --- multi-window preview menu --------------------------------------
+        HWND windowMenuHeader =
+            makeLabel(L"窗口预览菜单", 22, 54, 300, true);
+        HWND windowMenuPaletteNote =
+            makeLabel(L"配色沿用名称气泡", 22, 80, 220);
+        HWND windowMenuScaleCaption =
+            makeLabel(L"菜单比例", 22, 118, 120);
+        settings_.windowMenuScaleSlider = makeSlider(
+            kIdWindowMenuScale, 158, 114, 140, 75, 125,
+            static_cast<int>(std::lround(
+                config_.settings.windowMenuScale * 100.0f)));
+        settings_.windowMenuScaleLabel = makeLabel(L"", 306, 118, 60);
+
+        HWND windowMenuCornerCaption =
+            makeLabel(L"菜单圆角", 22, 154, 120);
+        settings_.windowMenuCornerSlider = makeSlider(
+            kIdWindowMenuCorner, 158, 150, 140, 0, 32,
+            static_cast<int>(std::lround(
+                config_.settings.windowMenuCornerRadius)));
+        settings_.windowMenuCornerLabel = makeLabel(L"", 306, 154, 60);
+
+        HWND windowMenuThumbnailCaption =
+            makeLabel(L"缩略图比例", 22, 190, 120);
+        settings_.windowMenuThumbnailSlider = makeSlider(
+            kIdWindowMenuThumbnail, 158, 186, 140, 60, 140,
+            static_cast<int>(std::lround(
+                config_.settings.windowMenuThumbnailScale * 100.0f)));
+        settings_.windowMenuThumbnailLabel = makeLabel(L"", 306, 190, 60);
+
         refreshLabels();
         syncBackgroundControls();
 
@@ -5851,6 +5908,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             TabCtrl_InsertItem(settings_.tabControl, 2, &tab);
             tab.pszText = const_cast<wchar_t*>(UiText(L"气泡"));
             TabCtrl_InsertItem(settings_.tabControl, 3, &tab);
+            tab.pszText = const_cast<wchar_t*>(UiText(L"窗口菜单"));
+            TabCtrl_InsertItem(settings_.tabControl, 4, &tab);
             TabCtrl_SetCurSel(settings_.tabControl, 0);
 
             // These controls are laid out in the behavior page's final
@@ -5902,6 +5961,19 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
             MarkDialogTabPage(settings_.tooltipScaleLabel, 3);
             MarkDialogTabPage(settings_.tooltipCornerSlider, 3);
             MarkDialogTabPage(settings_.tooltipCornerLabel, 3);
+
+            // Window-menu controls occupy their own fifth settings page.
+            MarkDialogTabPage(windowMenuHeader, 4);
+            MarkDialogTabPage(windowMenuPaletteNote, 4);
+            MarkDialogTabPage(windowMenuScaleCaption, 4);
+            MarkDialogTabPage(settings_.windowMenuScaleSlider, 4);
+            MarkDialogTabPage(settings_.windowMenuScaleLabel, 4);
+            MarkDialogTabPage(windowMenuCornerCaption, 4);
+            MarkDialogTabPage(settings_.windowMenuCornerSlider, 4);
+            MarkDialogTabPage(settings_.windowMenuCornerLabel, 4);
+            MarkDialogTabPage(windowMenuThumbnailCaption, 4);
+            MarkDialogTabPage(settings_.windowMenuThumbnailSlider, 4);
+            MarkDialogTabPage(settings_.windowMenuThumbnailLabel, 4);
 
             TagDialogChildrenContext tagContext{
                 hwnd, kIdSettingsTabs, kIdSave, kIdCancel,
@@ -6016,7 +6088,8 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                         static_cast<int>(childRect.bottom));
                 }
 
-                int pageTop[4] = {
+                int pageTop[5] = {
+                    std::numeric_limits<int>::max(),
                     std::numeric_limits<int>::max(),
                     std::numeric_limits<int>::max(),
                     std::numeric_limits<int>::max(),
@@ -6027,7 +6100,7 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                     pageTop[child.page] = std::min(pageTop[child.page],
                                                    child.y);
                 }
-                for (int page = 0; page < 4; ++page)
+                for (int page = 0; page < 5; ++page)
                 {
                     if (pageTop[page] == std::numeric_limits<int>::max())
                     {
@@ -6163,6 +6236,15 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
                 : defaults.windowMenuHoverDelayMs;
             setSlider(settings_.windowMenuDelaySlider,
                       defaultWindowMenuDelay);
+            setSlider(settings_.windowMenuScaleSlider,
+                      static_cast<int>(std::lround(
+                          defaults.windowMenuScale * 100.0f)));
+            setSlider(settings_.windowMenuCornerSlider,
+                      static_cast<int>(std::lround(
+                          defaults.windowMenuCornerRadius)));
+            setSlider(settings_.windowMenuThumbnailSlider,
+                      static_cast<int>(std::lround(
+                          defaults.windowMenuThumbnailScale * 100.0f)));
             setSlider(settings_.dockCornerSlider,
                       static_cast<int>(std::lround(defaults.cornerRadius)));
             setSlider(settings_.tooltipOpacitySlider,
@@ -6408,7 +6490,7 @@ void App::SetSettingsPageScroll(int position)
         return;
     }
 
-    const int page = std::clamp(TabCtrl_GetCurSel(settings_.tabControl), 0, 3);
+    const int page = std::clamp(TabCtrl_GetCurSel(settings_.tabControl), 0, 4);
     RECT client{};
     GetClientRect(settings_.pageViewport, &client);
     const int pageHeight = static_cast<int>(client.bottom - client.top);
