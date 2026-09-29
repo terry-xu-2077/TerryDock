@@ -2850,8 +2850,11 @@ void App::Render()
             // Compact horizontal cards. Each card frames the window title
             // above the live thumbnail; the application name is drawn once
             // beneath the whole strip inside the bubble body.
-            const float itemWidth = 125.0f * uiScale;
-            const float menuHeight = 132.0f * uiScale;
+            // Preview cards are 10% larger than the previous compact
+            // version so live content stays readable without changing the
+            // bubble visual language.
+            const float itemWidth = 137.5f * uiScale;
+            const float menuHeight = 139.0f * uiScale;
             const float tailLength = 8.0f * uiScale;
             const float tipGap = 7.0f * uiScale;
             const float margin = 8.0f * dpiScale_;
