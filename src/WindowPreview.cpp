@@ -487,16 +487,27 @@ LRESULT CALLBACK WindowPreview::WndProc(HWND hwnd, UINT message,
         const auto* create =
             reinterpret_cast<CREATESTRUCTW*>(lParam);
         self = static_cast<WindowPreview*>(
-            create->lpCreateParams);
+            create ? create->lpCreateParams : nullptr);
+
+        if (!self)
+        {
+            return FALSE;
+        }
+
+        // WM_NCCREATE arrives before CreateWindowExW returns, so the member
+        // HWND has not yet been assigned by Initialize(). Store it here before
+        // forwarding any messages. The previous code called
+        // DefWindowProcW(hwnd_ == nullptr, WM_NCCREATE, ...), which made
+        // creation fail and caused LightDock to exit immediately at startup.
+        self->hwnd_ = hwnd;
         SetWindowLongPtrW(
             hwnd, GWLP_USERDATA,
             reinterpret_cast<LONG_PTR>(self));
+        return TRUE;
     }
-    else
-    {
-        self = reinterpret_cast<WindowPreview*>(
-            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    }
+
+    self = reinterpret_cast<WindowPreview*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
     return self
         ? self->HandleMessage(message, wParam, lParam)
