@@ -2431,33 +2431,42 @@ void App::Tick(double dt)
     }
 
     if (tooltipIndex >= 0
-        && tooltipIndex < static_cast<int>(items_.size()))
+        && tooltipIndex < static_cast<int>(items_.size())
+        && !canExpandWindows)
     {
         tooltipItemId_ = items_[static_cast<size_t>(tooltipIndex)]->id;
     }
 
-    // A running app with at least one real top-level window uses the preview
-    // bubble as its tooltip. Do not show the ordinary name bubble first and
-    // then replace it a moment later.
+    // A previewable running app *is* the tooltip bubble. Kill the ordinary
+    // name bubble immediately so the two never overlap or cross-fade.
     const bool suppressTooltip =
         canExpandWindows
         || (windowMenuVisible_ && pointerOnWindowMenu);
-    const float tooltipTarget =
-        tooltipIndex >= 0 && !suppressTooltip ? 1.0f : 0.0f;
-    const float fadeSeconds = ClampF(
-        config_.settings.tooltipFadeSeconds, 0.05f, 1.0f);
-    const float tooltipStep = 1.0f - static_cast<float>(
-        std::exp(-dt / (static_cast<double>(fadeSeconds) * 0.35)));
-    tooltipPresence_ += (tooltipTarget - tooltipPresence_) * tooltipStep;
-    if (std::fabs(tooltipPresence_ - tooltipTarget) < 0.003f)
+
+    if (suppressTooltip)
     {
-        tooltipPresence_ = tooltipTarget;
+        tooltipPresence_ = 0.0f;
+        tooltipOpacity_ = 0.0f;
     }
-    tooltipOpacity_ = ClampF(config_.settings.tooltipOpacity, 0.0f, 1.0f)
-        * tooltipPresence_;
-    if (tooltipPresence_ != tooltipTarget)
+    else
     {
-        moving = true;
+        const float tooltipTarget = tooltipIndex >= 0 ? 1.0f : 0.0f;
+        const float fadeSeconds = ClampF(
+            config_.settings.tooltipFadeSeconds, 0.05f, 1.0f);
+        const float tooltipStep = 1.0f - static_cast<float>(
+            std::exp(-dt / (static_cast<double>(fadeSeconds) * 0.35)));
+        tooltipPresence_ += (tooltipTarget - tooltipPresence_) * tooltipStep;
+        if (std::fabs(tooltipPresence_ - tooltipTarget) < 0.003f)
+        {
+            tooltipPresence_ = tooltipTarget;
+        }
+        tooltipOpacity_ =
+            ClampF(config_.settings.tooltipOpacity, 0.0f, 1.0f)
+            * tooltipPresence_;
+        if (tooltipPresence_ != tooltipTarget)
+        {
+            moving = true;
+        }
     }
 
     SpringParams fullscreenSpring = kFullscreenSlideSpring;
@@ -2996,7 +3005,8 @@ void App::Render()
 
     // The label is rendered in the same layered surface as the dock, so it
     // follows the icon's animated centre and size without a separate window.
-    if (tooltipOpacity_ > 0.003f && !tooltipItemId_.empty())
+    if (!windowMenuVisible_
+        && tooltipOpacity_ > 0.003f && !tooltipItemId_.empty())
     {
         const auto tooltipItem = std::find_if(
             items_.begin(), items_.end(), [this](const auto& item)
