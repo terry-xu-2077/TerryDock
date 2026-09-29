@@ -347,6 +347,7 @@ private:
     bool hideAnimationActive_ = false;
     Spring hideIndicatorVisibility_;
     bool fullscreenActive_ = false;
+    int fullscreenCandidateChecks_ = 0;
     std::chrono::steady_clock::time_point hideDeadline_{};
     bool autoHideHidePending_ = false;
     bool settingsWindowOpen_ = false;
