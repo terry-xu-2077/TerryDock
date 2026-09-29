@@ -118,6 +118,14 @@ DWORD WINAPI ActivateWindowWorker(void* parameter)
         }
     }
 
+    // AttachThreadInput temporarily shares input state with the target
+    // application. If that app happens to be busy during activation Windows
+    // can leave its wait/app-starting cursor visible under the pointer even
+    // though LightDock itself is responsive. Once the queues are detached,
+    // explicitly restore the normal arrow; the foreground app can still set
+    // its own cursor on the next real mouse move if appropriate.
+    SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+
     return 0;
 }
 
