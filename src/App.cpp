@@ -3040,14 +3040,27 @@ void App::Render()
     {
         const PlateStyle& own = item->plate;
 
-        const bool plateOn = own.enabled;
+        // Packaged/UWP applications already arrive from AppsFolder in the
+        // same visual form Windows uses for the taskbar. Giving a transient
+        // Shell icon another LightDock plate shrinks it to ~85% and creates
+        // the double-tile look (most visible on Photos). Draw those runtime
+        // icons directly at the full dock slot instead.
+        const bool shellRuntimeIcon =
+            item->kind == DockItemKind::RunningTransient
+            && !item->runtimeAppUserModelId.empty();
+        const bool plateOn = own.enabled && !shellRuntimeIcon;
 
         // How much of the plate the icon itself occupies. A zero stored
-        // ratio means "follow the global default".
-        const float iconFill = plateOn
-            ? ClampF(own.iconScale > 0.0f ? own.iconScale : backdrop.iconScale,
-                     0.4f, 1.5f)
-            : 1.0f;
+        // ratio means "follow the global default". Shell runtime icons are
+        // already presentation-ready, so they always use the full slot.
+        const float iconFill = shellRuntimeIcon
+            ? 1.0f
+            : plateOn
+                ? ClampF(
+                    own.iconScale > 0.0f
+                        ? own.iconScale : backdrop.iconScale,
+                    0.4f, 1.5f)
+                : 1.0f;
 
         // Clip against the plate, independent of the artwork's fill ratio.
         // The artwork itself stays unmasked so shrinking it does not shrink
