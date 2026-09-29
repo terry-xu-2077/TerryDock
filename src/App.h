@@ -22,7 +22,7 @@ namespace ld
 
 /// Wires configuration, icons, layout, animation and the window together and
 /// owns the message loop.
-class App : public DockWindow::Host
+class App : public DockWindow::Host, public WindowPreview::Host
 {
 public:
     App() = default;
@@ -46,6 +46,9 @@ public:
     void OnAnimationTimer() override;
     void OnDestroy() override;
     void OnCloseRequested() override;
+
+    // --- WindowPreview::Host -----------------------------------------------
+    void OnPreviewWindowActivated(int row) override;
 
 private:
     enum : UINT
