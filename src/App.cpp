@@ -3526,6 +3526,8 @@ void App::RefreshRunningApplications()
     struct Group
     {
         std::wstring path;
+        std::wstring appUserModelId;
+        std::wstring applicationName;
         std::vector<DockWindowEntry> windows;
     };
 
@@ -3540,10 +3542,13 @@ void App::RefreshRunningApplications()
 
         if (DockItem* pinned = pinnedForPath(window.path))
         {
-            if (pinned->runtimeApplicationName.empty())
+            if (!window.applicationName.empty())
             {
-                pinned->runtimeApplicationName =
-                    LocalizedApplicationNameFromWindow(window.hwnd);
+                pinned->runtimeApplicationName = window.applicationName;
+            }
+            if (!window.appUserModelId.empty())
+            {
+                pinned->runtimeAppUserModelId = window.appUserModelId;
             }
             pinned->windows.push_back(std::move(entry));
             continue;
@@ -3553,6 +3558,14 @@ void App::RefreshRunningApplications()
             groups.begin(), groups.end(),
             [&](const Group& candidate)
             {
+                if (!window.appUserModelId.empty()
+                    && !candidate.appUserModelId.empty())
+                {
+                    return EqualsIgnoreCase(
+                        candidate.appUserModelId,
+                        window.appUserModelId);
+                }
+
                 return EqualsIgnoreCase(candidate.path, window.path);
             });
 
@@ -3560,11 +3573,23 @@ void App::RefreshRunningApplications()
         {
             Group created;
             created.path = window.path;
+            created.appUserModelId = window.appUserModelId;
+            created.applicationName = window.applicationName;
             created.windows.push_back(std::move(entry));
             groups.push_back(std::move(created));
         }
         else
         {
+            if (group->applicationName.empty()
+                && !window.applicationName.empty())
+            {
+                group->applicationName = window.applicationName;
+            }
+            if (group->appUserModelId.empty()
+                && !window.appUserModelId.empty())
+            {
+                group->appUserModelId = window.appUserModelId;
+            }
             group->windows.push_back(std::move(entry));
         }
     }
@@ -3593,10 +3618,9 @@ void App::RefreshRunningApplications()
     bool geometryChanged = false;
     bool contentChanged = false;
 
-    // Preserve application order in the transient section. The windows
-    // inside each application remain in EnumWindows Z-order, so index 0 is
-    // the most recently front-most taskbar window and is the natural target
-    // for an ordinary single click.
+    // Preserve application order in the transient section. Packaged/UWP apps
+    // are matched by AUMID first because several of them can share
+    // ApplicationFrameHost.exe as the outer taskbar-window process.
     for (auto& item : previousTransient)
     {
         if (!item)
@@ -3610,7 +3634,22 @@ void App::RefreshRunningApplications()
         size_t match = groups.size();
         for (size_t i = 0; i < groups.size(); ++i)
         {
-            if (!matched[i] && EqualsIgnoreCase(itemPath, groups[i].path))
+            if (matched[i])
+            {
+                continue;
+            }
+
+            const bool aumidMatch =
+                !item->runtimeAppUserModelId.empty()
+                && !groups[i].appUserModelId.empty()
+                && EqualsIgnoreCase(
+                    item->runtimeAppUserModelId,
+                    groups[i].appUserModelId);
+
+            const bool pathMatch =
+                EqualsIgnoreCase(itemPath, groups[i].path);
+
+            if (aumidMatch || pathMatch)
             {
                 match = i;
                 break;
@@ -3624,16 +3663,40 @@ void App::RefreshRunningApplications()
         }
 
         matched[match] = true;
+        Group& group = groups[match];
+
+        const bool identityChanged =
+            !EqualsIgnoreCase(
+                item->runtimeAppUserModelId,
+                group.appUserModelId);
+
         item->running = true;
-        item->windows = groups[match].windows;
+        item->windows = group.windows;
         item->windowHandle = item->windows.empty()
             ? nullptr : item->windows.front().hwnd;
         item->windowTitle = item->windows.empty()
             ? std::wstring() : item->windows.front().title;
-        item->runtimeApplicationName = item->windows.empty()
-            ? std::wstring()
-            : LocalizedApplicationNameFromWindow(
-                item->windows.front().hwnd);
+        item->runtimeAppUserModelId = group.appUserModelId;
+        item->runtimeApplicationName = group.applicationName;
+
+        if (!group.applicationName.empty())
+        {
+            item->name = group.applicationName;
+        }
+
+        if (identityChanged && !group.appUserModelId.empty())
+        {
+            if (ComPtr<IWICBitmap> shellIcon =
+                    icons_.LoadShellApplicationIcon(
+                        group.appUserModelId, 256))
+            {
+                item->iconSource = std::move(shellIcon);
+                item->icon.Reset();
+                item->iconBitmapScale = 0.0f;
+                item->iconCornerFraction = -1.0f;
+            }
+        }
+
         contentChanged = true;
         nextTransient.push_back(std::move(item));
     }
@@ -3645,29 +3708,45 @@ void App::RefreshRunningApplications()
             continue;
         }
 
-        AppInfo info = icons_.Inspect(groups[i].path, 256);
+        Group& group = groups[i];
+        AppInfo info = icons_.Inspect(group.path, 256);
 
         auto item = std::make_unique<DockItem>();
         item->kind = DockItemKind::RunningTransient;
-        item->id = L"__running_" + MakeStableId(groups[i].path);
-        item->name = info.name.empty()
-            ? GetFileStem(groups[i].path) : info.name;
-        item->targetPath = groups[i].path;
+
+        const std::wstring identity = group.appUserModelId.empty()
+            ? group.path : group.appUserModelId;
+        item->id = L"__running_" + MakeStableId(identity);
+
+        item->name = !group.applicationName.empty()
+            ? group.applicationName
+            : (info.name.empty()
+                ? GetFileStem(group.path) : info.name);
+        item->targetPath = group.path;
         item->resolvedPath =
-            info.resolvedPath.empty() ? groups[i].path : info.resolvedPath;
+            info.resolvedPath.empty() ? group.path : info.resolvedPath;
         item->processName = info.processName.empty()
             ? GetFileName(item->resolvedPath) : info.processName;
-        item->iconSource = info.icon;
+
+        if (!group.appUserModelId.empty())
+        {
+            item->iconSource =
+                icons_.LoadShellApplicationIcon(
+                    group.appUserModelId, 256);
+        }
+        if (!item->iconSource)
+        {
+            item->iconSource = info.icon;
+        }
+
         item->running = true;
-        item->windows = groups[i].windows;
+        item->windows = group.windows;
         item->windowHandle = item->windows.empty()
             ? nullptr : item->windows.front().hwnd;
         item->windowTitle = item->windows.empty()
             ? std::wstring() : item->windows.front().title;
-        item->runtimeApplicationName = item->windows.empty()
-            ? std::wstring()
-            : LocalizedApplicationNameFromWindow(
-                item->windows.front().hwnd);
+        item->runtimeAppUserModelId = group.appUserModelId;
+        item->runtimeApplicationName = group.applicationName;
 
         if (item->iconSource)
         {
