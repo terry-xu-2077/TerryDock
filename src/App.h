@@ -417,6 +417,7 @@ private:
     int frameIntervalMs_ = 16;
 
     RECT lastWorkArea_{};
+    int lastVisibleTaskbarInset_ = -1;
 
     std::chrono::steady_clock::time_point lastFrame_;
     std::chrono::steady_clock::time_point lastPoll_;
