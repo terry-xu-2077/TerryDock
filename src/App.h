@@ -75,6 +75,16 @@ private:
         bool primary = false;
     };
 
+    /// One taskbar-style top-level window. Dynamic running items are keyed by
+    /// HWND rather than executable path so multiple Explorer/Chrome windows
+    /// remain distinct and clicking an icon can activate the exact window.
+    struct RunningWindowInfo
+    {
+        HWND hwnd = nullptr;
+        std::wstring path;
+        std::wstring title;
+    };
+
     enum
     {
         kIdleIntervalMs = 50,
@@ -124,6 +134,7 @@ private:
     void ShowTrayMenu();
     void HandleMenuCommand(UINT id);
     const wchar_t* UiText(const wchar_t* chinese) const;
+    std::vector<RunningWindowInfo> FindRunningTaskbarWindows() const;
     std::vector<std::wstring> FindRunningTaskbarApplications() const;
     void AddRunningApplication(size_t index);
     std::vector<std::wstring> PickApplicationFiles();
