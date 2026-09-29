@@ -1182,16 +1182,22 @@ void DockRenderer::DrawWindowMenu(
         }
 
         const float textLeft = rect.left + padX + 4.0f * dpiScale;
-        const D2D1_RECT_F textRect = D2D1::RectF(
-            textLeft, top,
-            rect.right - 12.0f * dpiScale, bottom);
+        const float textWidth =
+            (std::max)(1.0f, rect.right - 12.0f * dpiScale - textLeft);
 
-        rt_->DrawTextW(
-            titles[i].c_str(), static_cast<UINT32>(titles[i].size()),
-            format.Get(), textRect,
-            (i < minimized.size() && minimized[i])
-                ? mutedInk.Get() : ink.Get(),
-            D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        ComPtr<IDWriteTextLayout> textLayout;
+        if (SUCCEEDED(dwrite_->CreateTextLayout(
+                titles[i].c_str(), static_cast<UINT32>(titles[i].size()),
+                format.Get(), textWidth, rowHeight,
+                textLayout.AddressOf())))
+        {
+            rt_->DrawTextLayout(
+                D2D1::Point2F(textLeft, top),
+                textLayout.Get(),
+                (i < minimized.size() && minimized[i])
+                    ? mutedInk.Get() : ink.Get(),
+                D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
     }
 
     rt_->SetTransform(previous);
