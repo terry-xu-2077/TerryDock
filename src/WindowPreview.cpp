@@ -384,7 +384,7 @@ void WindowPreview::Show(const RECT& screenRect,
     const bool wasVisible = visible_;
     SetWindowPos(
         hwnd_,
-        wasVisible ? nullptr : HWND_TOP,
+        wasVisible ? nullptr : HWND_TOPMOST,
         screenRect.left, screenRect.top,
         width, height,
         SWP_NOACTIVATE | SWP_SHOWWINDOW
