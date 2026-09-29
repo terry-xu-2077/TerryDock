@@ -17,6 +17,67 @@ int ScalePx(float value, float scale)
     return static_cast<int>(std::lround(value * scale));
 }
 
+// MinGW-w64 has shipped dwmapi.h variants with an incorrect
+// DwmRegisterThumbnail second-parameter declaration (HWND* instead of HWND).
+// Resolve the thumbnail entry points dynamically so the code uses the real
+// Windows ABI and remains compatible with both MinGW and MSVC SDK headers.
+struct DwmThumbnailApi
+{
+    using RegisterFn = HRESULT (WINAPI*)(HWND, HWND, PHTHUMBNAIL);
+    using UnregisterFn = HRESULT (WINAPI*)(HTHUMBNAIL);
+    using QuerySizeFn = HRESULT (WINAPI*)(HTHUMBNAIL, PSIZE);
+    using UpdateFn = HRESULT (WINAPI*)(
+        HTHUMBNAIL, const DWM_THUMBNAIL_PROPERTIES*);
+
+    RegisterFn registerThumbnail = nullptr;
+    UnregisterFn unregisterThumbnail = nullptr;
+    QuerySizeFn queryThumbnailSourceSize = nullptr;
+    UpdateFn updateThumbnailProperties = nullptr;
+
+    bool Available() const
+    {
+        return registerThumbnail
+            && unregisterThumbnail
+            && queryThumbnailSourceSize
+            && updateThumbnailProperties;
+    }
+};
+
+DwmThumbnailApi& ThumbnailApi()
+{
+    static DwmThumbnailApi api = []()
+    {
+        DwmThumbnailApi loaded;
+        HMODULE module = GetModuleHandleW(L"dwmapi.dll");
+        if (!module)
+        {
+            module = LoadLibraryW(L"dwmapi.dll");
+        }
+
+        if (!module)
+        {
+            return loaded;
+        }
+
+        loaded.registerThumbnail =
+            reinterpret_cast<DwmThumbnailApi::RegisterFn>(
+                GetProcAddress(module, "DwmRegisterThumbnail"));
+        loaded.unregisterThumbnail =
+            reinterpret_cast<DwmThumbnailApi::UnregisterFn>(
+                GetProcAddress(module, "DwmUnregisterThumbnail"));
+        loaded.queryThumbnailSourceSize =
+            reinterpret_cast<DwmThumbnailApi::QuerySizeFn>(
+                GetProcAddress(module, "DwmQueryThumbnailSourceSize"));
+        loaded.updateThumbnailProperties =
+            reinterpret_cast<DwmThumbnailApi::UpdateFn>(
+                GetProcAddress(module, "DwmUpdateThumbnailProperties"));
+
+        return loaded;
+    }();
+
+    return api;
+}
+
 } // namespace
 
 WindowPreview::~WindowPreview()
@@ -78,7 +139,11 @@ void WindowPreview::ClearThumbnails()
     {
         if (thumbnail)
         {
-            DwmUnregisterThumbnail(thumbnail);
+            auto& api = ThumbnailApi();
+            if (api.unregisterThumbnail)
+            {
+                api.unregisterThumbnail(thumbnail);
+            }
         }
     }
 
@@ -100,8 +165,10 @@ void WindowPreview::RebuildThumbnails()
     {
         HTHUMBNAIL thumbnail = nullptr;
 
-        if (entry.hwnd && IsWindow(entry.hwnd)
-            && SUCCEEDED(DwmRegisterThumbnail(
+        auto& api = ThumbnailApi();
+        if (api.Available()
+            && entry.hwnd && IsWindow(entry.hwnd)
+            && SUCCEEDED(api.registerThumbnail(
                 hwnd_, entry.hwnd, &thumbnail)))
         {
             thumbnails_.push_back(thumbnail);
@@ -148,7 +215,9 @@ void WindowPreview::UpdateThumbnailRects()
         }
 
         SIZE source{};
-        if (FAILED(DwmQueryThumbnailSourceSize(thumbnail, &source))
+        auto& api = ThumbnailApi();
+        if (!api.queryThumbnailSourceSize
+            || FAILED(api.queryThumbnailSourceSize(thumbnail, &source))
             || source.cx <= 0 || source.cy <= 0)
         {
             continue;
@@ -184,7 +253,10 @@ void WindowPreview::UpdateThumbnailRects()
         properties.fVisible = TRUE;
         properties.fSourceClientAreaOnly = FALSE;
 
-        DwmUpdateThumbnailProperties(thumbnail, &properties);
+        if (api.updateThumbnailProperties)
+        {
+            api.updateThumbnailProperties(thumbnail, &properties);
+        }
     }
 }
 
