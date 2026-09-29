@@ -409,6 +409,8 @@ void WindowPreview::Show(const RECT& screenRect,
         || currentBounds.left != screenRect.left
         || currentBounds.top != screenRect.top;
 
+    const int previousHoveredRow = hoveredRow_;
+
     entries_ = entries;
     hoveredRow_ = hoveredRow;
     dpiScale_ = nextDpiScale;
@@ -493,11 +495,10 @@ void WindowPreview::Show(const RECT& screenRect,
     // Text, rounded frames and hover chrome are static window content. Repaint
     // only when that content actually changes; pure popup movement is handled
     // by the compositor and should not touch the client pixels at all.
-    const bool needsClientRepaint =
-        !wasVisible || contentChanged || hoverChanged
-        || layoutChanged || cornerChanged;
+    const bool needsFullClientRepaint =
+        !wasVisible || contentChanged || layoutChanged || cornerChanged;
 
-    if (needsClientRepaint)
+    if (needsFullClientRepaint)
     {
         InvalidateRect(hwnd_, nullptr, FALSE);
 
@@ -507,6 +508,10 @@ void WindowPreview::Show(const RECT& screenRect,
         {
             UpdateWindow(hwnd_);
         }
+    }
+    else if (hoverChanged)
+    {
+        InvalidateHoverTransition(previousHoveredRow, hoveredRow_);
     }
 }
 
@@ -526,6 +531,58 @@ void WindowPreview::Hide()
     hoveredRow_ = -1;
 }
 
+void WindowPreview::InvalidateHoverTransition(int oldRow, int newRow)
+{
+    if (!hwnd_ || entries_.empty())
+    {
+        return;
+    }
+
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    const float uiScale = dpiScale_ * menuScale_;
+    const int itemWidth =
+        width / static_cast<int>(entries_.size());
+    const int titleHeight = ScalePx(28.0f, uiScale);
+    const int titleBottomPad = ScalePx(5.0f, uiScale);
+
+    // Hover chrome now lives only around the preview area. Keep the title
+    // strip out of the invalid region so GDI text is never erased/repainted
+    // when the pointer moves between cards.
+    const int previewBottom = (std::max)(
+        0, height - titleHeight - titleBottomPad);
+
+    auto invalidateRow = [&](int row)
+    {
+        if (row < 0 || row >= static_cast<int>(entries_.size()))
+        {
+            return;
+        }
+
+        RECT area{
+            row * itemWidth,
+            0,
+            row + 1 == static_cast<int>(entries_.size())
+                ? width : (row + 1) * itemWidth,
+            previewBottom};
+
+        InvalidateRect(hwnd_, &area, FALSE);
+    };
+
+    invalidateRow(oldRow);
+    if (newRow != oldRow)
+    {
+        invalidateRow(newRow);
+    }
+}
+
 void WindowPreview::SetHoveredRow(int hoveredRow)
 {
     if (hoveredRow_ == hoveredRow)
@@ -533,10 +590,12 @@ void WindowPreview::SetHoveredRow(int hoveredRow)
         return;
     }
 
+    const int oldRow = hoveredRow_;
     hoveredRow_ = hoveredRow;
+
     if (hwnd_ && visible_)
     {
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        InvalidateHoverTransition(oldRow, hoveredRow_);
     }
 }
 
@@ -655,11 +714,15 @@ void WindowPreview::Paint()
 
                     if (static_cast<int>(i) == hoveredRow_)
                     {
+                        const float titleTop =
+                            static_cast<float>(client.bottom
+                                - ScalePx(28.0f, uiScale)
+                                - ScalePx(5.0f, uiScale));
                         const D2D1_RECT_F card = D2D1::RectF(
                             left + cardInset,
                             cardInset,
                             right - cardInset,
-                            static_cast<float>(client.bottom) - cardInset);
+                            (std::max)(cardInset, titleTop - cardInset));
                         d2dTarget_->FillRoundedRectangle(
                             D2D1::RoundedRect(
                                 card, hoverRadius, hoverRadius),
@@ -746,11 +809,14 @@ void WindowPreview::Paint()
             if (!antialiasedChrome
                 && static_cast<int>(i) == hoveredRow_)
             {
+                const int titleTop =
+                    height - titleHeight - titleBottomPad;
                 RECT cardRect{
                     left + ScalePx(3.0f, uiScale),
                     ScalePx(3.0f, uiScale),
                     right - ScalePx(3.0f, uiScale),
-                    height - ScalePx(3.0f, uiScale)};
+                    (std::max)(ScalePx(3.0f, uiScale),
+                               titleTop - ScalePx(3.0f, uiScale))};
 
                 HBRUSH hover = CreateSolidBrush(hoverColor);
                 HGDIOBJ previousBrush = SelectObject(dc, hover);
