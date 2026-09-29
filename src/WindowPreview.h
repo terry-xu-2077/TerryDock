@@ -19,6 +19,16 @@ namespace ld
 class WindowPreview
 {
 public:
+    class Host
+    {
+    public:
+        virtual ~Host() = default;
+
+        /// User clicked one of the preview cards. Row is the current entry
+        /// index shown by the preview popup.
+        virtual void OnPreviewWindowActivated(int row) = 0;
+    };
+
     struct Entry
     {
         HWND hwnd = nullptr;
@@ -33,7 +43,7 @@ public:
     WindowPreview(const WindowPreview&) = delete;
     WindowPreview& operator=(const WindowPreview&) = delete;
 
-    bool Initialize(HINSTANCE instance, HWND owner);
+    bool Initialize(HINSTANCE instance, HWND owner, Host* host);
     void Shutdown();
 
     void Show(const RECT& screenRect,
@@ -58,11 +68,13 @@ private:
     void RebuildThumbnails();
     void UpdateThumbnailRects();
     void InvalidateHoverTransition(int oldRow, int newRow);
+    int EntryAtPoint(int x, int y) const;
     void Paint();
 
     HINSTANCE instance_ = nullptr;
     HWND owner_ = nullptr;
     HWND hwnd_ = nullptr;
+    Host* host_ = nullptr;
 
     // Ordinary popup HWND is required by DWM thumbnails. Use a D2D DC target
     // only for our own card chrome so thumbnail frames/hover stay antialiased.
@@ -74,6 +86,7 @@ private:
     std::vector<HTHUMBNAIL> thumbnails_;
     std::vector<RECT> thumbnailRects_;
     int hoveredRow_ = -1;
+    int pressedRow_ = -1;
     float dpiScale_ = 1.0f;
     float menuScale_ = 1.0f;
     float cornerRadius_ = 10.0f;
