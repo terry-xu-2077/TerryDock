@@ -62,6 +62,12 @@ struct DockItem
     /// Current window title used by legacy/single-window transient state.
     std::wstring windowTitle;
 
+    /// Localized application display name reported by the Windows shell for
+    /// the current running window (for example "照片" instead of the executable
+    /// file description "Photos"). Runtime-only; never overwrites the user's
+    /// configured launcher name.
+    std::wstring runtimeApplicationName;
+
     /// Top-level windows currently owned by this application. Dock rendering
     /// stays one-icon-per-application; this list powers the hover window menu.
     std::vector<DockWindowEntry> windows;
