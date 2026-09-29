@@ -137,15 +137,17 @@ WindowPreview::~WindowPreview()
     Shutdown();
 }
 
-bool WindowPreview::Initialize(HINSTANCE instance, HWND owner)
+bool WindowPreview::Initialize(HINSTANCE instance, HWND owner, Host* host)
 {
     if (hwnd_)
     {
+        host_ = host;
         return true;
     }
 
     instance_ = instance;
     owner_ = owner;
+    host_ = host;
 
     if (!d2dFactory_)
     {
@@ -192,7 +194,10 @@ void WindowPreview::Shutdown()
     d2dTarget_.Reset();
     d2dFactory_.Reset();
     owner_ = nullptr;
+    host_ = nullptr;
     visible_ = false;
+    hoveredRow_ = -1;
+    pressedRow_ = -1;
     entries_.clear();
 }
 
@@ -527,6 +532,12 @@ void WindowPreview::Hide()
 
     visible_ = false;
     hoveredRow_ = -1;
+    pressedRow_ = -1;
+
+    if (GetCapture() == hwnd_)
+    {
+        ReleaseCapture();
+    }
 }
 
 void WindowPreview::InvalidateHoverTransition(int oldRow, int newRow)
@@ -636,6 +647,55 @@ void WindowPreview::SetHoveredRow(int hoveredRow)
     {
         InvalidateHoverTransition(oldRow, hoveredRow_);
     }
+}
+
+int WindowPreview::EntryAtPoint(int x, int y) const
+{
+    if (!hwnd_ || entries_.empty())
+    {
+        return -1;
+    }
+
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0
+        || x < 0 || x >= width || y < 0 || y >= height)
+    {
+        return -1;
+    }
+
+    const float uiScale = dpiScale_ * menuScale_;
+    const int topPad = ScalePx(7.0f, uiScale);
+    const int titleHeight = ScalePx(20.0f, uiScale);
+    const int titleGap = ScalePx(3.0f, uiScale);
+    const int previewHeight = ScalePx(85.0f, uiScale);
+    const int frameBottomPad = ScalePx(5.0f, uiScale);
+    const int appNameHeight = ScalePx(24.0f, uiScale);
+    const int appBottomPad = ScalePx(5.0f, uiScale);
+    const int previewTop = topPad + titleHeight + titleGap;
+    const int previewBottom = (std::min)(
+        height, previewTop + previewHeight);
+    const int frameBottom = (std::min)(
+        height - appNameHeight - appBottomPad,
+        previewBottom + frameBottomPad);
+
+    if (y < topPad || y > frameBottom)
+    {
+        return -1;
+    }
+
+    const int itemWidth =
+        width / static_cast<int>(entries_.size());
+    if (itemWidth <= 0)
+    {
+        return -1;
+    }
+
+    const int row = x / itemWidth;
+    return row >= 0 && row < static_cast<int>(entries_.size())
+        ? row : -1;
 }
 
 void WindowPreview::Paint()
@@ -1001,11 +1061,44 @@ LRESULT WindowPreview::HandleMessage(UINT message,
     switch (message)
     {
     case WM_NCHITTEST:
-        // The main layered Dock owns interaction for the menu bounds.
-        return HTTRANSPARENT;
+        // DWM thumbnails live in this dedicated popup, so the popup must own
+        // its clicks too. Hover remains non-activating via WM_MOUSEACTIVATE.
+        return HTCLIENT;
 
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
+
+    case WM_LBUTTONDOWN:
+    {
+        pressedRow_ = EntryAtPoint(
+            GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        if (pressedRow_ >= 0)
+        {
+            SetCapture(hwnd_);
+        }
+        return 0;
+    }
+
+    case WM_LBUTTONUP:
+    {
+        const int releasedRow = EntryAtPoint(
+            GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        const int pressedRow = pressedRow_;
+        pressedRow_ = -1;
+
+        if (GetCapture() == hwnd_)
+        {
+            ReleaseCapture();
+        }
+
+        if (pressedRow >= 0
+            && releasedRow == pressedRow
+            && host_)
+        {
+            host_->OnPreviewWindowActivated(pressedRow);
+        }
+        return 0;
+    }
 
     case WM_ERASEBKGND:
         return 1;
