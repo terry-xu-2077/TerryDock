@@ -56,6 +56,7 @@ private:
     void ClearThumbnails();
     void RebuildThumbnails();
     void UpdateThumbnailRects();
+    void InvalidateHoverTransition(int oldRow, int newRow);
     void Paint();
 
     HINSTANCE instance_ = nullptr;
