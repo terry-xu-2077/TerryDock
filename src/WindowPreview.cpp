@@ -381,11 +381,14 @@ void WindowPreview::Show(const RECT& screenRect,
     cornerRadius_ = ClampF(cornerRadius, 0.0f, 32.0f);
     thumbnailScale_ = ClampF(thumbnailScale, 0.6f, 1.4f);
 
+    const bool wasVisible = visible_;
     SetWindowPos(
-        hwnd_, HWND_TOP,
+        hwnd_,
+        wasVisible ? nullptr : HWND_TOP,
         screenRect.left, screenRect.top,
         width, height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SWP_NOACTIVATE | SWP_SHOWWINDOW
+            | (wasVisible ? SWP_NOZORDER : 0));
 
     const int radius = ScalePx(
         cornerRadius_, dpiScale_ * menuScale_);
