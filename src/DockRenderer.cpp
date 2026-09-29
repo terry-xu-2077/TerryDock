@@ -797,6 +797,21 @@ void DockRenderer::DrawIndicator(float x, float y, float diameter)
         indicatorBrush_.Get());
 }
 
+void DockRenderer::DrawDivider(float x, float top, float bottom)
+{
+    if (!rt_ || !indicatorBrush_ || bottom <= top)
+    {
+        return;
+    }
+
+    const float oldOpacity = indicatorBrush_->GetOpacity();
+    indicatorBrush_->SetOpacity(0.32f);
+    rt_->DrawLine(D2D1::Point2F(x, top),
+                  D2D1::Point2F(x, bottom),
+                  indicatorBrush_.Get(), 1.0f);
+    indicatorBrush_->SetOpacity(oldOpacity);
+}
+
 void DockRenderer::DrawIcon(ID2D1Bitmap* bitmap, const D2D1_RECT_F& destination)
 {
     if (!rt_ || !bitmap)
