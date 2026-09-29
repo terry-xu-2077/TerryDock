@@ -1356,7 +1356,7 @@ bool App::Initialize(HINSTANCE instance)
     // Thumbnail previews are an enhancement, not a startup dependency.
     // If the helper window cannot be created on a particular Windows/DWM
     // configuration, keep LightDock running and simply omit thumbnails.
-    windowPreview_.Initialize(instance, window_.Handle());
+    windowPreview_.Initialize(instance, window_.Handle(), this);
 
     DetectRefreshRate();
     RefreshMonitors();
@@ -4322,6 +4322,43 @@ void App::OnMouseMove(float x, float y)
     }
 
     WakeAnimation();
+}
+
+void App::OnPreviewWindowActivated(int row)
+{
+    if (row < 0 || windowMenuItemId_.empty())
+    {
+        return;
+    }
+
+    const auto item = std::find_if(
+        items_.begin(), items_.end(), [this](const auto& candidate)
+        {
+            return candidate->id == windowMenuItemId_;
+        });
+
+    if (item == items_.end()
+        || row >= static_cast<int>((*item)->windows.size()))
+    {
+        return;
+    }
+
+    const HWND target =
+        (*item)->windows[static_cast<size_t>(row)].hwnd;
+
+    // Close the menu state first so the preview popup cannot immediately
+    // reappear on the next render while the activation request is in flight.
+    windowMenuVisible_ = false;
+    windowMenuHoveredRow_ = -1;
+    windowMenuPressedRow_ = -1;
+    windowMenuLeaveElapsed_ = 0.0f;
+    windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
+    windowPreview_.Hide();
+
+    needsRender_ = true;
+    WakeAnimation();
+
+    AppLauncher::ActivateWindow(target);
 }
 
 void App::OnMouseButton(int button, bool down, float x, float y)
