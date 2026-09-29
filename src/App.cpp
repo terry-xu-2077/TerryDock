@@ -1744,15 +1744,122 @@ void App::Tick(double dt)
 
     int tooltipIndex = -1;
     // During an auto-hide reveal, the dock moves underneath a stationary
-    // pointer. A transient hit on an icon must not start a tooltip that will
-    // immediately fade when the moving dock clears the pointer. Wait until
-    // the reveal has settled, then evaluate the ordinary icon hover.
+    // pointer. A transient hit on an icon must not start a tooltip/menu that
+    // will immediately fade when the moving dock clears the pointer.
     const bool dockReadyForTooltip = !config_.settings.autoHide
         || (fullscreenVisibility_.target >= 0.999f
             && fullscreenVisibility_.value >= 0.98f);
-    if (draggingIndex_ < 0 && mouseActive_ && dockReadyForTooltip)
+    const bool pointerOnWindowMenu =
+        PointInWindowMenu(mousePhysicalX_, mousePhysicalY_);
+
+    if (draggingIndex_ < 0 && mouseActive_ && dockReadyForTooltip
+        && !pointerOnWindowMenu)
     {
         tooltipIndex = IndexAtPoint(mouseX_, mouseY_);
+    }
+
+    DockItem* hoveredItem = tooltipIndex >= 0
+        && tooltipIndex < static_cast<int>(items_.size())
+        ? items_[static_cast<size_t>(tooltipIndex)].get()
+        : nullptr;
+
+    const bool canExpandWindows =
+        hoveredItem && hoveredItem->windows.size() >= 2;
+
+    if (draggingIndex_ >= 0 || !dockReadyForTooltip)
+    {
+        windowMenuVisible_ = false;
+        windowMenuHoverElapsed_ = 0.0f;
+        windowMenuLeaveElapsed_ = 0.0f;
+        windowMenuHoveredRow_ = -1;
+        windowMenuPressedRow_ = -1;
+        windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
+    }
+    else if (canExpandWindows)
+    {
+        if (windowMenuItemId_ != hoveredItem->id)
+        {
+            windowMenuItemId_ = hoveredItem->id;
+            windowMenuHoverElapsed_ = 0.0f;
+            windowMenuLeaveElapsed_ = 0.0f;
+            windowMenuVisible_ = false;
+            windowMenuHoveredRow_ = -1;
+            windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
+        }
+        else if (!windowMenuVisible_)
+        {
+            windowMenuHoverElapsed_ += static_cast<float>(dt);
+        }
+
+        const float delaySeconds =
+            static_cast<float>(config_.settings.windowMenuHoverDelayMs)
+            / 1000.0f;
+
+        if (!windowMenuVisible_
+            && windowMenuHoverElapsed_ >= delaySeconds)
+        {
+            windowMenuVisible_ = true;
+            windowMenuLeaveElapsed_ = 0.0f;
+            needsRender_ = true;
+        }
+
+        windowMenuLeaveElapsed_ = 0.0f;
+
+        // Keep the frame clock alive while waiting for the hover threshold.
+        if (!windowMenuVisible_)
+        {
+            moving = true;
+        }
+    }
+    else if (windowMenuVisible_)
+    {
+        if (pointerOnWindowMenu)
+        {
+            windowMenuLeaveElapsed_ = 0.0f;
+        }
+        else
+        {
+            // Short grace period makes the icon-to-menu crossing forgiving
+            // without adding latency to the initial Windows-like hover delay.
+            constexpr float kWindowMenuLeaveDelay = 0.18f;
+            windowMenuLeaveElapsed_ += static_cast<float>(dt);
+            moving = true;
+
+            if (windowMenuLeaveElapsed_ >= kWindowMenuLeaveDelay)
+            {
+                windowMenuVisible_ = false;
+                windowMenuHoverElapsed_ = 0.0f;
+                windowMenuLeaveElapsed_ = 0.0f;
+                windowMenuHoveredRow_ = -1;
+                windowMenuPressedRow_ = -1;
+                windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
+                needsRender_ = true;
+            }
+        }
+    }
+    else
+    {
+        windowMenuHoverElapsed_ = 0.0f;
+        windowMenuLeaveElapsed_ = 0.0f;
+    }
+
+    // The represented app may have closed one of its windows during the
+    // delay. Never leave a stale menu alive.
+    if (windowMenuVisible_)
+    {
+        const auto menuItem = std::find_if(
+            items_.begin(), items_.end(), [this](const auto& item)
+            {
+                return item->id == windowMenuItemId_;
+            });
+
+        if (menuItem == items_.end() || (*menuItem)->windows.size() < 2)
+        {
+            windowMenuVisible_ = false;
+            windowMenuHoveredRow_ = -1;
+            windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
+            needsRender_ = true;
+        }
     }
 
     if (tooltipIndex >= 0
@@ -1761,7 +1868,11 @@ void App::Tick(double dt)
         tooltipItemId_ = items_[static_cast<size_t>(tooltipIndex)]->id;
     }
 
-    const float tooltipTarget = tooltipIndex >= 0 ? 1.0f : 0.0f;
+    const bool suppressTooltip = windowMenuVisible_
+        && (pointerOnWindowMenu
+            || (hoveredItem && hoveredItem->id == windowMenuItemId_));
+    const float tooltipTarget =
+        tooltipIndex >= 0 && !suppressTooltip ? 1.0f : 0.0f;
     const float fadeSeconds = ClampF(
         config_.settings.tooltipFadeSeconds, 0.05f, 1.0f);
     const float tooltipStep = 1.0f - static_cast<float>(
