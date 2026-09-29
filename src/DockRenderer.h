@@ -70,6 +70,7 @@ public:
     void SetPanelBackground(const D2D1_COLOR_F& top, const D2D1_COLOR_F& bottom,
                             bool custom);
     void DrawIndicator(float x, float y, float diameter);
+    void DrawDivider(float x, float top, float bottom);
     void DrawIcon(ID2D1Bitmap* bitmap, const D2D1_RECT_F& destination);
     bool PushRoundedClip(const D2D1_ROUNDED_RECT& clip);
     void PopClip();
