@@ -2976,16 +2976,27 @@ int App::IndexAtPoint(float x, float y) const
 
 bool App::PointInWindowMenu(float physicalX, float physicalY) const
 {
-    return windowMenuVisible_
-        && physicalX >= windowMenuBounds_.left
-        && physicalX <= windowMenuBounds_.right
-        && physicalY >= windowMenuBounds_.top
-        && physicalY <= windowMenuBounds_.bottom;
+    if (!windowMenuVisible_)
+    {
+        return false;
+    }
+
+    // Slightly inflate the interaction region so the 10 px visual gap
+    // between icon and menu is a safe hover corridor rather than a dead zone.
+    const float safe = 12.0f * dockScale_;
+    return physicalX >= windowMenuBounds_.left - safe
+        && physicalX <= windowMenuBounds_.right + safe
+        && physicalY >= windowMenuBounds_.top - safe
+        && physicalY <= windowMenuBounds_.bottom + safe;
 }
 
 int App::WindowMenuRowAt(float physicalX, float physicalY) const
 {
-    if (!PointInWindowMenu(physicalX, physicalY)
+    if (!windowMenuVisible_
+        || physicalX < windowMenuBounds_.left
+        || physicalX > windowMenuBounds_.right
+        || physicalY < windowMenuBounds_.top
+        || physicalY > windowMenuBounds_.bottom
         || windowMenuRowHeight_ <= 0.0f
         || windowMenuVisibleRows_ <= 0)
     {
