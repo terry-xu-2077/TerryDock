@@ -2356,7 +2356,6 @@ void App::Tick(double dt)
     if (draggingIndex_ >= 0 || !dockReadyForTooltip)
     {
         windowMenuVisible_ = false;
-        windowMenuHoverElapsed_ = 0.0f;
         windowMenuLeaveElapsed_ = 0.0f;
         windowMenuHoveredRow_ = -1;
         windowMenuPressedRow_ = -1;
@@ -2367,36 +2366,21 @@ void App::Tick(double dt)
         if (windowMenuItemId_ != hoveredItem->id)
         {
             windowMenuItemId_ = hoveredItem->id;
-            windowMenuHoverElapsed_ = 0.0f;
-            windowMenuLeaveElapsed_ = 0.0f;
-            windowMenuVisible_ = false;
             windowMenuHoveredRow_ = -1;
+            windowMenuPressedRow_ = -1;
             windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
         }
-        else if (!windowMenuVisible_)
-        {
-            windowMenuHoverElapsed_ += static_cast<float>(dt);
-        }
 
-        const float delaySeconds =
-            static_cast<float>(config_.settings.windowMenuHoverDelayMs)
-            / 1000.0f;
-
-        if (!windowMenuVisible_
-            && windowMenuHoverElapsed_ >= delaySeconds)
+        // Preview menu replaces the ordinary tooltip bubble, so it follows
+        // the same immediate hover semantics instead of maintaining its own
+        // Windows-taskbar-style delay setting.
+        if (!windowMenuVisible_)
         {
             windowMenuVisible_ = true;
-            windowMenuLeaveElapsed_ = 0.0f;
             needsRender_ = true;
         }
 
         windowMenuLeaveElapsed_ = 0.0f;
-
-        // Keep the frame clock alive while waiting for the hover threshold.
-        if (!windowMenuVisible_)
-        {
-            moving = true;
-        }
     }
     else if (windowMenuVisible_)
     {
@@ -2406,8 +2390,7 @@ void App::Tick(double dt)
         }
         else
         {
-            // Short grace period makes the icon-to-menu crossing forgiving
-            // without adding latency to the initial Windows-like hover delay.
+            // Keep only the small icon-to-bubble crossing grace period.
             constexpr float kWindowMenuLeaveDelay = 0.18f;
             windowMenuLeaveElapsed_ += static_cast<float>(dt);
             moving = true;
@@ -2415,7 +2398,6 @@ void App::Tick(double dt)
             if (windowMenuLeaveElapsed_ >= kWindowMenuLeaveDelay)
             {
                 windowMenuVisible_ = false;
-                windowMenuHoverElapsed_ = 0.0f;
                 windowMenuLeaveElapsed_ = 0.0f;
                 windowMenuHoveredRow_ = -1;
                 windowMenuPressedRow_ = -1;
@@ -2426,12 +2408,11 @@ void App::Tick(double dt)
     }
     else
     {
-        windowMenuHoverElapsed_ = 0.0f;
         windowMenuLeaveElapsed_ = 0.0f;
     }
 
-    // The represented app may have closed one of its windows during the
-    // delay. Never leave a stale menu alive.
+    // The represented app may have closed its last previewable window.
+    // Never leave a stale preview bubble alive.
     if (windowMenuVisible_)
     {
         const auto menuItem = std::find_if(
@@ -3856,7 +3837,6 @@ void App::OnMouseButton(int button, bool down, float x, float y)
         windowMenuVisible_ = false;
         windowPreview_.Hide();
         windowMenuHoveredRow_ = -1;
-        windowMenuHoverElapsed_ = 0.0f;
         windowMenuLeaveElapsed_ = 0.0f;
         windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
         needsRender_ = true;
