@@ -1681,10 +1681,6 @@ void App::Tick(double dt)
         if (firstPinned >= 0 && pinnedCount > 0)
         {
             target = firstPinned + beforePointer;
-            if (target > from)
-            {
-                --target;
-            }
             target = std::clamp(
                 target, firstPinned, firstPinned + pinnedCount - 1);
         }
@@ -1950,7 +1946,7 @@ void App::Render()
     if (firstTransient != items_.end() && firstTransient != items_.begin())
     {
         const DockItem& right = **firstTransient;
-        const DockItem& left = **std::prev(firstTransient);
+        const DockItem& left = **(firstTransient - 1);
         const float dividerX = (left.centerX + right.centerX) * 0.5f;
         const float inset = metrics_.paddingY * 0.7f;
         renderer_.DrawDivider(
@@ -2812,10 +2808,6 @@ void App::FinishIconDrag(float x, float y)
     }
 
     int target = firstPinned + beforeDrop;
-    if (target > from)
-    {
-        --target;
-    }
     target = std::clamp(target, firstPinned,
                         firstPinned + pinnedCount - 1);
 
