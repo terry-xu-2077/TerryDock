@@ -165,27 +165,6 @@ DockConfig Config::Load()
             v->AsInt(config.settings.windowMenuHoverDelayMs), 0, 1500);
     }
 
-    if (const json::Value* v = root.Find("windowMenuScale"))
-    {
-        config.settings.windowMenuScale = ClampF(
-            static_cast<float>(v->AsDouble(config.settings.windowMenuScale)),
-            0.75f, 1.25f);
-    }
-
-    if (const json::Value* v = root.Find("windowMenuCornerRadius"))
-    {
-        config.settings.windowMenuCornerRadius = ClampF(
-            static_cast<float>(v->AsDouble(
-                config.settings.windowMenuCornerRadius)), 0.0f, 32.0f);
-    }
-
-    if (const json::Value* v = root.Find("windowMenuThumbnailScale"))
-    {
-        config.settings.windowMenuThumbnailScale = ClampF(
-            static_cast<float>(v->AsDouble(
-                config.settings.windowMenuThumbnailScale)), 0.6f, 1.4f);
-    }
-
     if (const json::Value* background = root.Find("background"))
     {
         if (const json::Value* v = background->Find("opacity"))
@@ -457,16 +436,6 @@ bool Config::Save(const DockConfig& config)
                  config.settings.tooltipCornerRadius)));
     root.Set("windowMenuHoverDelayMs",
              json::Value(config.settings.windowMenuHoverDelayMs));
-    root.Set("windowMenuScale",
-             json::Value(static_cast<double>(
-                 config.settings.windowMenuScale)));
-    root.Set("windowMenuCornerRadius",
-             json::Value(static_cast<double>(
-                 config.settings.windowMenuCornerRadius)));
-    root.Set("windowMenuThumbnailScale",
-             json::Value(static_cast<double>(
-                 config.settings.windowMenuThumbnailScale)));
-
     json::Value background(json::Value::Type::Object);
     background.Set("opacity",
                    json::Value(static_cast<double>(config.settings.backgroundOpacity)));
