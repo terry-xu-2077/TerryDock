@@ -361,7 +361,9 @@ void WindowPreview::Show(const RECT& screenRect,
                          float opacity)
 {
     if (!hwnd_ && !Initialize(
-            instance_ ? instance_ : GetModuleHandleW(nullptr), owner_))
+            instance_ ? instance_ : GetModuleHandleW(nullptr),
+            owner_,
+            host_))
     {
         return;
     }
