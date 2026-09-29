@@ -2678,8 +2678,12 @@ void App::RefreshRunningApplications()
         RepositionWindow();
         WakeAnimation();
     }
-    else if (contentChanged)
+    else
     {
+        // Window titles, minimized state and the active window can all change
+        // without changing the number of dock icons. Refresh once after each
+        // 1 Hz window snapshot so an open hover stack never goes stale.
+        (void)contentChanged;
         needsRender_ = true;
     }
 }
