@@ -69,7 +69,10 @@ SurfaceMargins ComputeMargins(const LayoutMetrics& metrics, DockEdge edge)
     const float jumpRoom = 30.0f * metrics.dpiScale;
     const float shadowExtent = 26.0f * metrics.dpiScale;
     const bool verticalDock = edge == DockEdge::Left || edge == DockEdge::Right;
-    const float tooltipRoom = (verticalDock ? 500.0f : 48.0f)
+    // Horizontal docks also reserve enough transparent surface for the
+    // multi-window hover stack. The window itself remains click-through
+    // outside the visible dock/menu hit regions.
+    const float tooltipRoom = (verticalDock ? 520.0f : 520.0f)
         * metrics.dpiScale;
 
     SurfaceMargins margins;
