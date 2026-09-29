@@ -852,6 +852,75 @@ ComPtr<IWICBitmap> IconLoader::BitmapFromHBitmap(HBITMAP bitmap)
     return normalized;
 }
 
+ComPtr<IWICBitmap> IconLoader::LoadShellApplicationIcon(
+    const std::wstring& appUserModelId,
+    unsigned int size)
+{
+    if (!wic_ || appUserModelId.empty() || size == 0)
+    {
+        return {};
+    }
+
+    const std::wstring parsingName =
+        L"shell:AppsFolder\\" + appUserModelId;
+
+    ComPtr<IShellItem> shellItem;
+    if (FAILED(SHCreateItemFromParsingName(
+            parsingName.c_str(), nullptr,
+            IID_PPV_ARGS(shellItem.AddressOf())))
+        || !shellItem)
+    {
+        return {};
+    }
+
+    ComPtr<IShellItemImageFactory> factory;
+    if (FAILED(shellItem->QueryInterface(
+            IID_PPV_ARGS(factory.AddressOf())))
+        || !factory)
+    {
+        return {};
+    }
+
+    HBITMAP native = nullptr;
+    const SIZE request{
+        static_cast<LONG>(size),
+        static_cast<LONG>(size)};
+
+    const HRESULT hr = factory->GetImage(
+        request,
+        SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK | SIIGBF_ICONONLY,
+        &native);
+
+    if (FAILED(hr) || !native)
+    {
+        if (native)
+        {
+            DeleteObject(native);
+        }
+        return {};
+    }
+
+    ComPtr<IWICBitmap> bitmap = BitmapFromHBitmap(native);
+    DeleteObject(native);
+
+    if (!bitmap)
+    {
+        return {};
+    }
+
+    // AppsFolder already selects the shell/taskbar identity. Keep the same
+    // normalization rules as ordinary icons so the artwork fills the slot
+    // consistently with the rest of the dock.
+    bitmap = NormalizeContent(bitmap.Get(), size);
+
+    if (bitmap && IsCircularIcon(bitmap.Get()))
+    {
+        bitmap = NormalizeContent(bitmap.Get(), size, true);
+    }
+
+    return bitmap;
+}
+
 ComPtr<IWICBitmap> IconLoader::LoadFromCache(const std::wstring& file)
 {
     if (!wic_ || file.empty() || !FileExists(file))
