@@ -2836,6 +2836,56 @@ void App::OnMouseButton(int button, bool down, float x, float y)
         return;
     }
 
+    mousePhysicalX_ = x;
+    mousePhysicalY_ = y;
+
+    const int windowRow = WindowMenuRowAt(x, y);
+    if (button == 0 && down && windowRow >= 0)
+    {
+        windowMenuPressedRow_ = windowRow;
+        if (window_.Handle())
+        {
+            SetCapture(window_.Handle());
+        }
+        return;
+    }
+
+    if (button == 0 && !down && windowMenuPressedRow_ >= 0)
+    {
+        const int pressedRow = windowMenuPressedRow_;
+        windowMenuPressedRow_ = -1;
+
+        if (GetCapture() == window_.Handle())
+        {
+            ReleaseCapture();
+        }
+
+        if (windowRow == pressedRow)
+        {
+            auto item = std::find_if(
+                items_.begin(), items_.end(), [this](const auto& candidate)
+                {
+                    return candidate->id == windowMenuItemId_;
+                });
+
+            if (item != items_.end()
+                && pressedRow < static_cast<int>((*item)->windows.size()))
+            {
+                AppLauncher::ActivateWindow(
+                    (*item)->windows[static_cast<size_t>(pressedRow)].hwnd);
+            }
+        }
+
+        windowMenuVisible_ = false;
+        windowMenuHoveredRow_ = -1;
+        windowMenuHoverElapsed_ = 0.0f;
+        windowMenuLeaveElapsed_ = 0.0f;
+        windowMenuBounds_ = D2D1::RectF(0, 0, 0, 0);
+        needsRender_ = true;
+        WakeAnimation();
+        return;
+    }
+
     const D2D1_POINT_2F logical = dockTransform_.ToLogical(x, y);
     x = logical.x;
     y = logical.y;
