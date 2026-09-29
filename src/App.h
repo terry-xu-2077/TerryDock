@@ -260,9 +260,6 @@ private:
         HWND autoHideDelayLabel = nullptr;
         HWND autoHideSpeedSlider = nullptr;
         HWND autoHideSpeedLabel = nullptr;
-        HWND windowMenuDelaySlider = nullptr;
-        HWND windowMenuDelayLabel = nullptr;
-
         HWND dockCornerSlider = nullptr;
         HWND dockCornerLabel = nullptr;
 
@@ -369,7 +366,6 @@ private:
 
     /// Hover-expanded window menu for apps that own multiple top-level windows.
     std::wstring windowMenuItemId_;
-    float windowMenuHoverElapsed_ = 0.0f;
     float windowMenuLeaveElapsed_ = 0.0f;
     bool windowMenuVisible_ = false;
     int windowMenuHoveredRow_ = -1;
