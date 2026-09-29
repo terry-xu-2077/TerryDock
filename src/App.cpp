@@ -284,47 +284,34 @@ std::wstring PropertyStoreString(
     return result;
 }
 
-std::wstring ResolveIndirectShellString(const std::wstring& value)
+const PROPERTYKEY& RelaunchDisplayNameKey()
 {
-    if (value.empty())
-    {
-        return {};
-    }
-
-    wchar_t resolved[1024]{};
-    if (SUCCEEDED(SHLoadIndirectString(
-            value.c_str(), resolved, ARRAYSIZE(resolved), nullptr))
-        && resolved[0] != L'\0')
-    {
-        return resolved;
-    }
-
-    // Some Win32 property stores return a direct display name instead of an
-    // indirect @... resource reference.
-    return value.front() == L'@' ? std::wstring() : value;
-}
-
-std::wstring LocalizedApplicationNameFromWindow(HWND hwnd)
-{
-    if (!hwnd || !IsWindow(hwnd))
-    {
-        return {};
-    }
-
-    // AppUserModel property-set GUID. Keep the PROPERTYKEYs local instead of
-    // depending on propkey.h versions that differ across MinGW SDK releases.
-    static const PROPERTYKEY kRelaunchDisplayName =
+    static const PROPERTYKEY key =
     {
         {0x9F4C2855, 0x9F79, 0x4B39,
          {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}},
         4
     };
-    static const PROPERTYKEY kAppUserModelId =
+    return key;
+}
+
+const PROPERTYKEY& AppUserModelIdKey()
+{
+    static const PROPERTYKEY key =
     {
         {0x9F4C2855, 0x9F79, 0x4B39,
          {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}},
         5
     };
+    return key;
+}
+
+ComPtr<IPropertyStore> WindowPropertyStore(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+    {
+        return {};
+    }
 
     using GetStoreFn = HRESULT (WINAPI*)(HWND, REFIID, void**);
     static GetStoreFn getStore = []() -> GetStoreFn
@@ -349,26 +336,167 @@ std::wstring LocalizedApplicationNameFromWindow(HWND hwnd)
     ComPtr<IPropertyStore> store;
     if (FAILED(getStore(
             hwnd, IID_IPropertyStore,
-            reinterpret_cast<void**>(store.AddressOf())))
-        || !store)
+            reinterpret_cast<void**>(store.AddressOf()))))
     {
         return {};
     }
 
-    const std::wstring displayResource =
-        PropertyStoreString(store.Get(), kRelaunchDisplayName);
-    if (const std::wstring localized =
-            ResolveIndirectShellString(displayResource);
-        !localized.empty())
+    return store;
+}
+
+std::wstring ResolveIndirectShellString(const std::wstring& value)
+{
+    if (value.empty())
     {
-        return localized;
+        return {};
     }
 
-    // Packaged applications usually expose an AUMID even when the relaunch
-    // display-name property is absent. Resolve the corresponding AppsFolder
-    // shell item; SIGDN_NORMALDISPLAY follows the current Windows UI language.
-    const std::wstring appUserModelId =
-        PropertyStoreString(store.Get(), kAppUserModelId);
+    wchar_t resolved[1024]{};
+    if (SUCCEEDED(SHLoadIndirectString(
+            value.c_str(), resolved, ARRAYSIZE(resolved), nullptr))
+        && resolved[0] != L'\0')
+    {
+        return resolved;
+    }
+
+    // Some Win32 property stores return a direct display name instead of an
+    // indirect @... resource reference.
+    return value.front() == L'@' ? std::wstring() : value;
+}
+
+std::wstring ApplicationUserModelIdForProcess(DWORD processId)
+{
+    if (processId == 0)
+    {
+        return {};
+    }
+
+    using GetApplicationUserModelIdFn =
+        LONG (WINAPI*)(HANDLE, UINT32*, PWSTR);
+
+    static GetApplicationUserModelIdFn getApplicationUserModelId = []()
+        -> GetApplicationUserModelIdFn
+    {
+        HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        return kernel
+            ? reinterpret_cast<GetApplicationUserModelIdFn>(
+                GetProcAddress(kernel, "GetApplicationUserModelId"))
+            : nullptr;
+    }();
+
+    if (!getApplicationUserModelId)
+    {
+        return {};
+    }
+
+    HANDLE process = OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process)
+    {
+        return {};
+    }
+
+    UINT32 length = 0;
+    const LONG first =
+        getApplicationUserModelId(process, &length, nullptr);
+    if (first != ERROR_INSUFFICIENT_BUFFER || length <= 1)
+    {
+        CloseHandle(process);
+        return {};
+    }
+
+    std::wstring id(length, L'\0');
+    const LONG second =
+        getApplicationUserModelId(process, &length, id.data());
+    CloseHandle(process);
+
+    if (second != ERROR_SUCCESS || length <= 1)
+    {
+        return {};
+    }
+
+    if (!id.empty() && id.back() == L'\0')
+    {
+        id.pop_back();
+    }
+    return id;
+}
+
+std::wstring DirectWindowAppUserModelId(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+    {
+        return {};
+    }
+
+    if (ComPtr<IPropertyStore> store = WindowPropertyStore(hwnd))
+    {
+        const std::wstring id =
+            PropertyStoreString(store.Get(), AppUserModelIdKey());
+        if (!id.empty())
+        {
+            return id;
+        }
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    return ApplicationUserModelIdForProcess(processId);
+}
+
+struct ChildApplicationIdentitySearch
+{
+    DWORD hostProcessId = 0;
+    std::wstring appUserModelId;
+};
+
+BOOL CALLBACK FindChildApplicationIdentity(HWND hwnd, LPARAM parameter)
+{
+    auto* search =
+        reinterpret_cast<ChildApplicationIdentitySearch*>(parameter);
+    if (!search || !search->appUserModelId.empty())
+    {
+        return FALSE;
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+
+    // ApplicationFrameHost owns the outer frame; the real packaged app
+    // normally owns a descendant CoreWindow/XAML window with a different PID.
+    if (processId != 0 && processId != search->hostProcessId)
+    {
+        search->appUserModelId = DirectWindowAppUserModelId(hwnd);
+    }
+
+    return search->appUserModelId.empty() ? TRUE : FALSE;
+}
+
+std::wstring ApplicationUserModelIdFromWindow(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+    {
+        return {};
+    }
+
+    if (const std::wstring direct = DirectWindowAppUserModelId(hwnd);
+        !direct.empty())
+    {
+        return direct;
+    }
+
+    ChildApplicationIdentitySearch search;
+    GetWindowThreadProcessId(hwnd, &search.hostProcessId);
+    EnumChildWindows(
+        hwnd, FindChildApplicationIdentity,
+        reinterpret_cast<LPARAM>(&search));
+
+    return search.appUserModelId;
+}
+
+std::wstring LocalizedApplicationNameFromAumid(
+    const std::wstring& appUserModelId)
+{
     if (appUserModelId.empty())
     {
         return {};
@@ -396,6 +524,33 @@ std::wstring LocalizedApplicationNameFromWindow(HWND hwnd)
     std::wstring localized(name);
     CoTaskMemFree(name);
     return localized;
+}
+
+std::wstring LocalizedApplicationNameFromWindow(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+    {
+        return {};
+    }
+
+    // Win32 apps that explicitly set a taskbar display resource can be
+    // resolved without an AUMID.
+    if (ComPtr<IPropertyStore> store = WindowPropertyStore(hwnd))
+    {
+        const std::wstring displayResource =
+            PropertyStoreString(store.Get(), RelaunchDisplayNameKey());
+        if (const std::wstring localized =
+                ResolveIndirectShellString(displayResource);
+            !localized.empty())
+        {
+            return localized;
+        }
+    }
+
+    // Hosted/packaged apps need their real application identity, not the
+    // ApplicationFrameHost.exe file description.
+    return LocalizedApplicationNameFromAumid(
+        ApplicationUserModelIdFromWindow(hwnd));
 }
 
 bool IsWindowsShellUiWindow(HWND hwnd)
