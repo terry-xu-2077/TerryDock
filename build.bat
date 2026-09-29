@@ -32,6 +32,17 @@ if not exist "%GXX%" (
 
 set "PATH=%TOOLCHAIN_DIR%\bin;%PATH%"
 
+rem MinGW-w64 auto-links default-manifest.o. LightDock already embeds its own
+rem app.manifest (Common Controls v6 + PerMonitorV2 DPI), so having both
+rem resources produces: ".rsrc merge failure: multiple non-default manifests".
+rem Normalize the bundled toolchain here as well as in setup-toolchain.bat so
+rem existing installations are repaired automatically on the next build.
+for /r "%TOOLCHAIN_DIR%" %%F in (default-manifest.o) do (
+    if exist "%%~fF" (
+        ren "%%~fF" default-manifest.o.disabled >nul 2>nul
+    )
+)
+
 rem A stale cache from another generator/toolchain can make CMake configure
 rem successfully in an unexpected layout or fail before the real build.
 rem build_mingw belongs exclusively to this bundled MinGW build, so reset only
