@@ -508,6 +508,130 @@ void WindowPreview::Paint()
     }
     DeleteObject(background);
 
+    bool antialiasedChrome = false;
+    if (d2dFactory_)
+    {
+        if (!d2dTarget_)
+        {
+            const D2D1_RENDER_TARGET_PROPERTIES properties =
+                D2D1::RenderTargetProperties(
+                    D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                    D2D1::PixelFormat(
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        D2D1_ALPHA_MODE_IGNORE),
+                    0.0f, 0.0f,
+                    D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE);
+
+            d2dFactory_->CreateDCRenderTarget(
+                &properties, d2dTarget_.AddressOf());
+        }
+
+        if (d2dTarget_
+            && SUCCEEDED(d2dTarget_->BindDC(dc, &client)))
+        {
+            ComPtr<ID2D1SolidColorBrush> hoverBrush;
+            ComPtr<ID2D1SolidColorBrush> frameFillBrush;
+            ComPtr<ID2D1SolidColorBrush> frameBorderBrush;
+            ComPtr<ID2D1SolidColorBrush> activeBrush;
+
+            d2dTarget_->CreateSolidColorBrush(
+                D2D1::ColorF(0.886f, 0.922f, 0.957f, 1.0f),
+                hoverBrush.AddressOf());
+            d2dTarget_->CreateSolidColorBrush(
+                D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f),
+                frameFillBrush.AddressOf());
+            d2dTarget_->CreateSolidColorBrush(
+                D2D1::ColorF(0.72f, 0.78f, 0.84f, 1.0f),
+                frameBorderBrush.AddressOf());
+            d2dTarget_->CreateSolidColorBrush(
+                D2D1::ColorF(0.22f, 0.68f, 1.0f, 1.0f),
+                activeBrush.AddressOf());
+
+            if (hoverBrush && frameFillBrush
+                && frameBorderBrush && activeBrush)
+            {
+                d2dTarget_->BeginDraw();
+                d2dTarget_->SetAntialiasMode(
+                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+                const float width =
+                    static_cast<float>(client.right - client.left);
+                const float itemWidth = entries_.empty()
+                    ? width : width / static_cast<float>(entries_.size());
+                const float cardInset = 3.0f * uiScale;
+                const float hoverRadius = 8.0f * uiScale;
+                const float framePad = 4.0f * uiScale;
+                const float frameRadius = 9.0f * uiScale;
+                const float frameStroke =
+                    (std::max)(1.0f, 1.0f * dpiScale_);
+                const float activeRadiusF = 3.0f * uiScale;
+
+                for (size_t i = 0; i < entries_.size(); ++i)
+                {
+                    const float left =
+                        static_cast<float>(i) * itemWidth;
+                    const float right = (i + 1 == entries_.size())
+                        ? width : left + itemWidth;
+
+                    if (static_cast<int>(i) == hoveredRow_)
+                    {
+                        const D2D1_RECT_F card = D2D1::RectF(
+                            left + cardInset,
+                            cardInset,
+                            right - cardInset,
+                            static_cast<float>(client.bottom) - cardInset);
+                        d2dTarget_->FillRoundedRectangle(
+                            D2D1::RoundedRect(
+                                card, hoverRadius, hoverRadius),
+                            hoverBrush.Get());
+                    }
+
+                    if (i < thumbnailRects_.size())
+                    {
+                        const RECT& thumb = thumbnailRects_[i];
+                        if (thumb.right > thumb.left
+                            && thumb.bottom > thumb.top)
+                        {
+                            const D2D1_RECT_F frame = D2D1::RectF(
+                                static_cast<float>(thumb.left) - framePad,
+                                static_cast<float>(thumb.top) - framePad,
+                                static_cast<float>(thumb.right) + framePad,
+                                static_cast<float>(thumb.bottom) + framePad);
+
+                            d2dTarget_->FillRoundedRectangle(
+                                D2D1::RoundedRect(
+                                    frame, frameRadius, frameRadius),
+                                frameFillBrush.Get());
+                            d2dTarget_->DrawRoundedRectangle(
+                                D2D1::RoundedRect(
+                                    frame, frameRadius, frameRadius),
+                                frameBorderBrush.Get(),
+                                frameStroke);
+                        }
+                    }
+
+                    if (entries_[i].active)
+                    {
+                        const D2D1_POINT_2F center = D2D1::Point2F(
+                            left + 9.0f * uiScale,
+                            9.0f * uiScale);
+                        d2dTarget_->FillEllipse(
+                            D2D1::Ellipse(
+                                center, activeRadiusF, activeRadiusF),
+                            activeBrush.Get());
+                    }
+                }
+
+                const HRESULT endResult = d2dTarget_->EndDraw();
+                antialiasedChrome = SUCCEEDED(endResult);
+                if (endResult == static_cast<HRESULT>(0x8899000CL))
+                {
+                    d2dTarget_.Reset();
+                }
+            }
+        }
+    }
+
     if (!entries_.empty())
     {
         const int width = client.right - client.left;
@@ -539,7 +663,8 @@ void WindowPreview::Paint()
             const int right = (i + 1 == entries_.size())
                 ? width : left + itemWidth;
 
-            if (static_cast<int>(i) == hoveredRow_)
+            if (!antialiasedChrome
+                && static_cast<int>(i) == hoveredRow_)
             {
                 RECT cardRect{
                     left + ScalePx(3.0f, uiScale),
@@ -561,7 +686,7 @@ void WindowPreview::Paint()
                 DeleteObject(hover);
             }
 
-            if (entries_[i].active)
+            if (!antialiasedChrome && entries_[i].active)
             {
                 const int cx = left + outerPad;
                 const int cy = outerPad;
@@ -577,6 +702,38 @@ void WindowPreview::Paint()
                 SelectObject(dc, previousPen);
                 SelectObject(dc, previousBrush);
                 DeleteObject(dot);
+            }
+
+            if (!antialiasedChrome
+                && i < thumbnailRects_.size())
+            {
+                const RECT& thumbnail = thumbnailRects_[i];
+                if (thumbnail.right > thumbnail.left
+                    && thumbnail.bottom > thumbnail.top)
+                {
+                    const int pad = ScalePx(4.0f, uiScale);
+                    RECT frame{
+                        thumbnail.left - pad,
+                        thumbnail.top - pad,
+                        thumbnail.right + pad,
+                        thumbnail.bottom + pad};
+                    HBRUSH frameFill = CreateSolidBrush(RGB(255, 255, 255));
+                    HPEN framePen = CreatePen(
+                        PS_SOLID, 1, borderColor);
+                    HGDIOBJ previousBrush =
+                        SelectObject(dc, frameFill);
+                    HGDIOBJ previousPen =
+                        SelectObject(dc, framePen);
+                    const int frameRadius = ScalePx(9.0f, uiScale);
+                    RoundRect(dc,
+                              frame.left, frame.top,
+                              frame.right, frame.bottom,
+                              frameRadius * 2, frameRadius * 2);
+                    SelectObject(dc, previousPen);
+                    SelectObject(dc, previousBrush);
+                    DeleteObject(framePen);
+                    DeleteObject(frameFill);
+                }
             }
 
             SetTextColor(
