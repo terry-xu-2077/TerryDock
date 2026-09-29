@@ -265,6 +265,13 @@ bool IsWindowsShellUiWindow(HWND hwnd)
         || EqualsIgnoreCase(name, L"LockApp.exe");
 }
 
+bool IsWindowsShellUiForeground()
+{
+    HWND foreground = GetForegroundWindow();
+    HWND root = foreground ? GetAncestor(foreground, GA_ROOT) : nullptr;
+    return root && IsWindowsShellUiWindow(root);
+}
+
 bool IsWindows11OrLater()
 {
     using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
@@ -1671,8 +1678,10 @@ void App::UpdateDockWindowPosition()
     // the auto-hidden Windows taskbar too; treating that as permanent inset
     // made LightDock pop up floating above the taskbar instead of from the
     // physical screen edge.
+    const bool shellUiOpen =
+        shellPopupPlacementPending_ || IsWindowsShellUiForeground();
     const int visibleTaskbarInset =
-        config_.settings.autoHide && shellPopupPlacementPending_
+        config_.settings.autoHide && shellUiOpen
         ? VisibleTaskbarInset(monitorRect, config_.settings.dockEdge)
         : 0;
     lastVisibleTaskbarInset_ = visibleTaskbarInset;
@@ -3413,7 +3422,7 @@ void App::CheckPointer()
     const bool inside = HitTest(physicalX, physicalY);
 
     if (config_.settings.autoHide
-        && shellPopupPlacementPending_
+        && (shellPopupPlacementPending_ || IsWindowsShellUiForeground())
         && monitorIndex_ >= 0
         && monitorIndex_ < static_cast<int>(monitors_.size()))
     {
