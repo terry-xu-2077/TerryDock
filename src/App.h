@@ -130,6 +130,8 @@ private:
 
     // --- input -------------------------------------------------------------
     int IndexAtPoint(float x, float y) const;
+    int WindowMenuRowAt(float physicalX, float physicalY) const;
+    bool PointInWindowMenu(float physicalX, float physicalY) const;
     void ShowContextMenu(int index, float x, float y);
     void ShowTrayMenu();
     void HandleMenuCommand(UINT id);
@@ -255,6 +257,8 @@ private:
         HWND autoHideDelayLabel = nullptr;
         HWND autoHideSpeedSlider = nullptr;
         HWND autoHideSpeedLabel = nullptr;
+        HWND windowMenuDelaySlider = nullptr;
+        HWND windowMenuDelayLabel = nullptr;
         HWND dockCornerSlider = nullptr;
         HWND dockCornerLabel = nullptr;
 
@@ -331,6 +335,8 @@ private:
     bool mouseActive_ = false;
     float mouseX_ = 0.0f;
     float mouseY_ = 0.0f;
+    float mousePhysicalX_ = 0.0f;
+    float mousePhysicalY_ = 0.0f;
 
     int pressedIndex_ = -1;
     int draggingIndex_ = -1;
@@ -350,6 +356,17 @@ private:
     float tooltipPresence_ = 0.0f;
     std::wstring tooltipItemId_;
     float tooltipOpacity_ = 0.0f;
+
+    /// Hover-expanded window menu for apps that own multiple top-level windows.
+    std::wstring windowMenuItemId_;
+    float windowMenuHoverElapsed_ = 0.0f;
+    float windowMenuLeaveElapsed_ = 0.0f;
+    bool windowMenuVisible_ = false;
+    int windowMenuHoveredRow_ = -1;
+    int windowMenuPressedRow_ = -1;
+    int windowMenuVisibleRows_ = 0;
+    float windowMenuRowHeight_ = 0.0f;
+    D2D1_RECT_F windowMenuBounds_{};
 
     /// Width of the panel in macOS "expand once" mode, animated.
     Spring panelWidth_;
