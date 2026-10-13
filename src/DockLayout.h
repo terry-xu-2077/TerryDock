@@ -19,6 +19,10 @@ struct LayoutMetrics
     float iconSize = 64.0f;
     float spacing = 10.0f;
 
+    /// Extra breathing room at the boundary of pinned and transient apps.
+    /// It is added to the normal gap, not used in place of it.
+    float groupSpacing = 24.0f;
+
     float paddingX = 12.0f;
     float paddingY = 8.0f;
 
@@ -85,7 +89,8 @@ struct SurfaceMargins
 LayoutMetrics MakeMetrics(const DockSettings& settings, float dpiScale);
 
 DockGeometry ComputeGeometry(int itemCount, const LayoutMetrics& metrics,
-                             DockEdge edge = DockEdge::Bottom);
+                             DockEdge edge = DockEdge::Bottom,
+                             bool hasGroupDivider = false);
 
 SurfaceMargins ComputeMargins(const LayoutMetrics& metrics,
                               DockEdge edge = DockEdge::Bottom);

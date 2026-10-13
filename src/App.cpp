@@ -1872,8 +1872,18 @@ void App::RebuildMetrics()
 
 void App::UpdateSurfaceAndGeometry()
 {
+    // The separator owns real horizontal space, so the surface, shadow,
+    // panel and hit bounds all include it when transient apps exist.
+    const auto firstTransient = std::find_if(
+        items_.begin(), items_.end(),
+        [](const std::unique_ptr<DockItem>& item)
+        {
+            return item->kind == DockItemKind::RunningTransient;
+        });
+    const bool hasGroupDivider =
+        firstTransient != items_.end() && firstTransient != items_.begin();
     geometry_ = ComputeGeometry(static_cast<int>(items_.size()), metrics_,
-                                config_.settings.dockEdge);
+                                config_.settings.dockEdge, hasGroupDivider);
     dockTransform_ = DockTransform(config_.settings.dockEdge,
         static_cast<float>(geometry_.surfaceWidth),
         static_cast<float>(geometry_.surfaceHeight));
@@ -2970,7 +2980,9 @@ void App::Render()
     {
         const DockItem& right = **firstTransient;
         const DockItem& left = **(firstTransient - 1);
-        const float dividerX = (left.centerX + right.centerX) * 0.5f;
+        // Centre the line in the visible empty gap, even when the two
+        // neighbouring icons have different animated magnification.
+        const float dividerX = (left.x + left.size + right.x) * 0.5f;
         const float inset = metrics_.paddingY * 0.7f;
         renderer_.DrawDivider(
             dividerX,

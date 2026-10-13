@@ -43,6 +43,7 @@ LayoutMetrics MakeMetrics(const DockSettings& settings, float dpiScale)
 
     metrics.iconSize = static_cast<float>(settings.iconSize) * dpiScale;
     metrics.spacing = static_cast<float>(settings.iconSpacing) * dpiScale;
+    metrics.groupSpacing = 24.0f * dpiScale;
     metrics.cornerRadius = settings.cornerRadius * dpiScale;
     metrics.magnification = settings.panelMode == PanelMode::Static
         ? 1.0f
@@ -99,17 +100,20 @@ SurfaceMargins ComputeMargins(const LayoutMetrics& metrics, DockEdge edge)
 }
 
 DockGeometry ComputeGeometry(int itemCount, const LayoutMetrics& metrics,
-                             DockEdge edge)
+                             DockEdge edge, bool hasGroupDivider)
 {
     const int safeCount = (itemCount > 0) ? itemCount : 1;
     const float count = static_cast<float>(safeCount);
+    const float dividerSpace =
+        (hasGroupDivider && safeCount > 1) ? metrics.groupSpacing : 0.0f;
 
     const float baseRowWidth =
-        count * metrics.iconSize + (count - 1.0f) * metrics.spacing;
+        count * metrics.iconSize + (count - 1.0f) * metrics.spacing
+        + dividerSpace;
 
     const float maxRowWidth =
         count * metrics.iconSize * metrics.magnification
-        + (count - 1.0f) * metrics.spacing;
+        + (count - 1.0f) * metrics.spacing + dividerSpace;
 
     DockGeometry geometry;
     geometry.basePanelWidth = baseRowWidth + metrics.paddingX * 2.0f;
@@ -143,10 +147,11 @@ void RowInfluenceBounds(const DockGeometry& geometry,
                         float& coreRight,
                         float& fadeDistance)
 {
-    const size_t safeCount = (itemCount > 0) ? itemCount : 1;
-
-    const float baseRowWidth = static_cast<float>(safeCount) * metrics.iconSize
-        + static_cast<float>(safeCount - 1) * metrics.spacing;
+    (void)itemCount;
+    // Use the same row width as ComputeGeometry, including the group gap.
+    // Otherwise the pointer influence region drifts away from the icon row.
+    const float baseRowWidth =
+        geometry.basePanelWidth - metrics.paddingX * 2.0f;
     const float baseContentLeft =
         (static_cast<float>(geometry.surfaceWidth) - baseRowWidth) * 0.5f;
 
@@ -247,17 +252,27 @@ LayoutFrame ApplyLayout(std::vector<DockItem*>& items,
 
     const size_t count = items.size();
     const bool fixedPanel = panelWidth > 0.0f;
+    const bool hasGroupDivider = std::adjacent_find(
+        items.begin(), items.end(),
+        [](const DockItem* left, const DockItem* right)
+        {
+            return left->kind != DockItemKind::RunningTransient
+                && right->kind == DockItemKind::RunningTransient;
+        }) != items.end();
+    const float dividerSpace =
+        hasGroupDivider ? metrics.groupSpacing : 0.0f;
 
     const float baseRowWidth =
         static_cast<float>(count) * metrics.iconSize
-        + static_cast<float>(count - 1) * metrics.spacing;
+        + static_cast<float>(count - 1) * metrics.spacing + dividerSpace;
 
     float rowWidth = 0.0f;
     for (DockItem* item : items)
     {
         rowWidth += metrics.iconSize * item->scale;
     }
-    rowWidth += metrics.spacing * static_cast<float>(count - 1);
+    rowWidth += metrics.spacing * static_cast<float>(count - 1)
+        + dividerSpace;
 
     // The un-magnified row is centred in the window. Its centre is the one
     // fixed reference point that scale targets are measured against.
@@ -302,9 +317,19 @@ LayoutFrame ApplyLayout(std::vector<DockItem*>& items,
     }
 
     float cursor = rowLeft;
+    float baseDividerOffset = 0.0f;
     for (size_t i = 0; i < count; ++i)
     {
         DockItem* item = items[i];
+        if (i > 0
+            && items[i - 1]->kind != DockItemKind::RunningTransient
+            && item->kind == DockItemKind::RunningTransient)
+        {
+            // Reserve equal empty space on both sides of the divider.
+            cursor += metrics.groupSpacing;
+            baseDividerOffset += metrics.groupSpacing;
+        }
+
         const float size = metrics.iconSize * item->scale;
 
         item->size = size;
@@ -312,7 +337,7 @@ LayoutFrame ApplyLayout(std::vector<DockItem*>& items,
         item->centerX = cursor + size * 0.5f;
         item->baseCenterX =
             baseContentLeft + metrics.iconSize * 0.5f
-            + static_cast<float>(i) * cell;
+            + static_cast<float>(i) * cell + baseDividerOffset;
         item->baselineBottom = metrics.anchorIconsAtTop
             ? geometry.panelY + metrics.paddingY + size
             : geometry.iconBaselineBottom;

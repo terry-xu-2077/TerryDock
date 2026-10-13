@@ -424,9 +424,8 @@ void DockRenderer::EnsureBrushes()
             : D2D1::ColorF(0.92f, 0.94f, 0.99f, kIndicatorOpacity),
         indicatorBrush_.AddressOf());
 
-    // Panel outline: one uniform hairline around the whole panel. No gradient
-    // and no extra top highlight — every side gets exactly the same colour
-    // and the same 1px weight, matching the clean macOS look.
+    // Panel outline: one uniform one-device-pixel hairline around the
+    // whole panel. No extra top highlight or gradient.
     rt_->CreateSolidColorBrush(
         D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f),
         edgeBrush_.AddressOf());
@@ -667,13 +666,10 @@ void DockRenderer::DrawBackground(float panelX,
 
     if (edgeBrush_)
     {
-        // One uniform hairline, same colour and weight on every side.
+        // One physical pixel on the 96-DPI offscreen render target.
+        // Insets keep the entire outline inside the filled panel.
         edgeBrush_->SetOpacity(ClampF(borderOpacity, 0.0f, 1.0f));
-
-        // A two-device-pixel outline reads consistently on all four sides;
-        // the old 1px antialiased stroke made the top edge look stronger
-        // than the vertical and bottom edges on common DPI scales.
-        constexpr float borderWidth = 2.0f;
+        constexpr float borderWidth = 1.0f;
         const float inset = borderWidth * 0.5f;
         const D2D1_RECT_F stroke = D2D1::RectF(
             rect.left + inset,
@@ -805,9 +801,12 @@ void DockRenderer::DrawDivider(float x, float top, float bottom)
     }
 
     const float oldOpacity = indicatorBrush_->GetOpacity();
-    indicatorBrush_->SetOpacity(0.32f);
-    rt_->DrawLine(D2D1::Point2F(x, top),
-                  D2D1::Point2F(x, bottom),
+    indicatorBrush_->SetOpacity(0.50f);
+    // The DC render target uses physical pixels; centre a 1px stroke on
+    // a pixel to avoid an unintended two-column antialiased divider.
+    const float alignedX = std::floor(x) + 0.5f;
+    rt_->DrawLine(D2D1::Point2F(alignedX, top),
+                  D2D1::Point2F(alignedX, bottom),
                   indicatorBrush_.Get(), 1.0f);
     indicatorBrush_->SetOpacity(oldOpacity);
 }
