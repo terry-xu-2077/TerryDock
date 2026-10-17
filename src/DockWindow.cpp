@@ -1,5 +1,7 @@
 #include "DockWindow.h"
 
+#include <wtsapi32.h>
+
 namespace ld
 {
 
@@ -26,6 +28,7 @@ LRESULT CALLBACK HideIndicatorWndProc(HWND hwnd, UINT message,
 
 using FnSetProcessDpiAwarenessContext = BOOL(WINAPI*)(HANDLE);
 using FnGetDpiForWindow = UINT(WINAPI*)(HWND);
+using FnGetDpiForMonitor = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
 
 } // namespace
 
@@ -82,6 +85,35 @@ int DockWindow::QueryDpi(HWND hwnd)
     return 96;
 }
 
+int DockWindow::QueryMonitorDpi(HMONITOR monitor, HWND fallbackWindow)
+{
+    // GetDpiForWindow reports the old display until a window is actually
+    // moved. Query the selected monitor first when RDP switches topology.
+    static FnGetDpiForMonitor getMonitorDpi = []()
+        -> FnGetDpiForMonitor
+    {
+        HMODULE shcore = GetModuleHandleW(L"shcore.dll");
+        if (!shcore)
+        {
+            shcore = LoadLibraryW(L"shcore.dll");
+        }
+        return shcore
+            ? reinterpret_cast<FnGetDpiForMonitor>(
+                  GetProcAddress(shcore, "GetDpiForMonitor"))
+            : nullptr;
+    }();
+
+    UINT dpiX = 0;
+    UINT dpiY = 0;
+    if (monitor && getMonitorDpi
+        && SUCCEEDED(getMonitorDpi(monitor, 0, &dpiX, &dpiY))
+        && dpiX >= 96 && dpiX <= 960)
+    {
+        return static_cast<int>(dpiX);
+    }
+    return QueryDpi(fallbackWindow);
+}
+
 bool DockWindow::Create(HINSTANCE instance, Host* host)
 {
     host_ = host;
@@ -128,6 +160,11 @@ bool DockWindow::Create(HINSTANCE instance, Host* host)
         return false;
     }
 
+    // RDP reconnect/disconnect notifications complement the display-change
+    // message and the fallback polling in App. Registration may fail during
+    // session startup; periodic topology checks continue to work regardless.
+    sessionNotificationsRegistered_ =
+        WTSRegisterSessionNotification(hwnd_, NOTIFY_FOR_THIS_SESSION) != FALSE;
     dpi_ = QueryDpi(hwnd_);
 
     return true;
@@ -137,6 +174,12 @@ void DockWindow::Destroy()
 {
     RemoveTrayIcon();
     RemoveAppBarReservation();
+
+    if (sessionNotificationsRegistered_ && hwnd_)
+    {
+        WTSUnRegisterSessionNotification(hwnd_);
+        sessionNotificationsRegistered_ = false;
+    }
 
     if (hideIndicator_)
     {
@@ -680,6 +723,34 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         }
 
         break;
+
+    case WM_DISPLAYCHANGE:
+        if (host_)
+        {
+            host_->OnDisplayConfigurationChanged();
+        }
+        return 0;
+
+    case WM_WTSSESSION_CHANGE:
+        // RDP can replace the virtual monitor even when its pixel dimensions
+        // happen to match the local display. Also repair AppBar registration.
+        if (host_ && (wParam == WTS_REMOTE_CONNECT
+                      || wParam == WTS_REMOTE_DISCONNECT
+                      || wParam == WTS_CONSOLE_CONNECT
+                      || wParam == WTS_CONSOLE_DISCONNECT
+                      || wParam == WTS_SESSION_UNLOCK))
+        {
+            host_->OnDisplayConfigurationChanged();
+        }
+        return 0;
+
+    case WM_POWERBROADCAST:
+        if (host_ && (wParam == PBT_APMRESUMEAUTOMATIC
+                      || wParam == PBT_APMRESUMESUSPEND))
+        {
+            host_->OnDisplayConfigurationChanged();
+        }
+        return TRUE;
 
     case WM_DPICHANGED:
     {

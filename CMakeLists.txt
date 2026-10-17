@@ -148,6 +148,7 @@ target_link_libraries(LightDock PRIVATE
     comctl32
     comdlg32
     version
+    wtsapi32
 )
 
 # ---------------------------------------------------------------------------

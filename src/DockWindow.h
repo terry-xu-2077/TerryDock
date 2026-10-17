@@ -31,6 +31,7 @@ public:
         virtual void OnMouseMove(float x, float y) = 0;
         virtual void OnMouseButton(int button, bool down, float x, float y) = 0;
         virtual void OnDpiChanged(int dpi) = 0;
+        virtual void OnDisplayConfigurationChanged() = 0;
         virtual void OnAppBarChanged() = 0;
         virtual void OnCommand(UINT id) = 0;
         virtual void OnTrayNotify(LPARAM lParam) = 0;
@@ -55,6 +56,7 @@ public:
     static void EnablePerMonitorDpiAwareness();
 
     static int QueryDpi(HWND hwnd);
+    static int QueryMonitorDpi(HMONITOR monitor, HWND fallbackWindow);
 
     bool Create(HINSTANCE instance, Host* host);
     void Destroy();
@@ -114,6 +116,7 @@ private:
     bool trayAdded_ = false;
     bool appBarRegistered_ = false;
     bool appBarUpdating_ = false;
+    bool sessionNotificationsRegistered_ = false;
     int hideIndicatorWidth_ = 0;
     int hideIndicatorHeight_ = 0;
     HDC hideIndicatorDC_ = nullptr;

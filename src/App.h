@@ -34,6 +34,7 @@ public:
     void OnMouseMove(float x, float y) override;
     void OnMouseButton(int button, bool down, float x, float y) override;
     void OnDpiChanged(int dpi) override;
+    void OnDisplayConfigurationChanged() override;
     void OnAppBarChanged() override;
     void OnCommand(UINT id) override;
     void OnTrayNotify(LPARAM lParam) override;
@@ -128,7 +129,7 @@ private:
     void DetectRefreshRate();
 
     // --- monitor -----------------------------------------------------------
-    void RefreshMonitors();
+    bool RefreshMonitors();
     RECT CurrentWorkArea() const;
     void SelectMonitor(int index);
     void AppendMonitorMenu(HMENU menu);
@@ -434,6 +435,7 @@ private:
 
     RECT lastWorkArea_{};
     int lastVisibleTaskbarInset_ = -1;
+    bool displayResyncPending_ = false;
 
     std::chrono::steady_clock::time_point lastFrame_;
     std::chrono::steady_clock::time_point lastPoll_;

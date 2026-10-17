@@ -1289,7 +1289,8 @@ int App::Run(HINSTANCE instance)
             PollProcesses();
         }
 
-        if (now - lastDisplayCheck_ >= std::chrono::seconds(1))
+        if (displayResyncPending_
+            || now - lastDisplayCheck_ >= std::chrono::seconds(1))
         {
             lastDisplayCheck_ = now;
             CheckDisplayChange();
@@ -1360,6 +1361,13 @@ bool App::Initialize(HINSTANCE instance)
 
     DetectRefreshRate();
     RefreshMonitors();
+    if (monitorIndex_ >= 0
+        && monitorIndex_ < static_cast<int>(monitors_.size()))
+    {
+        window_.SetDpi(DockWindow::QueryMonitorDpi(
+            monitors_[static_cast<size_t>(monitorIndex_)].handle,
+            window_.Handle()));
+    }
     LoadItems();
     RebuildMetrics();
     PollProcesses();
@@ -2217,67 +2225,101 @@ void App::CheckFullscreen()
     }
 }
 
-void App::RefreshMonitors()
+bool App::RefreshMonitors()
 {
-    monitors_.clear();
-
-    EnumDisplayMonitors(
+    std::vector<MonitorTarget> refreshed;
+    const BOOL enumerated = EnumDisplayMonitors(
         nullptr,
         nullptr,
         [](HMONITOR monitor, HDC, LPRECT rect, LPARAM data) -> BOOL
         {
-            auto* self = reinterpret_cast<App*>(data);
+            auto* targets = reinterpret_cast<std::vector<MonitorTarget>*>(data);
 
             MONITORINFOEXW info{};
             info.cbSize = sizeof(info);
 
+            MonitorTarget target;
+            target.handle = monitor;
             if (GetMonitorInfoW(monitor, &info))
             {
-                MonitorTarget target;
-                target.handle = monitor;
                 target.device = info.szDevice;
                 target.rect = info.rcMonitor;
                 target.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
-
-                self->monitors_.push_back(std::move(target));
             }
             else if (rect)
             {
-                MonitorTarget target;
-                target.handle = monitor;
                 target.rect = *rect;
-                self->monitors_.push_back(std::move(target));
+            }
+            else
+            {
+                return TRUE;
             }
 
+            targets->push_back(std::move(target));
             return TRUE;
         },
-        reinterpret_cast<LPARAM>(this));
+        reinterpret_cast<LPARAM>(&refreshed));
 
-    // Keep pointing at the same display when possible.
-    monitorIndex_ = 0;
+    // Ignore an incomplete RDP/driver transition instead of discarding our
+    // last valid monitor information and jumping to a bogus (0, 0) position.
+    if (!enumerated || refreshed.empty())
+    {
+        return false;
+    }
 
+    // A temporary RDP monitor must never overwrite the user's saved display
+    // choice. Prefer it if present; otherwise fall back to the current primary
+    // monitor, and automatically return when that device reappears.
+    int selected = -1;
     if (!config_.settings.monitor.empty())
     {
-        for (size_t i = 0; i < monitors_.size(); ++i)
+        for (size_t i = 0; i < refreshed.size(); ++i)
         {
-            if (monitors_[i].device == config_.settings.monitor)
+            if (refreshed[i].device == config_.settings.monitor)
             {
-                monitorIndex_ = static_cast<int>(i);
+                selected = static_cast<int>(i);
                 break;
             }
         }
     }
-    else
+    if (selected < 0)
     {
-        for (size_t i = 0; i < monitors_.size(); ++i)
+        for (size_t i = 0; i < refreshed.size(); ++i)
         {
-            if (monitors_[i].primary)
+            if (refreshed[i].primary)
             {
-                monitorIndex_ = static_cast<int>(i);
+                selected = static_cast<int>(i);
                 break;
             }
         }
     }
+    if (selected < 0)
+    {
+        selected = 0;
+    }
+
+    // Even if the monitor count and work area match, RDP may have changed
+    // its device/handle, actual boundaries or which monitor is primary.
+    bool changed = monitorIndex_ != selected
+        || monitors_.size() != refreshed.size();
+    if (!changed)
+    {
+        for (size_t i = 0; i < refreshed.size(); ++i)
+        {
+            if (monitors_[i].handle != refreshed[i].handle
+                || monitors_[i].device != refreshed[i].device
+                || monitors_[i].primary != refreshed[i].primary
+                || !EqualRect(&monitors_[i].rect, &refreshed[i].rect))
+            {
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    monitors_ = std::move(refreshed);
+    monitorIndex_ = selected;
+    return changed;
 }
 
 RECT App::CurrentWorkArea() const
@@ -2317,8 +2359,9 @@ void App::SelectMonitor(int index)
     monitorIndex_ = index;
     config_.settings.monitor = monitors_[static_cast<size_t>(index)].device;
 
-    // The new display may run at a different DPI.
-    window_.SetDpi(DockWindow::QueryDpi(window_.Handle()));
+    // Query the destination display before moving the window there.
+    window_.SetDpi(DockWindow::QueryMonitorDpi(
+        monitors_[static_cast<size_t>(index)].handle, window_.Handle()));
     RebuildMetrics();
     WakeAnimation();
 
@@ -2363,20 +2406,42 @@ void App::AppendMonitorMenu(HMENU menu)
 
 void App::CheckDisplayChange()
 {
-    const int count = GetSystemMetrics(SM_CMONITORS);
-    if (count != static_cast<int>(monitors_.size()))
+    // Enumerate every time: the monitor count can remain unchanged across
+    // RDP connect/disconnect, while resolution, bounds or identity changes.
+    const bool topologyChanged = RefreshMonitors();
+    if (monitorIndex_ < 0
+        || monitorIndex_ >= static_cast<int>(monitors_.size()))
     {
-        RefreshMonitors();
-        RepositionWindow();
         return;
     }
 
     const RECT work = CurrentWorkArea();
+    const bool workChanged = !EqualRect(&work, &lastWorkArea_);
+    const int monitorDpi = DockWindow::QueryMonitorDpi(
+        monitors_[static_cast<size_t>(monitorIndex_)].handle,
+        window_.Handle());
+    const bool dpiChanged = monitorDpi != window_.GetDpi();
 
-    if (work.left != lastWorkArea_.left
-        || work.top != lastWorkArea_.top
-        || work.right != lastWorkArea_.right
-        || work.bottom != lastWorkArea_.bottom)
+    // WM_DISPLAYCHANGE and session notifications also mean Explorer may have
+    // forgotten the AppBar, even if screen geometry is unchanged.
+    const bool forceResync = displayResyncPending_;
+    displayResyncPending_ = false;
+
+    if (topologyChanged || dpiChanged || forceResync)
+    {
+        window_.RemoveAppBarReservation();
+        if (dpiChanged)
+        {
+            window_.SetDpi(monitorDpi);
+            RebuildMetrics();
+        }
+        else
+        {
+            RepositionWindow();
+        }
+        WakeAnimation();
+    }
+    else if (workChanged)
     {
         RepositionWindow();
     }
@@ -4602,6 +4667,15 @@ void App::FinishIconDrag(float x, float y)
     UpdateSurfaceAndGeometry();
 }
 
+void App::OnDisplayConfigurationChanged()
+{
+    // Defer monitor enumeration / AppBar changes until after the window
+    // message is dispatched. Polling will retry if Windows is still
+    // rebuilding its display topology during an RDP transition.
+    displayResyncPending_ = true;
+    WakeAnimation();
+}
+
 void App::OnDpiChanged(int dpi)
 {
     if (dpi <= 0)
@@ -4610,6 +4684,7 @@ void App::OnDpiChanged(int dpi)
     }
 
     window_.SetDpi(dpi);
+    displayResyncPending_ = true;
     RebuildMetrics();
     WakeAnimation();
 }
@@ -5830,6 +5905,15 @@ void App::RunModal(HWND window, const bool& closed)
             std::chrono::duration<double>(now - lastModalFrame).count(),
             0.05);
         lastModalFrame = now;
+
+        // Continue recovering from RDP/display transitions even while a
+        // settings or item-editor modal loop is open.
+        if (displayResyncPending_
+            || now - lastDisplayCheck_ >= std::chrono::seconds(1))
+        {
+            lastDisplayCheck_ = now;
+            CheckDisplayChange();
+        }
 
         if (animating_ || needsRender_)
         {
