@@ -1374,6 +1374,14 @@ bool App::Initialize(HINSTANCE instance)
 
     window_.AddTrayIcon(MakeTrayIcon(GetSystemMetrics(SM_CXSMICON)), L"LightDock");
 
+    // The previous release's updater terminated LightDock with taskkill /F.
+    // Give Explorer a brief moment to clean up old AppBars, then perform a
+    // single fresh ABM_REMOVE/ABM_NEW cycle, just like the working manual
+    // auto-hide toggle. This is a one-shot recovery, not a periodic redraw.
+    initialAppBarRecoveryPending_ = !config_.settings.autoHide;
+    initialAppBarRecoveryAt_ = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(1200);
+
     return true;
 }
 
@@ -2070,7 +2078,7 @@ void App::UpdateSurfaceAndGeometry()
     RepositionWindow();
 }
 
-void App::RepositionWindow()
+void App::RepositionWindow(bool forceAppBarPositionUpdate)
 {
     // The window is always sized from the geometry, never measured from the
     // current HWND rect: on first run the window is still 1x1 and measuring
@@ -2084,7 +2092,7 @@ void App::RepositionWindow()
     }
 
     const int gap = static_cast<int>(std::round(kBottomGap * dockScale_));
-    if (config_.settings.autoHide)
+    if (config_.settings.autoHide || exitRequested_)
     {
         window_.RemoveAppBarReservation();
     }
@@ -2095,7 +2103,8 @@ void App::RepositionWindow()
             std::round(geometry_.panelHeight)) + gap;
         window_.SetAppBarReservation(
             monitors_[static_cast<size_t>(monitorIndex_)].rect,
-            config_.settings.dockEdge, reservation);
+            config_.settings.dockEdge, reservation,
+            forceAppBarPositionUpdate);
     }
     UpdateDockWindowPosition();
 }
@@ -2306,7 +2315,13 @@ void App::UpdateDockWindowPosition()
 
 void App::OnAppBarChanged()
 {
-    RepositionWindow();
+    if (!exitRequested_)
+    {
+        // ABN_POSCHANGED explicitly requires ABM_QUERYPOS / ABM_SETPOS.
+        // An unchanged monitor/edge/thickness is NOT evidence that Explorer
+        // kept its prior AppBar allocation (especially across RDP).
+        RepositionWindow(true);
+    }
 }
 
 void App::SetFullscreenVisibilityTarget(float target)
@@ -2637,7 +2652,21 @@ void App::CheckDisplayChange()
     const bool forceResync = displayResyncPending_;
     displayResyncPending_ = false;
 
-    if (topologyChanged || dpiChanged || forceResync)
+    // A one-time startup repair is needed for users upgrading from builds
+    // whose update script force-killed the process before ABM_REMOVE.
+    // Fold it into the regular topology/DPI refresh: RDP might also switch
+    // scaling while the delayed repair is pending.
+    bool startupAppBarRecovery = false;
+    if (initialAppBarRecoveryPending_
+        && std::chrono::steady_clock::now() >= initialAppBarRecoveryAt_)
+    {
+        initialAppBarRecoveryPending_ = false;
+        startupAppBarRecovery = !config_.settings.autoHide
+            && !exitRequested_;
+    }
+
+    if (topologyChanged || dpiChanged || forceResync
+        || startupAppBarRecovery)
     {
         window_.RemoveAppBarReservation();
         if (dpiChanged)
@@ -2653,7 +2682,19 @@ void App::CheckDisplayChange()
     }
     else if (workChanged)
     {
-        RepositionWindow();
+        // Another AppBar or the Windows taskbar may have changed the work
+        // area while our cached reservation dimensions stayed the same.
+        RepositionWindow(true);
+    }
+    else if (!config_.settings.autoHide && !exitRequested_)
+    {
+        RECT approved{};
+        if (!window_.GetAppBarReservationBounds(approved))
+        {
+            // ABM_NEW/SETPOS can temporarily fail while Explorer restarts.
+            // Retry on the existing 1Hz monitor check, not each frame.
+            RepositionWindow();
+        }
     }
 }
 
@@ -5311,6 +5352,10 @@ void App::RequestExit()
     }
 
     exitRequested_ = true;
+    initialAppBarRecoveryPending_ = false;
+    // Return the reserved desktop strip before the exit animation; when
+    // rebuilding, Explorer must not keep an allocation owned by the old Dock.
+    window_.RemoveAppBarReservation();
     mouseActive_ = false;
     tooltipItemId_.clear();
     tooltipPresence_ = 0.0f;

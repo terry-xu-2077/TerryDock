@@ -122,7 +122,7 @@ private:
     // --- geometry ----------------------------------------------------------
     void RebuildMetrics();
     void UpdateSurfaceAndGeometry();
-    void RepositionWindow();
+    void RepositionWindow(bool forceAppBarPositionUpdate = false);
     void UpdateDockWindowPosition();
     void CheckFullscreen();
     void SetFullscreenVisibilityTarget(float target);
@@ -436,6 +436,10 @@ private:
 
     RECT lastWorkArea_{};
     int lastVisibleTaskbarInset_ = -1;
+    // Rebuild once after Windows Explorer has settled its work area. This
+    // also repairs stale reservations left by older force-killed versions.
+    bool initialAppBarRecoveryPending_ = false;
+    std::chrono::steady_clock::time_point initialAppBarRecoveryAt_{};
     bool displayResyncPending_ = false;
 
     std::chrono::steady_clock::time_point lastFrame_;

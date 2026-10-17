@@ -216,7 +216,8 @@ void DockWindow::Destroy()
 
 bool DockWindow::SetAppBarReservation(const RECT& monitorRect,
                                      DockEdge edge,
-                                     int thickness)
+                                     int thickness,
+                                     bool forcePositionUpdate)
 {
     if (!hwnd_ || monitorRect.right <= monitorRect.left
         || monitorRect.bottom <= monitorRect.top)
@@ -229,7 +230,7 @@ bool DockWindow::SetAppBarReservation(const RECT& monitorRect,
         : monitorRect.bottom - monitorRect.top;
     thickness = (std::clamp)(thickness, 1, maxThickness);
 
-    if (appBarRegistered_
+    if (appBarRegistered_ && !forcePositionUpdate
         && appBarHeight_ == thickness
         && appBarEdge_ == edge
         && appBarMonitor_.left == monitorRect.left
@@ -284,7 +285,9 @@ bool DockWindow::SetAppBarReservation(const RECT& monitorRect,
     if (!SHAppBarMessage(ABM_SETPOS, &data))
     {
         appBarUpdating_ = false;
-        appBarBounds_ = RECT{};
+        // A successful ABM_NEW without a valid ABM_SETPOS must not leave a
+        // registered, non-positioned bar consuming the desktop work area.
+        RemoveAppBarReservation();
         return false;
     }
     appBarUpdating_ = false;
@@ -811,6 +814,9 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_DESTROY:
+        // Keep the shell's work area correct even if someone destroys this
+        // HWND without going through DockWindow::Destroy first.
+        RemoveAppBarReservation();
         if (host_)
         {
             host_->OnDestroy();

@@ -72,7 +72,8 @@ public:
 
     bool SetAppBarReservation(const RECT& monitorRect,
                              DockEdge edge,
-                             int thickness);
+                             int thickness,
+                             bool forcePositionUpdate = false);
     /// The shell-approved bounds returned by ABM_SETPOS. rcWork can be stale
     /// after a remote desktop session changes the display configuration.
     bool GetAppBarReservationBounds(RECT& bounds) const;

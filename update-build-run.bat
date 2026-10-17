@@ -43,15 +43,36 @@ echo [1/4] Stopping running LightDock...
 tasklist /FI "IMAGENAME eq LightDock.exe" /NH 2>nul | find /I "LightDock.exe" >nul
 if errorlevel 1 (
     echo       LightDock is not running.
-) else (
-    taskkill /F /IM LightDock.exe >nul 2>nul
-    if errorlevel 1 (
-        echo [X] Could not stop the running LightDock.exe.
-        goto :fail
-    )
-    echo       Stopped.
-    timeout /t 1 /nobreak >nul
+    goto :dock_stopped
 )
+
+rem Request a normal WM_CLOSE before replacing the executable. Using /F
+rem immediately skips LightDock's ABM_REMOVE and can leave Explorer's
+rem reserved work area stuck after RDP sessions or display changes.
+taskkill /IM LightDock.exe >nul 2>nul
+set /a "DOCK_STOP_WAIT=0"
+
+:wait_for_dock
+tasklist /FI "IMAGENAME eq LightDock.exe" /NH 2>nul | find /I "LightDock.exe" >nul
+if errorlevel 1 goto :dock_stopped
+
+if %DOCK_STOP_WAIT% GEQ 10 goto :force_stop_dock
+set /a "DOCK_STOP_WAIT+=1" >nul
+timeout /t 1 /nobreak >nul
+goto :wait_for_dock
+
+:force_stop_dock
+echo [!] Normal shutdown timed out. Forcing LightDock to stop.
+taskkill /F /IM LightDock.exe >nul 2>nul
+if errorlevel 1 (
+    echo [X] Could not stop the running LightDock.exe.
+    goto :fail
+)
+rem Give Explorer a moment to discard any stale AppBar registration.
+timeout /t 2 /nobreak >nul
+
+:dock_stopped
+echo       Stopped.
 
 echo.
 echo [2/4] Pulling latest main branch...
