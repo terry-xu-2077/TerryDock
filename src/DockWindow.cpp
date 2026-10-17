@@ -284,13 +284,30 @@ bool DockWindow::SetAppBarReservation(const RECT& monitorRect,
     if (!SHAppBarMessage(ABM_SETPOS, &data))
     {
         appBarUpdating_ = false;
+        appBarBounds_ = RECT{};
         return false;
     }
     appBarUpdating_ = false;
 
+    // Windows can adjust the rectangle again in ABM_SETPOS. This is the
+    // actual approved AppBar slot, not the (potentially stale) work area.
     appBarMonitor_ = monitorRect;
+    appBarBounds_ = data.rc;
     appBarHeight_ = thickness;
     appBarEdge_ = edge;
+    return true;
+}
+
+bool DockWindow::GetAppBarReservationBounds(RECT& bounds) const
+{
+    if (!appBarRegistered_ || appBarHeight_ <= 0
+        || appBarBounds_.right <= appBarBounds_.left
+        || appBarBounds_.bottom <= appBarBounds_.top)
+    {
+        return false;
+    }
+
+    bounds = appBarBounds_;
     return true;
 }
 
@@ -311,6 +328,7 @@ void DockWindow::RemoveAppBarReservation()
     appBarHeight_ = 0;
     appBarEdge_ = DockEdge::Bottom;
     appBarMonitor_ = RECT{};
+    appBarBounds_ = RECT{};
 }
 
 void DockWindow::UpdateHideIndicator(bool visible, int x, int y,

@@ -73,6 +73,9 @@ public:
     bool SetAppBarReservation(const RECT& monitorRect,
                              DockEdge edge,
                              int thickness);
+    /// The shell-approved bounds returned by ABM_SETPOS. rcWork can be stale
+    /// after a remote desktop session changes the display configuration.
+    bool GetAppBarReservationBounds(RECT& bounds) const;
     void RemoveAppBarReservation();
     void UpdateHideIndicator(bool visible, int x, int y, int width, int height,
                              BYTE opacity, COLORREF color);
@@ -124,6 +127,7 @@ private:
     HGDIOBJ hideIndicatorOldBitmap_ = nullptr;
     void* hideIndicatorPixels_ = nullptr;
     RECT appBarMonitor_{};
+    RECT appBarBounds_{};
     int appBarHeight_ = 0;
     DockEdge appBarEdge_ = DockEdge::Bottom;
     int dpi_ = 96;

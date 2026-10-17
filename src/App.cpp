@@ -2122,12 +2122,93 @@ void App::UpdateDockWindowPosition()
         monitorRect = monitors_[static_cast<size_t>(monitorIndex_)].rect;
     }
 
+    const LONG monitorWidth = monitorRect.right - monitorRect.left;
+    const LONG monitorHeight = monitorRect.bottom - monitorRect.top;
+    if (monitorWidth <= 0 || monitorHeight <= 0)
+    {
+        return;
+    }
+
+    // A work-area rectangle is not necessarily trustworthy immediately
+    // after RDP connect/disconnect. It can temporarily reflect the old
+    // display or an invalid AppBar reservation (sometimes near the TOP
+    // even though the bottom edge was selected).
+    const bool validWork =
+        work.left >= monitorRect.left && work.top >= monitorRect.top
+        && work.right <= monitorRect.right
+        && work.bottom <= monitorRect.bottom
+        && work.right - work.left > monitorWidth / 2
+        && work.bottom - work.top > monitorHeight / 2;
+    RECT anchorRect = (!config_.settings.autoHide && validWork)
+        ? work : monitorRect;
+
+    if (!config_.settings.autoHide)
+    {
+        // The physical Dock panel occupies our AppBar reservation.
+        // Use the RECT that Explorer *approved* in ABM_SETPOS, not rcWork:
+        // rcWork may be stale during RDP transitions and incorrectly place
+        // a bottom Dock against the TOP of the remote desktop.
+        RECT approved{};
+        bool validAppBar = window_.GetAppBarReservationBounds(approved);
+        if (validAppBar)
+        {
+            const LONG midX = monitorRect.left + monitorWidth / 2;
+            const LONG midY = monitorRect.top + monitorHeight / 2;
+            validAppBar =
+                approved.left >= monitorRect.left
+                && approved.top >= monitorRect.top
+                && approved.right <= monitorRect.right
+                && approved.bottom <= monitorRect.bottom;
+            if (validAppBar)
+            {
+                switch (config_.settings.dockEdge)
+                {
+                case DockEdge::Bottom:
+                    validAppBar = approved.top >= midY;
+                    break;
+                case DockEdge::Top:
+                    validAppBar = approved.bottom <= midY;
+                    break;
+                case DockEdge::Left:
+                    validAppBar = approved.right <= midX;
+                    break;
+                case DockEdge::Right:
+                    validAppBar = approved.left >= midX;
+                    break;
+                }
+            }
+        }
+
+        const LONG reservation = static_cast<LONG>(
+            std::lround(geometry_.panelHeight + kBottomGap * dockScale_));
+        // If Explorer did not provide a usable reservation, fall back to a
+        // monitor-relative edge position. This is transient and does not
+        // alter the user's configured monitor or dock edge.
+        switch (config_.settings.dockEdge)
+        {
+        case DockEdge::Bottom:
+            anchorRect.bottom = validAppBar ? approved.top
+                : monitorRect.bottom - reservation;
+            break;
+        case DockEdge::Top:
+            anchorRect.top = validAppBar ? approved.bottom
+                : monitorRect.top + reservation;
+            break;
+        case DockEdge::Left:
+            anchorRect.left = validAppBar ? approved.right
+                : monitorRect.left + reservation;
+            break;
+        case DockEdge::Right:
+            anchorRect.right = validAppBar ? approved.left
+                : monitorRect.right - reservation;
+            break;
+        }
+    }
+
     // Overlay/auto-hide mode normally hugs the physical monitor edge. If
     // Explorer temporarily reveals its own taskbar (notably when Start/Search
     // opens), move LightDock just inside that visible taskbar instead of
     // letting two shell surfaces fight for the same topmost screen strip.
-    RECT anchorRect =
-        config_.settings.autoHide ? monitorRect : work;
 
     // Only yield to Explorer's revealed taskbar while LightDock itself
     // intentionally opened Start/Search. A normal edge reveal often wakes
