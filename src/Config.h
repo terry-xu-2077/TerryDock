@@ -56,6 +56,10 @@ struct AppEntry
     std::wstring arguments;
     std::wstring processName;
 
+    /// Persistent packaged-app identity, independent of the versioned EXE.
+    /// Empty for normal desktop executables/shortcuts.
+    std::wstring appUserModelId;
+
     /// Icon cache file name inside %APPDATA%\LightDock\icons.
     std::wstring iconFile;
 

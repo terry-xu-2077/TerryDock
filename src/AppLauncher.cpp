@@ -1,5 +1,7 @@
 #include "AppLauncher.h"
 
+#include <shobjidl.h>
+
 #include "Utils.h"
 
 #include <vector>
@@ -22,6 +24,179 @@ struct ActivationRequest
 {
     HWND target = nullptr;
 };
+
+size_t WindowsAppsPackageStart(const std::wstring& path)
+{
+    constexpr wchar_t kWindowsApps[] = L"\\WindowsApps\\";
+    constexpr size_t markerSize = ARRAYSIZE(kWindowsApps) - 1;
+    for (size_t i = 0; i + markerSize < path.size(); ++i)
+    {
+        if (_wcsnicmp(path.c_str() + i, kWindowsApps, markerSize) == 0)
+        {
+            return i + markerSize;
+        }
+    }
+    return std::wstring::npos;
+}
+
+std::wstring PackageFamilyFromExecutable(const std::wstring& path)
+{
+    // The folder directly beneath WindowsApps is the MSIX package full name.
+    // Let Windows convert that into a stable family name, without guessing
+    // publisher IDs or a manifest Application.Id.
+    const size_t packageStart = WindowsAppsPackageStart(path);
+    if (packageStart == std::wstring::npos)
+    {
+        return {};
+    }
+
+    const size_t packageEnd = path.find(L'\\', packageStart);
+    if (packageEnd == std::wstring::npos || packageEnd == packageStart)
+    {
+        return {};
+    }
+
+    using PackageFamilyFromFullNameFn = LONG (WINAPI*)(PCWSTR, UINT32*, PWSTR);
+    static const auto familyFromFullName = []() -> PackageFamilyFromFullNameFn
+    {
+        HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        return kernel
+            ? reinterpret_cast<PackageFamilyFromFullNameFn>(
+                  GetProcAddress(kernel, "PackageFamilyNameFromFullName"))
+            : nullptr;
+    }();
+    if (!familyFromFullName)
+    {
+        return {};
+    }
+
+    const std::wstring fullName =
+        path.substr(packageStart, packageEnd - packageStart);
+    UINT32 length = 0;
+    if (familyFromFullName(fullName.c_str(), &length, nullptr)
+            != ERROR_INSUFFICIENT_BUFFER || length <= 1)
+    {
+        return {};
+    }
+
+    std::wstring family(length, L'\0');
+    if (familyFromFullName(fullName.c_str(), &length, family.data())
+        != ERROR_SUCCESS)
+    {
+        return {};
+    }
+    family.resize(wcslen(family.c_str()));
+    return family;
+}
+
+bool IsIdFromPackageFamily(const std::wstring& family,
+                           const std::wstring& appUserModelId)
+{
+    return !family.empty()
+        && appUserModelId.size() > family.size() + 1
+        && appUserModelId[family.size()] == L'!'
+        && _wcsnicmp(appUserModelId.c_str(),
+                      family.c_str(), family.size()) == 0;
+}
+
+std::wstring ShellApplicationId(IShellItem* item)
+{
+    if (!item)
+    {
+        return {};
+    }
+
+    static const PROPERTYKEY appUserModelIdKey =
+    {
+        {0x9F4C2855, 0x9F79, 0x4B39,
+         {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}},
+        5
+    };
+    ComPtr<IShellItem2> item2;
+    if (SUCCEEDED(item->QueryInterface(IID_PPV_ARGS(item2.AddressOf()))))
+    {
+        PWSTR identity = nullptr;
+        if (SUCCEEDED(item2->GetString(appUserModelIdKey, &identity))
+            && identity)
+        {
+            const std::wstring result(identity);
+            CoTaskMemFree(identity);
+            if (result.find(L'!') != std::wstring::npos)
+            {
+                return result;
+            }
+        }
+        else if (identity)
+        {
+            CoTaskMemFree(identity);
+        }
+    }
+
+    // Some AppsFolder providers expose the AUMID only as their parsing name.
+    PWSTR parsingName = nullptr;
+    if (FAILED(item->GetDisplayName(
+            SIGDN_DESKTOPABSOLUTEPARSING, &parsingName)) || !parsingName)
+    {
+        return {};
+    }
+    const std::wstring name(parsingName);
+    CoTaskMemFree(parsingName);
+    const size_t slash = name.find_last_of(L"\\/");
+    const std::wstring candidate = slash == std::wstring::npos
+        ? name : name.substr(slash + 1);
+    return candidate.find(L'!') == std::wstring::npos
+        ? std::wstring() : candidate;
+}
+
+std::wstring FindRegisteredPackageAppId(const std::wstring& family)
+{
+    if (family.empty())
+    {
+        return {};
+    }
+
+    ComPtr<IShellItem> folder;
+    if (FAILED(SHCreateItemFromParsingName(
+            L"shell:AppsFolder", nullptr,
+            IID_PPV_ARGS(folder.AddressOf()))))
+    {
+        return {};
+    }
+
+    ComPtr<IEnumShellItems> enumerator;
+    if (FAILED(folder->BindToHandler(
+            nullptr, BHID_EnumItems, IID_PPV_ARGS(enumerator.AddressOf()))))
+    {
+        return {};
+    }
+
+    std::wstring matched;
+    for (;;)
+    {
+        ComPtr<IShellItem> item;
+        ULONG fetched = 0;
+        if (enumerator->Next(1, item.AddressOf(), &fetched) != S_OK
+            || fetched != 1)
+        {
+            break;
+        }
+
+        const std::wstring candidate = ShellApplicationId(item.Get());
+        if (!IsIdFromPackageFamily(family, candidate))
+        {
+            continue;
+        }
+
+        // A package may expose multiple applications. Do not silently choose
+        // the wrong one when repairing a pre-existing path-only Dock pin.
+        if (!matched.empty() && !EqualsIgnoreCase(matched, candidate))
+        {
+            return {};
+        }
+        matched = candidate;
+    }
+    return matched;
+}
 
 DWORD WINAPI ActivateWindowWorker(void* parameter)
 {
@@ -265,6 +440,48 @@ HWND AppLauncher::FindRunningWindow(const std::wstring& processName)
 bool AppLauncher::ActivateRunningWindow(const std::wstring& processName)
 {
     return ActivateWindow(FindRunningWindow(processName));
+}
+
+bool AppLauncher::IsPackagedApplicationPath(const std::wstring& path)
+{
+    // Avoid launching a protected WindowsApps executable directly even when
+    // package metadata is temporarily unavailable (update/uninstall race).
+    return WindowsAppsPackageStart(path) != std::wstring::npos;
+}
+
+bool AppLauncher::MatchesPackagedAppId(const std::wstring& path,
+                                       const std::wstring& appUserModelId)
+{
+    return IsIdFromPackageFamily(
+        PackageFamilyFromExecutable(path), appUserModelId);
+}
+
+std::wstring AppLauncher::ResolvePackagedAppId(const std::wstring& path)
+{
+    return FindRegisteredPackageAppId(PackageFamilyFromExecutable(path));
+}
+
+bool AppLauncher::LaunchPackagedApp(const std::wstring& appUserModelId,
+                                    const std::wstring& arguments)
+{
+    if (appUserModelId.empty())
+    {
+        return false;
+    }
+
+    ComPtr<IApplicationActivationManager> manager;
+    if (FAILED(CoCreateInstance(
+            CLSID_ApplicationActivationManager, nullptr,
+            CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(manager.AddressOf()))))
+    {
+        return false;
+    }
+
+    DWORD processId = 0;
+    return SUCCEEDED(manager->ActivateApplication(
+        appUserModelId.c_str(),
+        arguments.empty() ? nullptr : arguments.c_str(),
+        AO_NONE, &processId));
 }
 
 bool AppLauncher::Launch(const std::wstring& path, const std::wstring& arguments)

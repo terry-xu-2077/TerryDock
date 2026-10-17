@@ -85,6 +85,8 @@ target_include_directories(LightDock PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(LightDock PRIVATE
     UNICODE
     _UNICODE
+    WINVER=0x0A00
+    _WIN32_WINNT=0x0A00
     WIN32_LEAN_AND_MEAN
     NOMINMAX
     _CRT_SECURE_NO_WARNINGS

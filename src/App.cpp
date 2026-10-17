@@ -1422,6 +1422,7 @@ void App::LoadItems()
                     SystemDockGlyph::Search);
 
     const std::wstring cacheDirectory = GetIconCacheDir();
+    bool migratedPackagedPins = false;
 
     for (const AppEntry& entry : config_.apps)
     {
@@ -1434,6 +1435,7 @@ void App::LoadItems()
         item->resolvedPath = entry.resolvedPath;
         item->arguments = entry.arguments;
         item->processName = entry.processName;
+        item->appUserModelId = entry.appUserModelId;
         item->iconFile = entry.iconFile;
         item->plate = entry.plate;
 
@@ -1445,6 +1447,16 @@ void App::LoadItems()
         if (item->resolvedPath.empty())
         {
             item->resolvedPath = item->targetPath;
+        }
+
+        // Repair path-only pins created by earlier versions. The original
+        // icon/name/plate is kept; the saved AUMID survives MSIX updates.
+        if (item->appUserModelId.empty()
+            && AppLauncher::IsPackagedApplicationPath(item->resolvedPath))
+        {
+            item->appUserModelId =
+                AppLauncher::ResolvePackagedAppId(item->resolvedPath);
+            migratedPackagedPins |= !item->appUserModelId.empty();
         }
 
         // Icon cache first: never re-parse every executable on startup.
@@ -1469,6 +1481,10 @@ void App::LoadItems()
     }
 
     RebuildItemPointers();
+    if (migratedPackagedPins)
+    {
+        SaveConfiguration();
+    }
 }
 
 void App::RebuildItemPointers()
@@ -1502,6 +1518,7 @@ void App::SaveConfiguration() const
         entry.resolvedPath = item->resolvedPath;
         entry.arguments = item->arguments;
         entry.processName = item->processName;
+        entry.appUserModelId = item->appUserModelId;
         entry.iconFile = item->iconFile;
         entry.plate = item->plate;
 
@@ -1511,7 +1528,8 @@ void App::SaveConfiguration() const
     Config::Save(snapshot);
 }
 
-void App::AddApplication(const std::wstring& path)
+void App::AddApplication(const std::wstring& path,
+                         const std::wstring& appUserModelId)
 {
     if (path.empty())
     {
@@ -1519,19 +1537,69 @@ void App::AddApplication(const std::wstring& path)
     }
 
     const std::wstring id = MakeStableId(path);
-
-    for (const auto& item : items_)
-    {
-        if (item->kind == DockItemKind::Pinned && item->id == id)
-        {
-            return; // already pinned on the dock
-        }
-    }
-
     AppInfo info = icons_.Inspect(path, 256);
     if (info.resolvedPath.empty())
     {
         info.resolvedPath = path;
+    }
+
+    std::wstring packagedAppId;
+    if (AppLauncher::IsPackagedApplicationPath(info.resolvedPath))
+    {
+        // Pinning from the transient running section gives us the exact
+        // Windows identity, even if the package exposes multiple apps.
+        if (AppLauncher::MatchesPackagedAppId(
+                info.resolvedPath, appUserModelId))
+        {
+            packagedAppId = appUserModelId;
+        }
+
+        if (packagedAppId.empty())
+        {
+            for (const auto& existing : items_)
+            {
+                if (existing->kind == DockItemKind::RunningTransient
+                    && EqualsIgnoreCase(existing->resolvedPath,
+                                        info.resolvedPath)
+                    && AppLauncher::MatchesPackagedAppId(
+                        info.resolvedPath, existing->runtimeAppUserModelId))
+                {
+                    packagedAppId = existing->runtimeAppUserModelId;
+                    break;
+                }
+            }
+        }
+
+        if (packagedAppId.empty())
+        {
+            packagedAppId = AppLauncher::ResolvePackagedAppId(
+                info.resolvedPath);
+        }
+    }
+
+    for (const auto& existing : items_)
+    {
+        if (existing->kind != DockItemKind::Pinned)
+        {
+            continue;
+        }
+
+        const bool samePackageApp = !packagedAppId.empty()
+            && (EqualsIgnoreCase(
+                    existing->appUserModelId, packagedAppId)
+                || (existing->appUserModelId.empty()
+                    && AppLauncher::MatchesPackagedAppId(
+                        existing->resolvedPath, packagedAppId)));
+        if (samePackageApp && existing->appUserModelId.empty())
+        {
+            // Old versioned EXE path still identifies the same app.
+            existing->appUserModelId = packagedAppId;
+            SaveConfiguration();
+        }
+        if (existing->id == id || samePackageApp)
+        {
+            return; // already pinned; do not duplicate after MSIX updates
+        }
     }
 
     if (info.processName.empty())
@@ -1559,6 +1627,7 @@ void App::AddApplication(const std::wstring& path)
     item->resolvedPath = info.resolvedPath;
     item->arguments = info.arguments;
     item->processName = info.processName;
+    item->appUserModelId = packagedAppId;
 
     // Readable cache name so the icons directory can be browsed: the
     // executable's stem plus a short stable suffix, e.g.
@@ -1613,7 +1682,11 @@ void App::AddApplication(const std::wstring& path)
                     && (EqualsIgnoreCase(existing->resolvedPath,
                                          info.resolvedPath)
                         || EqualsIgnoreCase(existing->targetPath,
-                                            info.resolvedPath));
+                                            info.resolvedPath)
+                        || (!packagedAppId.empty()
+                            && EqualsIgnoreCase(
+                                existing->runtimeAppUserModelId,
+                                packagedAppId)));
             }),
         items_.end());
 
@@ -1687,8 +1760,23 @@ void App::LaunchApplication(size_t index)
             return;
         }
 
-        AppLauncher::Open(item.resolvedPath.empty()
-            ? item.targetPath : item.resolvedPath);
+        const std::wstring& path = item.resolvedPath.empty()
+            ? item.targetPath : item.resolvedPath;
+        if (AppLauncher::IsPackagedApplicationPath(path))
+        {
+            const std::wstring appId = AppLauncher::MatchesPackagedAppId(
+                path, item.runtimeAppUserModelId)
+                ? item.runtimeAppUserModelId
+                : AppLauncher::ResolvePackagedAppId(path);
+            if (!appId.empty())
+            {
+                AppLauncher::LaunchPackagedApp(appId, {});
+            }
+        }
+        else
+        {
+            AppLauncher::Open(path);
+        }
         return;
     }
 
@@ -1709,7 +1797,48 @@ void App::LaunchApplication(size_t index)
     item.bounceTimer = 0.0f;
     item.bounceSpring.Reset(0.0f);
 
-    AppLauncher::Launch(item.targetPath, item.arguments);
+    const std::wstring& launchPath = item.resolvedPath.empty()
+        ? item.targetPath : item.resolvedPath;
+    bool launched = false;
+    if (AppLauncher::IsPackagedApplicationPath(launchPath))
+    {
+        if (!AppLauncher::MatchesPackagedAppId(
+                launchPath, item.appUserModelId))
+        {
+            item.appUserModelId =
+                AppLauncher::ResolvePackagedAppId(launchPath);
+            if (!item.appUserModelId.empty())
+            {
+                SaveConfiguration();
+            }
+        }
+
+        if (!item.appUserModelId.empty())
+        {
+            launched = AppLauncher::LaunchPackagedApp(
+                item.appUserModelId, item.arguments);
+        }
+
+        if (!launched)
+        {
+            // Never attempt ShellExecute on an MSIX WindowsApps EXE: Windows
+            // denies access because app activation belongs to the package.
+            MessageBoxW(window_.Handle(),
+                UiText(L"无法启动该 Windows 打包应用。请确认应用仍已安装；"
+                       L"若此程序来自旧版本，可先运行应用，再从 Dock 重新固定。"),
+                L"LightDock", MB_OK | MB_ICONWARNING);
+        }
+    }
+    else
+    {
+        launched = AppLauncher::Launch(item.targetPath, item.arguments);
+    }
+
+    if (!launched)
+    {
+        item.launching = false;
+        item.bounceSpring.Reset(0.0f);
+    }
 
     WakeAnimation();
 }
@@ -3597,18 +3726,60 @@ void App::RefreshRunningApplications()
         }
     }
 
-    auto pinnedForPath = [&](const std::wstring& path) -> DockItem*
+    bool restoredPinnedIdentity = false;
+    auto pinnedForWindow = [&](const RunningWindowInfo& window) -> DockItem*
     {
-        const std::wstring id = MakeStableId(path);
+        // AUMID is the primary key for packaged apps: their EXE locations
+        // change after MSIX upgrades, whereas the package identity does not.
+        if (!window.appUserModelId.empty())
+        {
+            for (auto& item : items_)
+            {
+                if (item->kind == DockItemKind::Pinned
+                    && !item->appUserModelId.empty()
+                    && EqualsIgnoreCase(
+                        item->appUserModelId, window.appUserModelId))
+                {
+                    return item.get();
+                }
+            }
+        }
+
+        const std::wstring id = MakeStableId(window.path);
         for (auto& item : items_)
         {
-            if (item->kind == DockItemKind::Pinned
-                && (item->id == id
-                    || EqualsIgnoreCase(item->targetPath, path)
-                    || EqualsIgnoreCase(item->resolvedPath, path)))
+            if (item->kind != DockItemKind::Pinned)
             {
-                return item.get();
+                continue;
             }
+
+            const bool samePath = item->id == id
+                || EqualsIgnoreCase(item->targetPath, window.path)
+                || EqualsIgnoreCase(item->resolvedPath, window.path);
+            const bool samePackageIdentity =
+                !window.appUserModelId.empty()
+                && AppLauncher::MatchesPackagedAppId(
+                    item->resolvedPath, window.appUserModelId);
+
+            if (!samePath && !samePackageIdentity)
+            {
+                continue;
+            }
+
+            // Distinct launchable apps can live inside the same package.
+            if (samePackageIdentity && !item->appUserModelId.empty()
+                && !EqualsIgnoreCase(
+                    item->appUserModelId, window.appUserModelId))
+            {
+                continue;
+            }
+
+            if (samePackageIdentity && item->appUserModelId.empty())
+            {
+                item->appUserModelId = window.appUserModelId;
+                restoredPinnedIdentity = true;
+            }
+            return item.get();
         }
         return nullptr;
     };
@@ -3630,7 +3801,7 @@ void App::RefreshRunningApplications()
         entry.minimized = IsIconic(window.hwnd) != FALSE;
         entry.active = window.hwnd == foreground;
 
-        if (DockItem* pinned = pinnedForPath(window.path))
+        if (DockItem* pinned = pinnedForWindow(window))
         {
             if (!window.applicationName.empty())
             {
@@ -3932,6 +4103,10 @@ void App::RefreshRunningApplications()
     }
 
     RebuildItemPointers();
+    if (restoredPinnedIdentity)
+    {
+        SaveConfiguration();
+    }
 
     if (geometryChanged)
     {
@@ -5163,6 +5338,8 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"背景栏", L"Dock background"},
         {L"图标", L"Icons"},
         {L"气泡", L"Tooltips"},
+        {L"无法启动该 Windows 打包应用。请确认应用仍已安装；若此程序来自旧版本，可先运行应用，再从 Dock 重新固定。",
+         L"Could not activate this packaged Windows app. Check that it is still installed. Open it from Start, then pin it to the Dock again if needed."},
         {L"快捷方式", L"Shortcut"},
         {L"图标外观", L"Icon appearance"},
         {L"自动隐藏/覆盖", L"Auto-hide/overlay"},
@@ -5413,7 +5590,7 @@ void App::HandleMenuCommand(UINT id)
             {
                 const std::wstring path = item.resolvedPath.empty()
                     ? item.targetPath : item.resolvedPath;
-                AddApplication(path);
+                AddApplication(path, item.runtimeAppUserModelId);
             }
         }
 
@@ -5665,9 +5842,19 @@ std::vector<std::wstring> App::FindRunningTaskbarApplications() const
             items_.begin(), items_.end(), [&](const auto& item)
             {
                 return item->kind == DockItemKind::Pinned
-                    && (item->id == id
-                        || EqualsIgnoreCase(item->targetPath, window.path)
-                        || EqualsIgnoreCase(item->resolvedPath, window.path));
+                    && ((item->appUserModelId.empty()
+                            && (item->id == id
+                                || EqualsIgnoreCase(
+                                    item->targetPath, window.path)
+                                || EqualsIgnoreCase(
+                                    item->resolvedPath, window.path)))
+                        || (!window.appUserModelId.empty()
+                            && EqualsIgnoreCase(
+                                item->appUserModelId, window.appUserModelId))
+                        || (item->appUserModelId.empty()
+                            && !window.appUserModelId.empty()
+                            && AppLauncher::MatchesPackagedAppId(
+                                item->resolvedPath, window.appUserModelId)));
             });
 
         if (alreadyPinned)
@@ -8002,6 +8189,9 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
                 item.resolvedPath =
                     info.resolvedPath.empty() ? path : info.resolvedPath;
                 item.processName = GetFileName(item.resolvedPath);
+                // Editing the target must not keep the previous app's identity.
+                item.appUserModelId =
+                    AppLauncher::ResolvePackagedAppId(item.resolvedPath);
 
                 if (name.empty())
                 {

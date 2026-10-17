@@ -55,6 +55,9 @@ struct DockItem
     std::wstring arguments;
     std::wstring processName;
 
+    /// Persistent AUMID used when launching pinned Windows-packaged apps.
+    std::wstring appUserModelId;
+
     /// Exact top-level window represented by a transient running item.
     /// Null for pinned launchers and built-in Start/Search buttons.
     HWND windowHandle = nullptr;

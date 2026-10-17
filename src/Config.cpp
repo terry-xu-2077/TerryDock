@@ -292,6 +292,8 @@ DockConfig Config::Load()
                 ? entry.Find("arguments")->AsString() : std::string());
             item.processName = Utf8ToWide(entry.Find("processName")
                 ? entry.Find("processName")->AsString() : std::string());
+            item.appUserModelId = Utf8ToWide(entry.Find("appUserModelId")
+                ? entry.Find("appUserModelId")->AsString() : std::string());
             item.iconFile = Utf8ToWide(entry.Find("icon")
                 ? entry.Find("icon")->AsString() : std::string());
 
@@ -489,6 +491,11 @@ bool Config::Save(const DockConfig& config)
         entry.Set("resolvedPath", json::Value(WideToUtf8(item.resolvedPath)));
         entry.Set("arguments", json::Value(WideToUtf8(item.arguments)));
         entry.Set("processName", json::Value(WideToUtf8(item.processName)));
+        if (!item.appUserModelId.empty())
+        {
+            entry.Set("appUserModelId",
+                      json::Value(WideToUtf8(item.appUserModelId)));
+        }
         entry.Set("icon", json::Value(WideToUtf8(item.iconFile)));
 
         // Every entry carries its plate block: the state is small and this

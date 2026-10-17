@@ -109,7 +109,8 @@ private:
     // --- data --------------------------------------------------------------
     void LoadItems();
     void RebuildItemPointers();
-    void AddApplication(const std::wstring& path);
+    void AddApplication(const std::wstring& path,
+                        const std::wstring& appUserModelId = {});
     void FinishExternalDrag(bool commit, float x, float y);
     void RemoveApplication(size_t index);
     void LaunchApplication(size_t index);
