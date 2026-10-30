@@ -57,6 +57,7 @@ set(LIGHTDOCK_SOURCES
     src/Config.cpp
     src/Json.cpp
     src/Utils.cpp
+    src/MacUi.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/app.generated.rc"
 )
 
@@ -76,6 +77,7 @@ set(LIGHTDOCK_HEADERS
     src/Config.h
     src/Json.h
     src/Utils.h
+    src/MacUi.h
 )
 
 add_executable(LightDock WIN32 ${LIGHTDOCK_SOURCES} ${LIGHTDOCK_HEADERS})

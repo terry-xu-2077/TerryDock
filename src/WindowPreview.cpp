@@ -125,7 +125,9 @@ bool ApplyNativeRoundedCorners(HWND hwnd, float radius)
         return false;
     }
 
-    const COLORREF border = RGB(184, 199, 214);
+    // DWMWA_COLOR_NONE: no Windows 11 window outline on the inset content.
+    const COLORREF border = preference == kDoNotRound
+        ? static_cast<COLORREF>(0xFFFFFFFE) : RGB(184, 199, 214);
     setAttribute(hwnd, kBorderColor, &border, sizeof(border));
     return true;
 }
@@ -460,33 +462,14 @@ void WindowPreview::Show(const RECT& screenRect,
             flags);
     }
 
-    const int radius = ScalePx(
-        cornerRadius_, dpiScale_ * menuScale_);
-
+    // The rounded bubble (body, outline and tail) is drawn as one
+    // antialiased shape on the Dock's layered surface. This window is a
+    // plain rectangle inset inside that body: native DWM rounding or a
+    // window region would only add jagged or mismatched corners.
     if (!wasVisible || cornerChanged)
     {
-        nativeRoundedCorners_ =
-            ApplyNativeRoundedCorners(hwnd_, cornerRadius_);
-
-        if (nativeRoundedCorners_)
-        {
-            SetWindowRgn(hwnd_, nullptr, TRUE);
-        }
-    }
-
-    if (!nativeRoundedCorners_
-        && (!wasVisible || sizeChanged || cornerChanged))
-    {
-        HRGN region = CreateRoundRectRgn(
-            0, 0, width + 1, height + 1,
-            radius * 2, radius * 2);
-        if (region)
-        {
-            if (!SetWindowRgn(hwnd_, region, TRUE))
-            {
-                DeleteObject(region);
-            }
-        }
+        nativeRoundedCorners_ = ApplyNativeRoundedCorners(hwnd_, 0.0f);
+        SetWindowRgn(hwnd_, nullptr, TRUE);
     }
 
     const bool layoutChanged = sizeChanged || scaleChanged;
@@ -718,9 +701,6 @@ void WindowPreview::Paint()
     GetClientRect(hwnd_, &client);
 
     const float uiScale = dpiScale_ * menuScale_;
-    const int radius = (std::max)(
-        1, ScalePx(cornerRadius_, uiScale));
-    const int diameter = radius * 2;
 
     const COLORREF backgroundColor = RGB(245, 250, 255);
     const COLORREF borderColor = RGB(184, 199, 214);
@@ -730,19 +710,7 @@ void WindowPreview::Paint()
 
     HBRUSH background = CreateSolidBrush(backgroundColor);
 
-    if (nativeRoundedCorners_)
-    {
-        FillRect(dc, &client, background);
-    }
-    else
-    {
-        HGDIOBJ oldBrush = SelectObject(dc, background);
-        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-        RoundRect(dc, 0, 0, client.right, client.bottom,
-                  diameter, diameter);
-        SelectObject(dc, oldPen);
-        SelectObject(dc, oldBrush);
-    }
+    FillRect(dc, &client, background);
     DeleteObject(background);
 
     const int width = client.right - client.left;
@@ -996,24 +964,6 @@ void WindowPreview::Paint()
         {
             DeleteObject(appFont);
         }
-    }
-
-    if (!nativeRoundedCorners_)
-    {
-        const int strokeWidth = (std::max)(1, ScalePx(1.0f, dpiScale_));
-        const int inset = (std::max)(1, strokeWidth);
-        HPEN borderPen = CreatePen(PS_SOLID, strokeWidth, borderColor);
-        HGDIOBJ previousPen = SelectObject(dc, borderPen);
-        HGDIOBJ previousBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-        RoundRect(dc,
-                  inset, inset,
-                  client.right - inset,
-                  client.bottom - inset,
-                  (std::max)(2, diameter - inset * 2),
-                  (std::max)(2, diameter - inset * 2));
-        SelectObject(dc, previousBrush);
-        SelectObject(dc, previousPen);
-        DeleteObject(borderPen);
     }
 
     EndPaint(hwnd_, &paint);

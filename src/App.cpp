@@ -42,141 +42,6 @@ constexpr double kPollIntervalSeconds = 1.0;
 
 /// Gap between the bottom of the dock and the bottom of the work area.
 constexpr float kBottomGap = 4.0f;
-constexpr wchar_t kDialogTabPageProperty[] = L"LightDock.DialogTabPage";
-
-HBITMAP CreateMenuIconBitmap(IWICImagingFactory* factory, IWICBitmap* source)
-{
-    if (!factory || !source)
-    {
-        return nullptr;
-    }
-
-    ComPtr<IWICBitmapScaler> scaler;
-    ComPtr<IWICFormatConverter> converter;
-    if (FAILED(factory->CreateBitmapScaler(scaler.AddressOf()))
-        || FAILED(scaler->Initialize(source, 16, 16,
-                                     WICBitmapInterpolationModeFant))
-        || FAILED(factory->CreateFormatConverter(converter.AddressOf()))
-        || FAILED(converter->Initialize(
-            scaler.Get(), GUID_WICPixelFormat32bppPBGRA,
-            WICBitmapDitherTypeNone, nullptr, 0.0,
-            WICBitmapPaletteTypeCustom)))
-    {
-        return nullptr;
-    }
-
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = 16;
-    info.bmiHeader.biHeight = -16;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-
-    void* pixels = nullptr;
-    HBITMAP bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS,
-                                     &pixels, nullptr, 0);
-    if (!bitmap || !pixels)
-    {
-        if (bitmap)
-        {
-            DeleteObject(bitmap);
-        }
-        return nullptr;
-    }
-
-    if (FAILED(converter->CopyPixels(nullptr, 16 * 4, 16 * 16 * 4,
-                                     static_cast<BYTE*>(pixels))))
-    {
-        DeleteObject(bitmap);
-        return nullptr;
-    }
-
-    return bitmap;
-}
-
-void MarkDialogTabPage(HWND control, int page)
-{
-    if (control)
-    {
-        SetPropW(control, kDialogTabPageProperty,
-                 reinterpret_cast<HANDLE>(static_cast<INT_PTR>(page + 1)));
-    }
-}
-
-struct TabVisibilityContext
-{
-    int page = 0;
-};
-
-BOOL CALLBACK ApplyTabVisibility(HWND child, LPARAM parameter)
-{
-    const auto* context = reinterpret_cast<TabVisibilityContext*>(parameter);
-    HANDLE tag = GetPropW(child, kDialogTabPageProperty);
-    if (tag)
-    {
-        const int page = static_cast<int>(reinterpret_cast<INT_PTR>(tag)) - 1;
-        ShowWindow(child, page == context->page ? SW_SHOW : SW_HIDE);
-    }
-
-    return TRUE;
-}
-
-void ShowDialogTabPage(HWND dialog, int page)
-{
-    TabVisibilityContext context{page};
-    EnumChildWindows(dialog, ApplyTabVisibility,
-                     reinterpret_cast<LPARAM>(&context));
-}
-
-struct TagDialogChildrenContext
-{
-    HWND dialog = nullptr;
-    int tabId = 0;
-    int saveId = 0;
-    int cancelId = 0;
-    int splitY = 0;
-    int endFirstPageY = 0;
-    int finalPage = 1;
-    int shiftFirstPage = 0;
-    int shiftSecondPage = 0;
-    int shiftFinalPage = 0;
-};
-
-BOOL CALLBACK TagDialogChildren(HWND child, LPARAM parameter)
-{
-    auto* context = reinterpret_cast<TagDialogChildrenContext*>(parameter);
-    const int id = GetDlgCtrlID(child);
-    if (id == context->tabId || id == context->saveId || id == context->cancelId
-        || GetPropW(child, kDialogTabPageProperty))
-    {
-        return TRUE;
-    }
-
-    RECT rect{};
-    GetWindowRect(child, &rect);
-    MapWindowPoints(nullptr, context->dialog,
-                    reinterpret_cast<POINT*>(&rect), 2);
-
-    int page = 0;
-    if (rect.top >= context->splitY)
-    {
-        page = rect.top < context->endFirstPageY ? 1 : context->finalPage;
-    }
-
-    MarkDialogTabPage(child, page);
-    const int shift = page == 0 ? context->shiftFirstPage
-        : page == 1 ? context->shiftSecondPage
-                    : context->shiftFinalPage;
-    if (shift != 0)
-    {
-        SetWindowPos(child, nullptr, rect.left,
-                     rect.top + shift, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-
-    return TRUE;
-}
 
 bool GetVisibleWindowBounds(HWND hwnd, RECT& bounds)
 {
@@ -1134,63 +999,6 @@ BOOL CALLBACK FindShellPopupWindow(HWND hwnd, LPARAM parameter)
     return TRUE;
 }
 
-/// DPI of the monitor a dialog lives on (falls back to the system DPI).
-int DialogDpi(HWND hwnd)
-{
-    using FnGetDpiForWindow = UINT(WINAPI*)(HWND);
-
-    static FnGetDpiForWindow dpiForWindow = []() -> FnGetDpiForWindow
-    {
-        HMODULE user32 = GetModuleHandleW(L"user32.dll");
-        return user32
-            ? reinterpret_cast<FnGetDpiForWindow>(
-                  GetProcAddress(user32, "GetDpiForWindow"))
-            : nullptr;
-    }();
-
-    if (dpiForWindow)
-    {
-        const UINT dpi = dpiForWindow(hwnd);
-        if (dpi > 0)
-        {
-            return static_cast<int>(dpi);
-        }
-    }
-
-    HDC dc = GetDC(hwnd);
-    const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
-    ReleaseDC(hwnd, dc);
-    return dpi > 0 ? dpi : 96;
-}
-
-/// Segoe UI 9pt (the modern Windows UI font), scaled for the dialog's DPI.
-/// The stock DEFAULT_GUI_FONT renders like Windows 95, which is what made
-/// the dialogs look dated. The fonts live for the process lifetime.
-HFONT DialogFont(bool bold)
-{
-    static HFONT regular = nullptr;
-    static HFONT semibold = nullptr;
-
-    HFONT& slot = bold ? semibold : regular;
-
-    if (!slot)
-    {
-        HDC dc = GetDC(nullptr);
-        const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
-        ReleaseDC(nullptr, dc);
-
-        const int height = -MulDiv(9, dpi, 72);
-
-        slot = CreateFontW(
-            height, 0, 0, 0, bold ? FW_SEMIBOLD : FW_NORMAL,
-            FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    }
-
-    return slot;
-}
-
 } // namespace
 
 int App::Run(HINSTANCE instance)
@@ -1831,10 +1639,10 @@ void App::LaunchApplication(size_t index)
         {
             // Never attempt ShellExecute on an MSIX WindowsApps EXE: Windows
             // denies access because app activation belongs to the package.
-            MessageBoxW(window_.Handle(),
+            ShowAlert(UiText(L"无法打开应用"),
                 UiText(L"无法启动该 Windows 打包应用。请确认应用仍已安装；"
                        L"若此程序来自旧版本，可先运行应用，再从 Dock 重新固定。"),
-                L"LightDock", MB_OK | MB_ICONWARNING);
+                L"好", nullptr);
         }
     }
     else
@@ -2593,19 +2401,14 @@ void App::SelectMonitor(int index)
     SaveConfiguration();
 }
 
-void App::AppendMonitorMenu(HMENU menu)
+void App::AppendMonitorMenu(std::vector<ui::MenuItem>& menu)
 {
     if (monitors_.size() < 2)
     {
         return;
     }
 
-    HMENU submenu = CreatePopupMenu();
-    if (!submenu)
-    {
-        return;
-    }
-
+    std::vector<ui::MenuItem> displays;
     for (size_t i = 0; i < monitors_.size(); ++i)
     {
         const MonitorTarget& target = monitors_[i];
@@ -2614,19 +2417,17 @@ void App::AppendMonitorMenu(HMENU menu)
         const long height = target.rect.bottom - target.rect.top;
 
         wchar_t label[128];
-        swprintf(label, 128, L"显示器 %zu  (%ld × %ld)%ls",
-                 i + 1, width, height,
-                 target.primary ? L"  · 主显示器" : L"");
+        swprintf(label, 128, L"%ls %zu  (%ld × %ld)%ls",
+                 UiText(L"显示器"), i + 1, width, height,
+                 target.primary ? UiText(L"  · 主显示器") : L"");
 
-        const UINT flags = MF_STRING
-            | ((static_cast<int>(i) == monitorIndex_) ? MF_CHECKED : 0);
-
-        AppendMenuW(submenu, flags,
-                    kMenuMonitorBase + static_cast<UINT>(i), label);
+        displays.push_back(ui::MenuItem::Command(
+            kMenuMonitorBase + static_cast<UINT>(i), label, true,
+            static_cast<int>(i) == monitorIndex_));
     }
 
-    AppendMenuW(menu, MF_POPUP,
-                reinterpret_cast<UINT_PTR>(submenu), L"显示器");
+    menu.push_back(ui::MenuItem::Submenu(UiText(L"显示器"),
+                                         std::move(displays)));
 }
 
 void App::CheckDisplayChange()
@@ -3496,8 +3297,17 @@ void App::Render()
             const float itemWidth = 151.25f * uiScale;
             const float menuHeight = 152.0f * uiScale;
             const float tailLength = 8.0f * uiScale;
-            const float tipGap = 7.0f * uiScale;
-            const float margin = 8.0f * dpiScale_;
+            const float tipGap = 12.0f * uiScale;
+
+            // The rounded bubble is painted on the Dock surface; the
+            // rectangular DWM preview window sits inside it, inset far
+            // enough that its square corners stay within the rounded body.
+            const float bubbleRadius = config_.settings.tooltipCornerRadius
+                * uiScale;
+            const float bodyInset = std::ceil(bubbleRadius * 0.3f
+                                              + 2.0f * dpiScale_);
+            const float tailReach = tailLength + bodyInset;
+            const float margin = 8.0f * dpiScale_ + bodyInset;
 
             const float availableWidth = (std::max)(
                 itemWidth,
@@ -3537,7 +3347,7 @@ void App::Render()
                 tailTip = D2D1::Point2F(
                     iconCenterX, iconRect.bottom + tipGap);
                 menu.left = iconCenterX - menuWidth * 0.5f;
-                menu.top = tailTip.y + tailLength;
+                menu.top = tailTip.y + tailReach;
                 menu.right = menu.left + menuWidth;
                 menu.bottom = menu.top + menuHeight;
                 break;
@@ -3545,7 +3355,7 @@ void App::Render()
             case DockEdge::Left:
                 tailTip = D2D1::Point2F(
                     iconRect.right + tipGap, iconCenterY);
-                menu.left = tailTip.x + tailLength;
+                menu.left = tailTip.x + tailReach;
                 menu.top = iconCenterY - menuHeight * 0.5f;
                 menu.right = menu.left + menuWidth;
                 menu.bottom = menu.top + menuHeight;
@@ -3554,7 +3364,7 @@ void App::Render()
             case DockEdge::Right:
                 tailTip = D2D1::Point2F(
                     iconRect.left - tipGap, iconCenterY);
-                menu.right = tailTip.x - tailLength;
+                menu.right = tailTip.x - tailReach;
                 menu.left = menu.right - menuWidth;
                 menu.top = iconCenterY - menuHeight * 0.5f;
                 menu.bottom = menu.top + menuHeight;
@@ -3565,7 +3375,7 @@ void App::Render()
                 tailTip = D2D1::Point2F(
                     iconCenterX, iconRect.top - tipGap);
                 menu.left = iconCenterX - menuWidth * 0.5f;
-                menu.bottom = tailTip.y - tailLength;
+                menu.bottom = tailTip.y - tailReach;
                 menu.right = menu.left + menuWidth;
                 menu.top = menu.bottom - menuHeight;
                 break;
@@ -3636,11 +3446,13 @@ void App::Render()
                 previewEntries.push_back(std::move(entry));
             }
 
-            // Tail stays in the layered Dock surface so it has exactly the
-            // same antialiasing and colour as an ordinary name bubble.
-            renderer_.DrawBubbleTail(
-                menu, tailTip, config_.settings.dockEdge,
-                uiScale, config_.settings.tooltipOpacity);
+            // Body, outline and tail are one antialiased shape on the layered
+            // Dock surface, so the corners are smooth and the tail has no seam.
+            renderer_.DrawPreviewBubble(
+                D2D1::RectF(menu.left - bodyInset, menu.top - bodyInset,
+                            menu.right + bodyInset, menu.bottom + bodyInset),
+                tailTip, config_.settings.dockEdge, uiScale,
+                bubbleRadius);
 
             const RECT dockBounds = window_.GetBounds();
             const RECT screenMenu{
@@ -3706,8 +3518,8 @@ void App::Render()
                 item.name,
                 item.centerX,
                 verticalDock ? item.baselineBottom
-                    : topDock ? item.baselineBottom + 7.0f * dockScale_
-                    : item.baselineBottom - item.size - 7.0f * dockScale_,
+                    : topDock ? item.baselineBottom + 12.0f * dockScale_
+                    : item.baselineBottom - item.size - 12.0f * dockScale_,
                 nameBubbleScale,
                 dockScale_,
                 config_.settings.tooltipCornerRadius * dockScale_
@@ -4899,15 +4711,12 @@ void App::FinishIconDrag(float x, float y)
     const D2D1_POINT_2F physical = dockTransform_.ToPhysical(x, y);
     if (!HitTest(physical.x, physical.y))
     {
-        const std::wstring message =
-            L"确定要将“" + items_[static_cast<size_t>(from)]->name
-            + L"”移出 Dock 吗？";
+        const std::wstring& name = items_[static_cast<size_t>(from)]->name;
+        const std::wstring message = config_.settings.englishLanguage
+            ? L"Remove \u201C" + name + L"\u201D from the Dock?"
+            : L"确定要将“" + name + L"”移出 Dock 吗？";
 
-        const int answer = MessageBoxW(
-            window_.Handle(), message.c_str(), L"移出 Dock",
-            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
-
-        if (answer == IDYES)
+        if (ShowAlert(UiText(L"移出 Dock"), message, L"移除", L"取消"))
         {
             RemoveApplication(static_cast<size_t>(from));
         }
@@ -5361,13 +5170,13 @@ void App::RequestExit()
     tooltipPresence_ = 0.0f;
     autoHideHidePending_ = false;
     SetFullscreenVisibilityTarget(0.0f);
-    if (settings_.dialog)
+    if (settings_.form && settings_.form->Handle())
     {
-        PostMessageW(settings_.dialog, WM_CLOSE, 0, 0);
+        PostMessageW(settings_.form->Handle(), WM_CLOSE, 0, 0);
     }
-    if (editor_.dialog)
+    if (editor_.form && editor_.form->Handle())
     {
-        PostMessageW(editor_.dialog, WM_CLOSE, 0, 0);
+        PostMessageW(editor_.form->Handle(), WM_CLOSE, 0, 0);
     }
     WakeAnimation();
 }
@@ -5479,6 +5288,43 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"浏览...", L"Browse..."},
         {L"恢复默认值", L"Restore defaults"},
         {L"自动隐藏/覆盖模式（不占用停靠边空间）", L"Auto-hide/overlay (does not reserve dock-edge space)"},
+        {L"添加应用…", L"Add Application..."},
+        {L"  · 主显示器", L"  · Primary"},
+        {L"通用", L"General"},
+        {L"自动隐藏", L"Auto-hide"},
+        {L"不占用停靠边的屏幕空间", L"Doesn't reserve space along the docked edge"},
+        {L"动画时长", L"Animation duration"},
+        {L"外观", L"Appearance"},
+        {L"圆角", L"Corner radius"},
+        {L"颜色", L"Color"},
+        {L"关闭渐变时，背景栏使用单一颜色。", L"With the gradient off, the dock background uses a single color."},
+        {L"背景颜色", L"Background color"},
+        {L"渐变", L"Gradient"},
+        {L"渐变底部颜色", L"Gradient bottom color"},
+        {L"渐变关闭", L"Gradient off"},
+        {L"底板", L"Icon plate"},
+        {L"这些是全部图标的默认值；可在图标右键菜单的“图标配置…”中单独调整。", L"Defaults for every icon. Fine-tune a single icon with \u201CIcon settings...\u201D in its context menu."},
+        {L"图标比例", L"Icon scale"},
+        {L"内描边", L"Inner stroke"},
+        {L"粗细", L"Width"},
+        {L"比例", L"Scale"},
+        {L"作者", L"Authors"},
+        {L"联系邮箱", L"Contact"},
+        {L"轻量、可自定义的 Windows 桌面停靠栏", L"A lightweight, customizable dock for Windows"},
+        {L"LightDock 让常用应用触手可及。停靠栏可以放在屏幕的上、下、左、右侧，"
+         L"支持自动隐藏、展开动画和图标悬停放大；图标大小、间距、背景渐变、"
+         L"圆角和透明度都可以按你的喜好调整。",
+         L"LightDock keeps your favorite apps within easy reach. Place it along any screen edge, with auto-hide, reveal animation and hover magnification. Icon size, spacing, background gradient, corner radius and opacity can all be tuned to taste."},
+        {L"应用", L"Application"},
+        {L"自定义透明度", L"Custom opacity"},
+        {L"透明度", L"Opacity"},
+        {L"描边颜色", L"Stroke color"},
+        {L"（自动）", L" (auto)"},
+        {L"（默认）", L" (default)"},
+        {L"无法打开应用", L"Couldn't open the app"},
+        {L"移出 Dock", L"Remove from Dock"},
+        {L"移除", L"Remove"},
+        {L"好", L"OK"},
     };
 
     for (const Translation& entry : translations)
@@ -5491,13 +5337,48 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
     return chinese;
 }
 
+namespace
+{
+
+ComPtr<IWICBitmapSource> AsBitmapSource(IWICBitmap* bitmap)
+{
+    if (bitmap)
+    {
+        bitmap->AddRef();
+    }
+    return ComPtr<IWICBitmapSource>(bitmap);
+}
+
+} // namespace
+
+UINT App::RunMenu(const std::vector<ui::MenuItem>& items, POINT anchor,
+                  ui::MenuOptions options)
+{
+    // Keep the dock's frame clock running while the menu owns the message
+    // loop, so hover/launch animations finish smoothly underneath it.
+    auto lastFrame = std::chrono::steady_clock::now();
+    options.idle = [this, &lastFrame]()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = std::min(
+            std::chrono::duration<double>(now - lastFrame).count(), 0.05);
+        lastFrame = now;
+        if (animating_ || needsRender_)
+        {
+            needsRender_ = false;
+            Tick(dt);
+        }
+    };
+
+    SetForegroundWindow(window_.Handle());
+    return ui::TrackMenu(window_.Handle(), items, anchor, options);
+}
+
 void App::ShowContextMenu(int index, float x, float y)
 {
-    HMENU menu = CreatePopupMenu();
-    if (!menu)
-    {
-        return;
-    }
+    using ui::MenuItem;
+    std::vector<MenuItem> menu;
+    menuRunningCandidates_.clear();
 
     if (index >= 0)
     {
@@ -5505,87 +5386,59 @@ void App::ShowContextMenu(int index, float x, float y)
 
         if (item.kind == DockItemKind::Pinned)
         {
-            AppendMenuW(menu, MF_STRING, kMenuOpen, UiText(L"打开"));
-            AppendMenuW(menu, MF_STRING, kMenuOpenFolder,
-                        UiText(L"打开所在文件夹"));
-            AppendMenuW(menu, MF_STRING, kMenuEdit, UiText(L"图标配置…"));
-            AppendMenuW(menu, MF_STRING, kMenuRemove, UiText(L"从 Dock 移除"));
+            menu.push_back(MenuItem::Command(kMenuOpen, UiText(L"打开")));
+            menu.push_back(MenuItem::Separator());
+            menu.push_back(MenuItem::Command(kMenuOpenFolder,
+                                             UiText(L"打开所在文件夹")));
+            menu.push_back(MenuItem::Command(kMenuEdit, UiText(L"图标配置…")));
+            menu.push_back(MenuItem::Separator());
+            menu.push_back(MenuItem::Command(kMenuRemove,
+                                             UiText(L"从 Dock 移除")));
         }
         else if (item.kind == DockItemKind::RunningTransient)
         {
-            AppendMenuW(menu, MF_STRING, kMenuOpen, UiText(L"打开"));
-            AppendMenuW(menu, MF_STRING, kMenuOpenFolder,
-                        UiText(L"打开所在文件夹"));
-            AppendMenuW(menu, MF_STRING, kMenuPinRunning,
-                        UiText(L"固定到 Dock"));
+            menu.push_back(MenuItem::Command(kMenuOpen, UiText(L"打开")));
+            menu.push_back(MenuItem::Separator());
+            menu.push_back(MenuItem::Command(kMenuOpenFolder,
+                                             UiText(L"打开所在文件夹")));
+            menu.push_back(MenuItem::Command(kMenuPinRunning,
+                                             UiText(L"固定到 Dock")));
         }
         else
         {
-            AppendMenuW(menu, MF_STRING, kMenuOpen, UiText(L"打开"));
+            menu.push_back(MenuItem::Command(kMenuOpen, UiText(L"打开")));
         }
     }
     else
     {
-        AppendMenuW(menu, MF_STRING, kMenuAdd, UiText(L"添加应用"));
+        menu.push_back(MenuItem::Command(kMenuAdd, UiText(L"添加应用…")));
 
-        HMENU runningMenu = CreatePopupMenu();
-        const std::vector<std::wstring> runningApps =
-            FindRunningTaskbarApplications();
-        menuRunningCandidates_ = runningApps;
-        menuRunningBitmaps_.clear();
-        if (runningMenu)
+        std::vector<MenuItem> running;
+        menuRunningCandidates_ = FindRunningTaskbarApplications();
+        for (size_t i = 0; i < menuRunningCandidates_.size(); ++i)
         {
-            if (runningApps.empty())
+            const std::wstring& path = menuRunningCandidates_[i];
+            AppInfo info = icons_.Inspect(path, 32);
+            std::wstring label = info.name.empty()
+                ? GetShellDisplayName(path) : info.name;
+            if (label.empty())
             {
-                AppendMenuW(runningMenu, MF_STRING | MF_GRAYED,
-                            kMenuAddRunningBase, UiText(L"没有可添加的运行应用"));
+                label = path;
             }
-            else
-            {
-                for (size_t i = 0; i < runningApps.size(); ++i)
-                {
-                    AppInfo info = icons_.Inspect(runningApps[i], 32);
-                    const std::wstring label = info.name.empty()
-                        ? GetShellDisplayName(runningApps[i]) : info.name;
-                    const UINT itemId = kMenuAddRunningBase
-                        + static_cast<UINT>(i);
-                    AppendMenuW(runningMenu, MF_STRING,
-                                itemId, label.empty()
-                                    ? runningApps[i].c_str() : label.c_str());
-
-                    HBITMAP bitmap = CreateMenuIconBitmap(
-                        icons_.Factory(), info.icon.Get());
-                    if (bitmap)
-                    {
-                        MENUITEMINFOW itemInfo{};
-                        itemInfo.cbSize = sizeof(itemInfo);
-                        itemInfo.fMask = MIIM_BITMAP;
-                        itemInfo.hbmpItem = bitmap;
-                        if (SetMenuItemInfoW(runningMenu, itemId, FALSE,
-                                             &itemInfo))
-                        {
-                            menuRunningBitmaps_.push_back(bitmap);
-                        }
-                        else
-                        {
-                            DeleteObject(bitmap);
-                        }
-                    }
-                }
-            }
-            AppendMenuW(menu, MF_POPUP,
-                        reinterpret_cast<UINT_PTR>(runningMenu),
-                        UiText(L"添加正在运行的应用"));
+            MenuItem entry = MenuItem::Command(
+                kMenuAddRunningBase + static_cast<UINT>(i), label);
+            entry.icon = AsBitmapSource(info.icon.Get());
+            running.push_back(std::move(entry));
         }
-        else
+        if (running.empty())
         {
-            AppendMenuW(menu, MF_STRING | MF_GRAYED,
-                        kMenuAddRunningBase, UiText(L"添加正在运行的应用"));
+            running.push_back(MenuItem::Command(
+                kMenuAddRunningBase, UiText(L"没有可添加的运行应用"), false));
         }
-
-        AppendMenuW(menu, MF_STRING, kMenuSettings, UiText(L"Dock 设置…"));
-
-        // TrackPopupMenuEx owns the submenu once attached to the parent menu.
+        menu.push_back(MenuItem::Submenu(UiText(L"添加正在运行的应用"),
+                                         std::move(running)));
+        menu.push_back(MenuItem::Separator());
+        menu.push_back(MenuItem::Command(kMenuSettings, UiText(L"Dock 设置…")));
     }
 
     menuIndex_ = index;
@@ -5596,27 +5449,7 @@ void App::ShowContextMenu(int index, float x, float y)
     screen.x = bounds.left + static_cast<LONG>(std::lround(physical.x));
     screen.y = bounds.top + static_cast<LONG>(std::lround(physical.y));
 
-    SetForegroundWindow(window_.Handle());
-
-    const UINT command = TrackPopupMenuEx(
-        menu,
-        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
-        screen.x,
-        screen.y,
-        window_.Handle(),
-        nullptr);
-
-    DestroyMenu(menu);
-
-    for (HBITMAP bitmap : menuRunningBitmaps_)
-    {
-        DeleteObject(bitmap);
-    }
-    menuRunningBitmaps_.clear();
-
-    // Makes sure the menu is fully dismissed even without an active window.
-    PostMessageW(window_.Handle(), WM_NULL, 0, 0);
-
+    const UINT command = RunMenu(menu, screen);
     if (command != 0)
     {
         HandleMenuCommand(command);
@@ -5626,47 +5459,33 @@ void App::ShowContextMenu(int index, float x, float y)
 
 void App::ShowTrayMenu()
 {
-    HMENU menu = CreatePopupMenu();
-    if (!menu)
-    {
-        return;
-    }
+    using ui::MenuItem;
 
-    // Tray menu is the "home" for global actions: dock settings (which now
-    // includes the global icon backdrop), picking a display and quitting.
-    // Adding apps lives in the dock blank-area menu and drag & drop.
-    AppendMenuW(menu, MF_STRING, kMenuSettings, UiText(L"Dock 设置…"));
+    // Tray menu is the "home" for global actions: dock settings, picking a
+    // display, language and quitting. Adding apps lives in the dock
+    // blank-area menu and drag & drop.
+    std::vector<MenuItem> menu;
+    menu.push_back(MenuItem::Command(kMenuSettings, UiText(L"Dock 设置…")));
     AppendMonitorMenu(menu);
-    HMENU languageMenu = CreatePopupMenu();
-    if (languageMenu)
-    {
-        AppendMenuW(languageMenu, MF_STRING | (!config_.settings.englishLanguage ? MF_CHECKED : 0),
-                    kMenuLanguageChinese, UiText(L"Chinese"));
-        AppendMenuW(languageMenu, MF_STRING | (config_.settings.englishLanguage ? MF_CHECKED : 0),
-                    kMenuLanguageEnglish, UiText(L"English"));
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(languageMenu),
-                    L"Language");
-    }
-    AppendMenuW(menu, MF_STRING, kMenuAbout, UiText(L"关于"));
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuExit, UiText(L"退出"));
+    menu.push_back(MenuItem::Submenu(UiText(L"语言"),
+        {
+            MenuItem::Command(kMenuLanguageChinese, L"简体中文", true,
+                              !config_.settings.englishLanguage),
+            MenuItem::Command(kMenuLanguageEnglish, L"English", true,
+                              config_.settings.englishLanguage),
+        }));
+    menu.push_back(MenuItem::Separator());
+    menu.push_back(MenuItem::Command(kMenuAbout, UiText(L"关于")));
+    menu.push_back(MenuItem::Separator());
+    menu.push_back(MenuItem::Command(kMenuExit, UiText(L"退出")));
 
     POINT cursor{};
     GetCursorPos(&cursor);
 
-    SetForegroundWindow(window_.Handle());
-
-    const UINT command = TrackPopupMenuEx(
-        menu,
-        TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
-        cursor.x,
-        cursor.y,
-        window_.Handle(),
-        nullptr);
-
-    DestroyMenu(menu);
-    PostMessageW(window_.Handle(), WM_NULL, 0, 0);
-
+    ui::MenuOptions options;
+    options.alignRight = true;
+    options.alignBottom = true;
+    const UINT command = RunMenu(menu, cursor, options);
     if (command != 0)
     {
         HandleMenuCommand(command);
@@ -5768,17 +5587,13 @@ void App::HandleMenuCommand(UINT id)
         break;
 
     case kMenuAbout:
-    {
-        const wchar_t* title = UiText(L"关于");
-        const wchar_t* text = UiText(L"作者：TerryXu 和 ChatGPT");
-        std::wstring about = text;
-        about += L"\n";
-        about += UiText(L"联系邮箱：851858419@.com");
-        about += L"\n\n";
-        about += UiText(L"简介：LightDock 是一款轻量、可自定义的 Windows 桌面 Dock，支持应用快捷启动、自动隐藏，以及图标和背景栏外观设置。");
-        MessageBoxW(window_.Handle(), about.c_str(), title, MB_OK | MB_ICONINFORMATION);
+        // "About" is the last page of the settings window.
+        if (ShowSettings(kSettingsAboutPage))
+        {
+            ApplySettings();
+        }
+
         break;
-    }
 
     case kMenuAdd:
     {
@@ -6103,77 +5918,93 @@ std::vector<std::wstring> App::PickApplicationFiles()
                      ARRAYSIZE(filters), true);
 }
 
-bool App::EditItem(size_t index)
+// ---------------------------------------------------------------------------
+// Dialogs (built on ui::Form, see MacUi.h)
+// ---------------------------------------------------------------------------
+
+namespace
 {
-    if (index >= items_.size() || !window_.Handle())
+
+std::wstring HexOf(COLORREF color)
+{
+    wchar_t text[16];
+    swprintf(text, 16, L"#%02X%02X%02X",
+             GetRValue(color), GetGValue(color), GetBValue(color));
+    return std::wstring(text);
+}
+
+COLORREF ColorRefOf(const std::wstring& hex, COLORREF fallback)
+{
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
+    if (ParseHexColor(hex, r, g, b, a))
     {
-        return false;
+        return RGB(static_cast<int>(r * 255.0f + 0.5f),
+                   static_cast<int>(g * 255.0f + 0.5f),
+                   static_cast<int>(b * 255.0f + 0.5f));
     }
+    return fallback;
+}
 
-    editor_ = ItemEditor{};
-    editor_.item = items_[index].get();
+/// The automatically derived gradient partner of a picked plate colour.
+COLORREF DerivedColor(COLORREF top)
+{
+    return RGB(GetRValue(top) * 92 / 100,
+               GetGValue(top) * 92 / 100,
+               GetBValue(top) * 92 / 100);
+}
 
-    constexpr wchar_t kEditorClass[] = L"LightDock_ItemEditor";
+int Percent(float value)
+{
+    return static_cast<int>(std::lround(value * 100.0f));
+}
 
-    WNDCLASSEXW windowClass{};
-    windowClass.cbSize = sizeof(windowClass);
-    windowClass.lpfnWndProc = &App::EditorProc;
-    windowClass.hInstance = instance_;
-    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    windowClass.lpszClassName = kEditorClass;
+std::wstring FormatPercent(int value)
+{
+    return std::to_wstring(value) + L"%";
+}
 
-    RegisterClassExW(&windowClass);
+std::wstring FormatPixels(int value)
+{
+    return std::to_wstring(value) + L" px";
+}
 
-    constexpr int width = 500;
-    constexpr int height = 570;
+std::wstring FormatMillis(int value)
+{
+    return std::to_wstring(value) + L" ms";
+}
 
-    // The title names the app being configured so the user always knows
-    // which entry they are editing.
-    const std::wstring title =
-        std::wstring(UiText(L"图标配置 — ")) + items_[index]->name;
+enum : int
+{
+    kButtonSave = 1,
+    kButtonCancel = 2,
+    kButtonRestore = 3,
+};
 
-    const int scaledWidth = static_cast<int>(std::lround(width * dpiScale_));
-    const int scaledHeight = static_cast<int>(std::lround(height * dpiScale_));
+} // namespace
 
-    const RECT work = CurrentWorkArea();
-    const int x = work.left + ((work.right - work.left) - scaledWidth) / 2;
-    const int y = work.top + ((work.bottom - work.top) - scaledHeight) / 2;
-
-    HWND dialog = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
-        kEditorClass,
-        title.c_str(),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        x, y, scaledWidth, scaledHeight,
-        window_.Handle(),
-        nullptr,
-        instance_,
-        this);
-
-    if (!dialog)
+HICON App::AppIconHandle()
+{
+    if (!appIcon_)
     {
-        editor_ = ItemEditor{};
-        return false;
+        appIcon_ = static_cast<HICON>(LoadImageW(
+            instance_, L"IDI_LIGHTDOCK", IMAGE_ICON, 0, 0, LR_DEFAULTSIZE));
     }
+    return appIcon_;
+}
 
-    editor_.dialog = dialog;
-    ShowWindow(dialog, SW_SHOW);
-    SetForegroundWindow(dialog);
-
-    // Modal: the dock keeps painting but stops reacting to the mouse.
-    RunModal(dialog, editor_.closed);
-
-    if (editor_.dialog)
+IWICBitmapSource* App::AppIconBitmap()
+{
+    if (!appIconBitmap_ && icons_.Factory())
     {
-        DestroyWindow(editor_.dialog);
-        editor_.dialog = nullptr;
+        HICON icon = static_cast<HICON>(LoadImageW(
+            instance_, L"IDI_LIGHTDOCK", IMAGE_ICON, 256, 256, 0));
+        if (icon)
+        {
+            icons_.Factory()->CreateBitmapFromHICON(icon, &appIconBitmap_);
+            DestroyIcon(icon);
+        }
     }
-
-    const bool saved = editor_.saved;
-    editor_.item = nullptr;
-
-    return saved;
+    return appIconBitmap_.Get();
 }
 
 void App::RunModal(HWND window, const bool& closed)
@@ -6187,7 +6018,7 @@ void App::RunModal(HWND window, const bool& closed)
 
     MSG message{};
     auto lastModalFrame = std::chrono::steady_clock::now();
-    while (!closed && running_)
+    while (!closed && running_ && IsWindow(window))
     {
         MsgWaitForMultipleObjectsEx(
             0, nullptr, static_cast<DWORD>(frameIntervalMs_),
@@ -6201,11 +6032,9 @@ void App::RunModal(HWND window, const bool& closed)
                 break;
             }
 
-            if (!IsDialogMessageW(window, &message))
-            {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
+            // ui::Form handles its own keyboard navigation.
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
         }
 
         if (!running_)
@@ -6246,286 +6075,242 @@ void App::ApplySettings()
     WakeAnimation();
 }
 
-bool App::ShowSettings()
+bool App::ShowAlert(const std::wstring& title, const std::wstring& message,
+                    const wchar_t* confirm, const wchar_t* cancel)
+{
+    ui::Form form;
+    bool closed = false;
+    bool confirmed = false;
+
+    form.AddSection();
+    form.AddHeader([this]() { return AppIconBitmap(); },
+                   [title]() { return title; }, {}, 44.0f);
+    form.AddParagraph(message);
+    if (cancel)
+    {
+        form.AddButton(kButtonCancel, UiText(cancel));
+    }
+    form.AddButton(kButtonSave, UiText(confirm), ui::ButtonRole::Primary);
+
+    form.onButton = [&](int id)
+    {
+        confirmed = id == kButtonSave;
+        closed = true;
+    };
+    form.onClose = [&]() { closed = true; };
+
+    ui::Form::Options options;
+    options.owner = window_.Handle();
+    options.instance = instance_;
+    options.title = L"LightDock";
+    options.width = 420.0f;
+    options.height = 0.0f;
+    options.center = CurrentWorkArea();
+
+    if (!form.Create(options))
+    {
+        const int answer = MessageBoxW(
+            window_.Handle(), message.c_str(), title.c_str(),
+            cancel ? (MB_OKCANCEL | MB_ICONQUESTION) : MB_OK);
+        return answer == IDOK;
+    }
+
+    RunModal(form.Handle(), closed);
+    form.Destroy();
+    return confirmed;
+}
+
+// --- Dock settings ------------------------------------------------------------
+
+void App::LoadSettingsModel(const DockSettings& s)
+{
+    SettingsEditor& m = settings_;
+    m.mode = s.panelMode == PanelMode::Fixed ? 0
+        : s.panelMode == PanelMode::Elastic ? 1 : 2;
+    m.edge = s.dockEdge == DockEdge::Top ? 1
+        : s.dockEdge == DockEdge::Left ? 2
+        : s.dockEdge == DockEdge::Right ? 3 : 0;
+    m.overallScale = Percent(s.overallScale);
+    m.spacing = s.iconSpacing;
+    m.magnify = static_cast<int>(std::lround(s.magnification * 10.0f));
+    m.autoHide = s.autoHide;
+    m.autoHideDelay = s.autoHideDelayMs;
+    m.autoHideSpeed = s.autoHideAnimationMs;
+
+    m.backgroundOpacity = Percent(s.backgroundOpacity);
+    m.dockCorner = static_cast<int>(std::lround(s.cornerRadius));
+    m.gradient = !s.backgroundBottom.empty();
+    m.topColor = ColorRefOf(s.backgroundTop, RGB(255, 255, 255));
+    m.bottomColor = ColorRefOf(s.backgroundBottom, RGB(255, 255, 255));
+
+    m.plateCorner = static_cast<int>(std::lround(s.backdrop.cornerRadius));
+    m.plateScale = Percent(s.backdrop.iconScale);
+    m.plateOpacity = Percent(s.backdrop.opacity);
+    m.strokeWidth = static_cast<int>(std::lround(s.backdrop.strokeWidth * 10.0f));
+    m.strokeOpacity = Percent(s.backdrop.strokeOpacity);
+
+    m.tooltipOpacity = Percent(s.tooltipOpacity);
+    m.tooltipFade = static_cast<int>(std::lround(s.tooltipFadeSeconds * 1000.0f));
+    m.tooltipScale = Percent(s.tooltipScale);
+    m.tooltipCorner = static_cast<int>(std::lround(s.tooltipCornerRadius));
+}
+
+void App::PreviewSettings()
+{
+    const SettingsEditor& m = settings_;
+    DockSettings& s = config_.settings;
+
+    s.panelMode = m.mode == 1 ? PanelMode::Elastic
+        : m.mode == 2 ? PanelMode::Static : PanelMode::Fixed;
+    s.dockEdge = m.edge == 1 ? DockEdge::Top
+        : m.edge == 2 ? DockEdge::Left
+        : m.edge == 3 ? DockEdge::Right : DockEdge::Bottom;
+
+    // Keep the legacy base icon size fixed. Overall size is the only
+    // dock-wide sizing control exposed to users.
+    s.iconSize = 50;
+    s.iconSpacing = m.spacing;
+    s.overallScale = static_cast<float>(m.overallScale) / 100.0f;
+    s.autoHide = m.autoHide;
+    s.autoHideDelayMs = m.autoHideDelay;
+    s.autoHideAnimationMs = m.autoHideSpeed;
+    s.magnification = static_cast<float>(m.magnify) / 10.0f;
+    s.cornerRadius = static_cast<float>(m.dockCorner);
+    s.tooltipScale = static_cast<float>(m.tooltipScale) / 100.0f;
+    s.tooltipCornerRadius = static_cast<float>(m.tooltipCorner);
+
+    IconBackdrop& backdrop = s.backdrop;
+    backdrop.cornerRadius = static_cast<float>(m.plateCorner);
+    backdrop.iconScale = static_cast<float>(m.plateScale) / 100.0f;
+    backdrop.opacity = static_cast<float>(m.plateOpacity) / 100.0f;
+    backdrop.strokeWidth = static_cast<float>(m.strokeWidth) / 10.0f;
+    backdrop.strokeOpacity = static_cast<float>(m.strokeOpacity) / 100.0f;
+
+    // The first colour is the solid panel colour even when the gradient
+    // switch is off. Only the second stop is cleared in solid mode.
+    s.backgroundTop = HexOf(m.topColor);
+    s.backgroundBottom = m.gradient ? HexOf(m.bottomColor) : std::wstring();
+    s.backgroundOpacity = static_cast<float>(m.backgroundOpacity) / 100.0f;
+    s.tooltipOpacity = static_cast<float>(m.tooltipOpacity) / 100.0f;
+    s.tooltipFadeSeconds = static_cast<float>(m.tooltipFade) / 1000.0f;
+
+    RebuildMetrics();
+    CheckFullscreen();
+
+    // The settings window runs its own modal loop; paint synchronously so
+    // every change shows up on the dock immediately.
+    Render();
+    WakeAnimation();
+}
+
+bool App::ShowSettings(int initialPage)
 {
     settings_ = SettingsEditor{};
+    settings_.original = config_.settings;
+    LoadSettingsModel(config_.settings);
 
-    INITCOMMONCONTROLSEX controls{};
-    controls.dwSize = sizeof(controls);
-    controls.dwICC = ICC_BAR_CLASSES | ICC_TAB_CLASSES;
-    InitCommonControlsEx(&controls);
+    settings_.form = std::make_unique<ui::Form>();
+    ui::Form& form = *settings_.form;
+    SettingsEditor& m = settings_;
 
-    constexpr wchar_t kSettingsClass[] = L"LightDock_Settings";
-    constexpr wchar_t kSettingsPageClass[] = L"LightDock_SettingsPage";
-
-    WNDCLASSEXW windowClass{};
-    windowClass.cbSize = sizeof(windowClass);
-    windowClass.lpfnWndProc = &App::SettingsProc;
-    windowClass.hInstance = instance_;
-    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    windowClass.lpszClassName = kSettingsClass;
-
-    RegisterClassExW(&windowClass);
-
-    WNDCLASSEXW pageClass{};
-    pageClass.cbSize = sizeof(pageClass);
-    pageClass.lpfnWndProc = &App::SettingsViewportProc;
-    pageClass.hInstance = instance_;
-    pageClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    pageClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    pageClass.lpszClassName = kSettingsPageClass;
-    RegisterClassExW(&pageClass);
-
-    // Give the tab pages enough breathing room for real group spacing.
-    // The old compact 424x390 layout forced separators directly against
-    // sliders/labels, so native controls painted over the line and made it
-    // look broken.
-    constexpr int width = 500;
-    constexpr int height = 460;
-
-    // Scale the dialog for the monitor it will appear on.
-    const int scaledWidth = static_cast<int>(std::lround(width * dpiScale_));
-    const int scaledHeight = static_cast<int>(std::lround(height * dpiScale_));
-
-    const RECT work = CurrentWorkArea();
-    const int x = work.left + ((work.right - work.left) - scaledWidth) / 2;
-    const int y = work.top + ((work.bottom - work.top) - scaledHeight) / 2;
-
-    HWND dialog = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
-        kSettingsClass,
-        UiText(L"Dock 设置"),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        x, y, scaledWidth, scaledHeight,
-        window_.Handle(),
-        nullptr,
-        instance_,
-        this);
-
-    if (!dialog)
-    {
-        return false;
-    }
-
-    settings_.dialog = dialog;
-    settingsWindowOpen_ = true;
-    autoHideHidePending_ = false;
-    if (!fullscreenActive_)
-    {
-        SetFullscreenVisibilityTarget(1.0f);
-    }
-    WakeAnimation();
-    ShowWindow(dialog, SW_SHOW);
-    SetForegroundWindow(dialog);
-
-    RunModal(dialog, settings_.closed);
-
-    settingsWindowOpen_ = false;
-    autoHideHidePending_ = false;
-    WakeAnimation();
-
-    if (settings_.dialog)
-    {
-        DestroyWindow(settings_.dialog);
-        settings_.dialog = nullptr;
-    }
-
-    return settings_.saved;
-}
-
-LRESULT CALLBACK App::SettingsProc(HWND hwnd, UINT message,
-                                   WPARAM wParam, LPARAM lParam)
-{
-    App* self = nullptr;
-
-    if (message == WM_NCCREATE)
-    {
-        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = static_cast<App*>(create->lpCreateParams);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-    }
-    else
-    {
-        self = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    }
-
-    if (!self)
-    {
-        return DefWindowProcW(hwnd, message, wParam, lParam);
-    }
-
-    return self->HandleSettingsMessage(hwnd, message, wParam, lParam);
-}
-
-LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
-                                   WPARAM wParam, LPARAM lParam)
-{
-    enum : int
-    {
-        kIdMode = 201,
-        kIdDockEdge = 2200,
-        kIdSize,
-        kIdSpacing,
-        kIdMagnify,
-        kIdAutoHide = 205,
-        kIdFullscreenHideDelay,
-        kIdFullscreenHideSpeed,
-
-        kIdCorner = 221,
-        kIdScale,
-        kIdOpacity,
-
-        kIdBgCustom = 231,
-        kIdBgTop,
-        kIdBgBottom,
-        kIdBgOpacity,
-        kIdTooltipOpacity = 252,
-        kIdTooltipFade,
-        kIdSettingsTabs = 254,
-        kIdDockCorner = 255,
-        kIdTooltipScale,
-        kIdTooltipCorner,
-        kIdStrokeWidth,
-        kIdStrokeOpacity,
-        kIdOverallScale,
-
-        kIdSave = 241,
-        kIdCancel,
-        kIdRestoreDefaults,
-    };
-
-    auto sliderValue = [](HWND slider) -> int
-    {
-        return slider ? static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0))
-                      : 0;
-    };
-
-    auto hexOf = [](COLORREF color) -> std::wstring
+    // --- General ---------------------------------------------------------
+    form.AddPage(UiText(L"通用"), 0xE713, D2D1::ColorF(0x8E8E93));
+    form.AddSection(L"Dock");
+    form.AddChoice(UiText(L"停靠位置"), &m.edge,
+                   {UiText(L"底部"), UiText(L"顶部"),
+                    UiText(L"左侧（竖排）"), UiText(L"右侧（竖排）")});
+    form.AddChoice(UiText(L"背景栏模式"), &m.mode,
+                   {UiText(L"固定宽度（进入时展开）"),
+                    UiText(L"弹性跟随图标"),
+                    UiText(L"无动画（名称气泡正常）")});
+    form.AddSlider(UiText(L"整体大小"), &m.overallScale, 50, 150, FormatPercent);
+    form.AddSlider(UiText(L"图标间距"), &m.spacing, 0, 32, FormatPixels);
+    form.AddSlider(UiText(L"放大倍率"), &m.magnify, 10, 25, [](int value)
     {
         wchar_t text[16];
-        swprintf(text, 16, L"#%02X%02X%02X",
-                 GetRValue(color), GetGValue(color), GetBValue(color));
+        swprintf(text, 16, L"%.1f×", static_cast<double>(value) / 10.0);
         return std::wstring(text);
-    };
+    });
 
-    auto backgroundChecked = [&]() -> bool
+    form.AddSection(UiText(L"自动隐藏"));
+    form.AddSwitch(UiText(L"自动隐藏/覆盖模式"), &m.autoHide,
+                   UiText(L"不占用停靠边的屏幕空间"));
+    form.AddSlider(UiText(L"收回延迟"), &m.autoHideDelay, 0, 5000,
+                   FormatMillis, 50);
+    form.AddSlider(UiText(L"动画时长"), &m.autoHideSpeed, 0, 1000,
+                   FormatMillis, 10);
+
+    // --- Dock background ---------------------------------------------------
+    form.AddPage(UiText(L"背景栏"), 0xE790, D2D1::ColorF(0x0A84FF));
+    form.AddSection(UiText(L"外观"));
+    form.AddSlider(UiText(L"不透明度"), &m.backgroundOpacity, 10, 100,
+                   FormatPercent);
+    form.AddSlider(UiText(L"圆角"), &m.dockCorner, 0, 48, FormatPixels);
+
+    form.AddSection(UiText(L"颜色"),
+                    UiText(L"关闭渐变时，背景栏使用单一颜色。"));
+    form.AddColor(UiText(L"背景颜色"), &m.topColor,
+                  [this]() { return HexOf(settings_.topColor); });
+    form.AddSwitch(UiText(L"渐变"), &m.gradient);
+    form.AddColor(UiText(L"渐变底部颜色"), &m.bottomColor, [this]()
     {
-        return settings_.customBox
-            && SendMessageW(settings_.customBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
-    };
+        return settings_.gradient ? HexOf(settings_.bottomColor)
+                                  : std::wstring(UiText(L"渐变关闭"));
+    }).enabled = [this]() { return settings_.gradient; };
 
-    /// The top swatch is always active because it is also the solid panel
-    /// colour. The bottom swatch is only active for the optional gradient.
-    auto syncBackgroundControls = [&]()
+    // --- Icons -------------------------------------------------------------
+    form.AddPage(UiText(L"图标"), 0xE71D, D2D1::ColorF(0xAF52DE));
+    form.AddSection(UiText(L"底板"),
+        UiText(L"这些是全部图标的默认值；可在图标右键菜单的“图标配置…”中单独调整。"));
+    form.AddSlider(UiText(L"圆角半径"), &m.plateCorner, 0, 28, FormatPixels);
+    form.AddSlider(UiText(L"图标比例"), &m.plateScale, 50, 150, FormatPercent);
+    form.AddSlider(UiText(L"不透明度"), &m.plateOpacity, 0, 100, FormatPercent);
+
+    form.AddSection(UiText(L"内描边"));
+    form.AddSlider(UiText(L"粗细"), &m.strokeWidth, 0, 40, [](int value)
     {
-        const bool on = backgroundChecked();
+        wchar_t text[16];
+        swprintf(text, 16, L"%.1f px", static_cast<double>(value) / 10.0);
+        return std::wstring(text);
+    });
+    form.AddSlider(UiText(L"不透明度"), &m.strokeOpacity, 0, 100, FormatPercent);
 
-        if (settings_.topSwatch)
-        {
-            EnableWindow(settings_.topSwatch, TRUE);
-        }
+    // --- Tooltips ----------------------------------------------------------
+    form.AddPage(UiText(L"名称气泡"), 0xE8BD, D2D1::ColorF(0x34C759));
+    form.AddSection(UiText(L"外观"), UiText(L"运行应用预览沿用这些设置"));
+    form.AddSlider(UiText(L"不透明度"), &m.tooltipOpacity, 10, 100,
+                   FormatPercent);
+    form.AddSlider(UiText(L"比例"), &m.tooltipScale, 50, 188, FormatPercent);
+    form.AddSlider(UiText(L"圆角"), &m.tooltipCorner, 0, 40, FormatPixels);
+    form.AddSlider(UiText(L"淡入淡出时长"), &m.tooltipFade, 50, 1000,
+                   FormatMillis, 10);
 
-        if (settings_.bottomSwatch)
-        {
-            EnableWindow(settings_.bottomSwatch, on ? TRUE : FALSE);
-        }
+    // --- About -------------------------------------------------------------
+    form.AddPage(UiText(L"关于"), 0xE946, D2D1::ColorF(0x8E8E93));
+    form.AddSection();
+    form.AddHeader([this]() { return AppIconBitmap(); },
+                   []() { return std::wstring(L"LightDock"); },
+                   [this]() { return std::wstring(
+                       UiText(L"轻量、可自定义的 Windows 桌面停靠栏")); },
+                   64.0f);
+    form.AddSection();
+    form.AddInfo(UiText(L"作者"),
+                 []() { return std::wstring(L"TerryXu & ChatGPT"); });
+    form.AddInfo(UiText(L"联系邮箱"),
+                 []() { return std::wstring(L"851858419@.com"); });
+    form.AddSection();
+    form.AddParagraph(UiText(
+        L"LightDock 让常用应用触手可及。停靠栏可以放在屏幕的上、下、左、右侧，"
+        L"支持自动隐藏、展开动画和图标悬停放大；图标大小、间距、背景渐变、"
+        L"圆角和透明度都可以按你的喜好调整。"));
 
-        const std::wstring top = hexOf(settings_.topColor);
-        SetWindowTextW(settings_.topHex, top.c_str());
+    // --- Footer --------------------------------------------------------------
+    form.AddButton(kButtonRestore, UiText(L"恢复默认值"),
+                   ui::ButtonRole::Normal, true);
+    form.AddButton(kButtonCancel, UiText(L"取消"));
+    form.AddButton(kButtonSave, UiText(L"保存"), ui::ButtonRole::Primary);
 
-        const std::wstring bottom = on
-            ? hexOf(settings_.bottomColor) : L"（渐变关闭）";
-        SetWindowTextW(settings_.bottomHex, bottom.c_str());
-    };
-
-    /// Live preview: pushes every control into the running config, rebuilds
-    /// the layout and repaints the dock. Cancelling rolls back to the
-    /// snapshot taken in WM_CREATE.
-    auto previewSettings = [&]()
-    {
-        DockSettings& s = config_.settings;
-
-        if (settings_.modeCombo)
-        {
-            const LRESULT selection =
-                SendMessageW(settings_.modeCombo, CB_GETCURSEL, 0, 0);
-
-            s.panelMode = selection == 1 ? PanelMode::Elastic
-                : selection == 2 ? PanelMode::Static : PanelMode::Fixed;
-        }
-        if (settings_.edgeCombo)
-        {
-            const LRESULT selection = SendMessageW(
-                settings_.edgeCombo, CB_GETCURSEL, 0, 0);
-            s.dockEdge = selection == 1 ? DockEdge::Top
-                : selection == 2 ? DockEdge::Left
-                : selection == 3 ? DockEdge::Right : DockEdge::Bottom;
-        }
-
-        // Keep the legacy base icon size fixed. Overall size is now the only
-        // dock-wide sizing control exposed to users.
-        s.iconSize = 50;
-        s.iconSpacing = sliderValue(settings_.spacingSlider);
-        s.overallScale = static_cast<float>(
-            sliderValue(settings_.overallScaleSlider)) / 100.0f;
-        s.autoHide = settings_.autoHideBox
-            && SendMessageW(settings_.autoHideBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
-        s.autoHideDelayMs = sliderValue(settings_.autoHideDelaySlider);
-        s.autoHideAnimationMs = sliderValue(settings_.autoHideSpeedSlider);
-        s.magnification =
-            static_cast<float>(sliderValue(settings_.magnifySlider)) / 10.0f;
-        s.cornerRadius = static_cast<float>(sliderValue(settings_.dockCornerSlider));
-        s.tooltipScale = static_cast<float>(sliderValue(settings_.tooltipScaleSlider))
-            / 100.0f;
-        s.tooltipCornerRadius = static_cast<float>(sliderValue(
-            settings_.tooltipCornerSlider));
-
-        IconBackdrop& backdrop = s.backdrop;
-
-        backdrop.cornerRadius =
-            static_cast<float>(sliderValue(settings_.cornerSlider));
-        backdrop.iconScale =
-            static_cast<float>(sliderValue(settings_.scaleSlider)) / 100.0f;
-        backdrop.opacity =
-            static_cast<float>(sliderValue(settings_.opacitySlider)) / 100.0f;
-        backdrop.strokeWidth = static_cast<float>(sliderValue(
-            settings_.strokeWidthSlider)) / 10.0f;
-        backdrop.strokeOpacity = static_cast<float>(sliderValue(
-            settings_.strokeOpacitySlider)) / 100.0f;
-
-        // The first colour is the solid panel colour even when the gradient
-        // switch is off. Only the second stop is cleared in solid mode.
-        s.backgroundTop = hexOf(settings_.topColor);
-        s.backgroundBottom = backgroundChecked()
-            ? hexOf(settings_.bottomColor)
-            : std::wstring();
-
-        s.backgroundOpacity =
-            static_cast<float>(sliderValue(settings_.bgOpacitySlider))
-            / 100.0f;
-        s.tooltipOpacity =
-            static_cast<float>(sliderValue(settings_.tooltipOpacitySlider))
-            / 100.0f;
-        s.tooltipFadeSeconds =
-            static_cast<float>(sliderValue(settings_.tooltipFadeSlider))
-            / 1000.0f;
-
-        RebuildMetrics();
-        CheckFullscreen();
-
-        // The settings dialog runs its own modal loop, so the dock's frame
-        // loop is parked: `needsRender_` alone would not repaint until the
-        // dialog closes. Paint synchronously, exactly like the per-icon
-        // editor does.
-        Render();
-        WakeAnimation();
-    };
-
-    /// Puts back the settings the dock had before the dialog opened.
-    auto restoreSettings = [&]()
+    auto restore = [this]()
     {
         config_.settings = settings_.original;
         RebuildMetrics();
@@ -6533,1256 +6318,311 @@ LRESULT App::HandleSettingsMessage(HWND hwnd, UINT message,
         WakeAnimation();
     };
 
-    auto refreshLabels = [&]()
+    form.onChange = [this](ui::Form::Control&) { PreviewSettings(); };
+    form.onClose = [this, restore]()
     {
-        wchar_t text[48];
-
-        swprintf(text, 48, L"%d px", sliderValue(settings_.spacingSlider));
-        SetWindowTextW(settings_.spacingLabel, text);
-
-        swprintf(text, 48, L"%.1fx",
-                 static_cast<double>(sliderValue(settings_.magnifySlider))
-                     / 10.0);
-        SetWindowTextW(settings_.magnifyLabel, text);
-
-        swprintf(text, 48, L"%d px", sliderValue(settings_.cornerSlider));
-        SetWindowTextW(settings_.cornerLabel, text);
-
-        swprintf(text, 48, L"%d px", sliderValue(settings_.dockCornerSlider));
-        SetWindowTextW(settings_.dockCornerLabel, text);
-
-        swprintf(text, 48, L"%d%%", sliderValue(settings_.scaleSlider));
-        SetWindowTextW(settings_.scaleLabel, text);
-
-        swprintf(text, 48, L"%d%%", sliderValue(settings_.opacitySlider));
-        SetWindowTextW(settings_.opacityLabel, text);
-
-        swprintf(text, 48, L"%d%%", sliderValue(settings_.bgOpacitySlider));
-        SetWindowTextW(settings_.bgOpacityLabel, text);
-
-        swprintf(text, 48, L"%d%%", sliderValue(settings_.tooltipOpacitySlider));
-        SetWindowTextW(settings_.tooltipOpacityLabel, text);
-
-        swprintf(text, 48, L"%d ms", sliderValue(settings_.tooltipFadeSlider));
-        SetWindowTextW(settings_.tooltipFadeLabel, text);
-
-        swprintf(text, 48, L"%d%%", sliderValue(settings_.tooltipScaleSlider));
-        SetWindowTextW(settings_.tooltipScaleLabel, text);
-
-        swprintf(text, 48, L"%d px",
-                 sliderValue(settings_.tooltipCornerSlider));
-        SetWindowTextW(settings_.tooltipCornerLabel, text);
-
-        swprintf(text, 48, L"%.1f px",
-                 static_cast<double>(sliderValue(settings_.strokeWidthSlider)) / 10.0);
-        SetWindowTextW(settings_.strokeWidthLabel, text);
-
-        swprintf(text, 48, L"%d%%",
-                 sliderValue(settings_.strokeOpacitySlider));
-        SetWindowTextW(settings_.strokeOpacityLabel, text);
-
-        swprintf(text, 48, L"%d%%", sliderValue(settings_.overallScaleSlider));
-        SetWindowTextW(settings_.overallScaleLabel, text);
-
-        swprintf(text, 48, L"%d ms",
-                 sliderValue(settings_.autoHideDelaySlider));
-        SetWindowTextW(settings_.autoHideDelayLabel, text);
-
-        swprintf(text, 48, L"%d ms",
-                 sliderValue(settings_.autoHideSpeedSlider));
-        SetWindowTextW(settings_.autoHideSpeedLabel, text);
-
+        if (!settings_.saved)
+        {
+            restore();
+        }
+        settings_.closed = true;
     };
-
-    switch (message)
+    form.onButton = [this, restore](int id)
     {
-    case WM_NCCREATE:
-        // Must fall through to DefWindowProc, otherwise the window title
-        // passed to CreateWindowExW is never stored and the caption is blank.
-        return DefWindowProcW(hwnd, message, wParam, lParam);
-
-    case WM_CREATE:
-    {
-        if (!hwnd)
+        switch (id)
         {
-            return -1;
-        }
+        case kButtonSave:
+            PreviewSettings();
+            settings_.saved = true;
+            settings_.closed = true;
+            break;
 
-        // Scale every coordinate for the dialog's monitor DPI.
-        const float scale = DialogDpi(hwnd) / 96.0f;
+        case kButtonCancel:
+            restore();
+            settings_.closed = true;
+            break;
 
-        auto S = [scale](int value) -> int
+        case kButtonRestore:
         {
-            return static_cast<int>(std::lround(value * scale));
-        };
-
-        auto setFont = [](HWND control, bool bold = false)
-        {
-            HFONT font = DialogFont(bold);
-            if (control && font)
-            {
-                SendMessageW(control, WM_SETFONT,
-                             reinterpret_cast<WPARAM>(font), TRUE);
-            }
-        };
-
-        auto makeLabel = [&](const wchar_t* text, int x, int y, int w,
-                             bool bold = false)
-        {
-            text = UiText(text);
-            HWND control = CreateWindowExW(
-                0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                S(x), S(y), S(w), S(20), hwnd, nullptr, instance_, nullptr);
-            setFont(control, bold);
-            return control;
-        };
-
-        auto makeSlider = [&](int id, int x, int y, int w,
-                              int lo, int hi, int value)
-        {
-            HWND control = CreateWindowExW(
-                0, TRACKBAR_CLASSW, nullptr,
-                WS_CHILD | WS_VISIBLE | TBS_HORZ | WS_TABSTOP,
-                S(x), S(y), S(w), S(28), hwnd,
-                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                instance_, nullptr);
-
-            if (control)
-            {
-                SendMessageW(control, TBM_SETRANGE, TRUE, MAKELPARAM(lo, hi));
-                SendMessageW(control, TBM_SETPOS, TRUE, value);
-                setFont(control);
-            }
-
-            return control;
-        };
-
-        auto makeButton = [&](const wchar_t* text, int id, int x, int y)
-        {
-            text = UiText(text);
-            HWND control = CreateWindowExW(
-                0, L"BUTTON", text,
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-                S(x), S(y), S(84), S(28), hwnd,
-                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                instance_, nullptr);
-            setFont(control);
-            return control;
-        };
-
-        auto makeCheck = [&](const wchar_t* text, bool checked, int id,
-                             int x, int y, int w)
-        {
-            text = UiText(text);
-            HWND control = CreateWindowExW(
-                0, L"BUTTON", text,
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-                S(x), S(y), S(w), S(22), hwnd,
-                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                instance_, nullptr);
-
-            if (control)
-            {
-                SendMessageW(control, BM_SETCHECK,
-                             checked ? BST_CHECKED : BST_UNCHECKED, 0);
-                setFont(control);
-            }
-
-            return control;
-        };
-
-        // Snapshot for the live preview rollback on cancel.
-        settings_.original = config_.settings;
-
-        // --- dock behaviour -------------------------------------------------
-        HWND modeCaption = makeLabel(L"背景栏模式", 22, 22, 90);
-
-        settings_.modeCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
-            S(118), S(18), S(260), S(140), hwnd,
-            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdMode)),
-            instance_, nullptr);
-
-        if (settings_.modeCombo)
-        {
-            SendMessageW(settings_.modeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(UiText(L"固定宽度（进入时展开）")));
-            SendMessageW(settings_.modeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(UiText(L"弹性跟随图标")));
-
-            SendMessageW(settings_.modeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(UiText(L"无动画（名称气泡正常）")));
-
-            SendMessageW(settings_.modeCombo, CB_SETCURSEL,
-                         config_.settings.panelMode == PanelMode::Fixed ? 0
-                         : config_.settings.panelMode == PanelMode::Elastic ? 1 : 2,
-                         0);
-
-            setFont(settings_.modeCombo);
-        }
-
-        HWND dockEdgeCaption = makeLabel(L"停靠位置", 22, 56, 90);
-        settings_.edgeCombo = CreateWindowExW(
-            0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
-            S(118), S(52), S(260), S(120), hwnd,
-            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdDockEdge)),
-            instance_, nullptr);
-        if (settings_.edgeCombo)
-        {
-            SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(UiText(L"底部")));
-            SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(UiText(L"顶部")));
-            SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(UiText(L"左侧（竖排）")));
-            SendMessageW(settings_.edgeCombo, CB_ADDSTRING, 0,
-                         reinterpret_cast<LPARAM>(UiText(L"右侧（竖排）")));
-            SendMessageW(settings_.edgeCombo, CB_SETCURSEL,
-                config_.settings.dockEdge == DockEdge::Top ? 1
-                : config_.settings.dockEdge == DockEdge::Left ? 2
-                : config_.settings.dockEdge == DockEdge::Right ? 3 : 0, 0);
-            setFont(settings_.edgeCombo);
-        }
-
-        HWND overallScaleCaption = makeLabel(L"整体大小", 22, 88, 100);
-        settings_.overallScaleSlider = makeSlider(
-            kIdOverallScale, 118, 80, 180, 50, 150,
-            static_cast<int>(std::lround(
-                config_.settings.overallScale * 100.0f)));
-        settings_.overallScaleLabel = makeLabel(L"", 306, 88, 60);
-        settings_.spacingSlider = makeSlider(
-            kIdSpacing, 118, 108, 180, 0, 32, config_.settings.iconSpacing);
-        settings_.magnifySlider = makeSlider(
-            kIdMagnify, 118, 136, 180, 10, 25,
-            static_cast<int>(std::lround(config_.settings.magnification
-                                         * 10.0f)));
-
-        HWND spacingCaption = makeLabel(L"图标间距", 22, 116, 90);
-        HWND magnifyCaption = makeLabel(L"放大倍率", 22, 144, 90);
-        settings_.spacingLabel = makeLabel(L"", 306, 116, 60);
-        settings_.magnifyLabel = makeLabel(L"", 306, 144, 60);
-
-        settings_.autoHideBox = makeCheck(
-            L"自动隐藏/覆盖模式（不占用停靠边空间）",
-            config_.settings.autoHide, kIdAutoHide, 22, 178, 340);
-        HWND autoHideDelayCaption =
-            makeLabel(L"收回延迟", 22, 218, 120);
-        settings_.autoHideDelaySlider = makeSlider(
-            kIdFullscreenHideDelay, 158, 214, 140, 0, 5000,
-            config_.settings.autoHideDelayMs);
-        settings_.autoHideDelayLabel = makeLabel(L"", 306, 218, 65);
-        HWND autoHideSpeedCaption =
-            makeLabel(L"自动隐藏动画时长", 22, 250, 130);
-        settings_.autoHideSpeedSlider = makeSlider(
-            kIdFullscreenHideSpeed, 158, 246, 140, 0, 1000,
-            config_.settings.autoHideAnimationMs);
-        settings_.autoHideSpeedLabel = makeLabel(L"", 306, 250, 65);
-        // Divider inside the Behavior tab: hover/window interaction above,
-        // auto-hide timing below.
-        HWND behaviorSeparator = CreateWindowExW(
-            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(22), S(172), S(430), S(2), hwnd, nullptr, instance_, nullptr);
-        MarkDialogTabPage(behaviorSeparator, 0);
-
-        // --- panel background ------------------------------------------------
-        makeLabel(L"背景栏外观", 22, 182, 300, true);
-
-        settings_.customBox = makeCheck(L"自定义背景渐变",
-                                        !config_.settings.backgroundBottom.empty(),
-                                        kIdBgCustom, 22, 212, 240);
-
-        makeLabel(L"背景栏不透明度", 22, 246, 130);
-        settings_.bgOpacitySlider = makeSlider(
-            kIdBgOpacity, 158, 242, 140, 10, 100,
-            static_cast<int>(std::lround(config_.settings.backgroundOpacity
-                                         * 100.0f)));
-        settings_.bgOpacityLabel = makeLabel(L"", 306, 246, 60);
-
-        auto colorRefOf = [](const std::wstring& hex,
-                             COLORREF fallback) -> COLORREF
-        {
-            float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
-            if (ParseHexColor(hex, r, g, b, a))
-            {
-                return RGB(static_cast<int>(r * 255.0f + 0.5f),
-                           static_cast<int>(g * 255.0f + 0.5f),
-                           static_cast<int>(b * 255.0f + 0.5f));
-            }
-
-            return fallback;
-        };
-
-        // Built-in white, only shown while the gradient is off. If the user
-        // enables the gradient, start from a clean white pair of stops.
-        settings_.topColor = colorRefOf(config_.settings.backgroundTop,
-                                        RGB(255, 255, 255));
-        settings_.bottomColor = colorRefOf(config_.settings.backgroundBottom,
-                                           RGB(255, 255, 255));
-
-        auto makeSwatch = [&](int id, int x, int y)
-        {
-            return CreateWindowExW(
-                0, L"BUTTON", nullptr,
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
-                S(x), S(y), S(64), S(24),
-                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                instance_, nullptr);
-        };
-
-        makeLabel(L"背景栏圆角", 22, 282, 110);
-        settings_.dockCornerSlider = makeSlider(
-            kIdDockCorner, 158, 278, 140, 0, 48,
-            static_cast<int>(std::lround(config_.settings.cornerRadius)));
-        settings_.dockCornerLabel = makeLabel(L"", 306, 282, 60);
-
-        // Divider inside the Background tab: geometry/opacity above,
-        // colour controls below. This is intentionally in page-1 authored
-        // coordinates and will be shifted with the rest of that tab.
-        CreateWindowExW(
-            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(22), S(318), S(430), S(2), hwnd, nullptr, instance_, nullptr);
-
-        makeLabel(L"顶部颜色", 22, 330, 90);
-        settings_.topSwatch = makeSwatch(kIdBgTop, 118, 326);
-        settings_.topHex = makeLabel(L"", 194, 330, 150);
-
-        makeLabel(L"底部颜色", 22, 364, 90);
-        settings_.bottomSwatch = makeSwatch(kIdBgBottom, 118, 360);
-        settings_.bottomHex = makeLabel(L"", 194, 364, 150);
-
-        // --- global plate defaults ------------------------------------------
-        makeLabel(L"全局图标设置", 22, 392, 300, true);
-
-        const IconBackdrop& backdrop = config_.settings.backdrop;
-
-        makeLabel(L"圆角半径", 22, 424, 90);
-        makeLabel(L"图标在底板内的比例", 22, 462, 130);
-        makeLabel(L"不透明度", 22, 500, 90);
-        makeLabel(L"内描边粗细", 22, 554, 100);
-        makeLabel(L"描边不透明度", 22, 592, 110);
-
-        settings_.cornerSlider = makeSlider(
-            kIdCorner, 118, 416, 180, 0, 28,
-            static_cast<int>(std::lround(backdrop.cornerRadius)));
-        settings_.scaleSlider = makeSlider(
-            kIdScale, 158, 454, 140, 50, 150,
-            static_cast<int>(std::lround(backdrop.iconScale * 100.0f)));
-        settings_.opacitySlider = makeSlider(
-            kIdOpacity, 118, 492, 180, 0, 100,
-            static_cast<int>(std::lround(backdrop.opacity * 100.0f)));
-
-        settings_.strokeWidthSlider = makeSlider(
-            kIdStrokeWidth, 158, 546, 140, 0, 40,
-            static_cast<int>(std::lround(backdrop.strokeWidth * 10.0f)));
-        settings_.cornerLabel = makeLabel(L"", 306, 424, 60);
-        settings_.scaleLabel = makeLabel(L"", 306, 462, 60);
-        settings_.opacityLabel = makeLabel(L"", 306, 500, 60);
-
-        // Divider inside the Icons tab: tile shape/fill above, rim controls
-        // below. In page-2 authored coordinates this lands between the two
-        // groups after tab layout.
-        CreateWindowExW(
-            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(22), S(528), S(430), S(2), hwnd, nullptr, instance_, nullptr);
-
-        settings_.strokeWidthLabel = makeLabel(L"", 306, 554, 60);
-
-        settings_.strokeOpacitySlider = makeSlider(
-            kIdStrokeOpacity, 158, 584, 140, 0, 100,
-            static_cast<int>(std::lround(backdrop.strokeOpacity * 100.0f)));
-        settings_.strokeOpacityLabel = makeLabel(L"", 306, 592, 60);
-
-        // --- tooltip bubble -------------------------------------------------
-        HWND tooltipHeader = makeLabel(L"名称气泡", 22, 54, 300, true);
-        HWND tooltipOpacityCaption = makeLabel(L"气泡不透明度", 22, 80, 120);
-        settings_.tooltipOpacitySlider = makeSlider(
-            kIdTooltipOpacity, 158, 76, 140, 10, 100,
-            static_cast<int>(std::lround(config_.settings.tooltipOpacity
-                                         * 100.0f)));
-        settings_.tooltipOpacityLabel = makeLabel(L"", 306, 80, 60);
-        HWND tooltipFadeCaption = makeLabel(L"淡入淡出时长", 22, 108, 120);
-        settings_.tooltipFadeSlider = makeSlider(
-            kIdTooltipFade, 158, 104, 140, 50, 1000,
-            static_cast<int>(std::lround(
-                config_.settings.tooltipFadeSeconds * 1000.0f)));
-        settings_.tooltipFadeLabel = makeLabel(L"", 306, 108, 70);
-        HWND tooltipScaleCaption = makeLabel(L"气泡比例", 22, 136, 120);
-        settings_.tooltipScaleSlider = makeSlider(
-            kIdTooltipScale, 158, 132, 140, 50, 188,
-            static_cast<int>(std::lround(config_.settings.tooltipScale * 100.0f)));
-        settings_.tooltipScaleLabel = makeLabel(L"", 306, 136, 60);
-        HWND tooltipPreviewNote =
-            makeLabel(L"运行应用预览沿用这些设置", 22, 170, 300);
-        HWND tooltipCornerCaption = makeLabel(L"气泡圆角", 22, 202, 120);
-        settings_.tooltipCornerSlider = makeSlider(
-            kIdTooltipCorner, 158, 198, 140, 0, 40,
-            static_cast<int>(std::lround(
-                config_.settings.tooltipCornerRadius)));
-        settings_.tooltipCornerLabel = makeLabel(L"", 306, 202, 60);
-
-        refreshLabels();
-        syncBackgroundControls();
-
-        HWND save = makeButton(L"保存", kIdSave, 300, 400);
-        makeButton(L"取消", kIdCancel, 392, 400);
-
-        settings_.tabControl = CreateWindowExW(
-            0, WC_TABCONTROLW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
-            S(12), S(8), S(476), S(370), hwnd,
-            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdSettingsTabs)),
-            instance_, nullptr);
-        setFont(settings_.tabControl);
-        if (settings_.tabControl)
-        {
-            TCITEMW tab{};
-            tab.mask = TCIF_TEXT;
-            tab.pszText = const_cast<wchar_t*>(UiText(L"行为"));
-            TabCtrl_InsertItem(settings_.tabControl, 0, &tab);
-            tab.pszText = const_cast<wchar_t*>(UiText(L"背景栏"));
-            TabCtrl_InsertItem(settings_.tabControl, 1, &tab);
-            tab.pszText = const_cast<wchar_t*>(UiText(L"图标"));
-            TabCtrl_InsertItem(settings_.tabControl, 2, &tab);
-            tab.pszText = const_cast<wchar_t*>(UiText(L"气泡"));
-            TabCtrl_InsertItem(settings_.tabControl, 3, &tab);
-            TabCtrl_SetCurSel(settings_.tabControl, 0);
-
-            // These controls are laid out in the behavior page's final
-            // coordinates, below the original compact interaction rows.
-            MarkDialogTabPage(settings_.autoHideDelaySlider, 0);
-            MarkDialogTabPage(settings_.autoHideBox, 0);
-            MarkDialogTabPage(dockEdgeCaption, 0);
-            MarkDialogTabPage(settings_.edgeCombo, 0);
-            MarkDialogTabPage(settings_.autoHideDelayLabel, 0);
-            MarkDialogTabPage(settings_.autoHideSpeedSlider, 0);
-            MarkDialogTabPage(settings_.autoHideSpeedLabel, 0);
-            // These captions share their controls' final behavior-page
-            // coordinates; keep them on page 0 instead of letting the
-            // generic coordinate pass classify them as background-page
-            // labels and shift them out of view.
-            MarkDialogTabPage(autoHideDelayCaption, 0);
-            MarkDialogTabPage(autoHideSpeedCaption, 0);
-            // Keep every behavior-page control on its authored row. The
-            // generic page classifier shifts untagged controls down to make
-            // room for another page; that would collide with the newly added
-            // dock-edge selector and the auto-hide rows.
-            MarkDialogTabPage(modeCaption, 0);
-            MarkDialogTabPage(settings_.modeCombo, 0);
-            MarkDialogTabPage(overallScaleCaption, 0);
-            MarkDialogTabPage(spacingCaption, 0);
-            MarkDialogTabPage(magnifyCaption, 0);
-            MarkDialogTabPage(settings_.overallScaleSlider, 0);
-            MarkDialogTabPage(settings_.spacingSlider, 0);
-            MarkDialogTabPage(settings_.magnifySlider, 0);
-            MarkDialogTabPage(settings_.overallScaleLabel, 0);
-            MarkDialogTabPage(settings_.spacingLabel, 0);
-            MarkDialogTabPage(settings_.magnifyLabel, 0);
-            // These controls are already positioned in the bubble page's
-            // final coordinates; pre-tag them so the generic page classifier
-            // does not shift them through another tab's coordinate range.
-            MarkDialogTabPage(tooltipCornerCaption, 3);
-            MarkDialogTabPage(tooltipHeader, 3);
-            MarkDialogTabPage(tooltipOpacityCaption, 3);
-            MarkDialogTabPage(tooltipFadeCaption, 3);
-            MarkDialogTabPage(tooltipScaleCaption, 3);
-            MarkDialogTabPage(tooltipPreviewNote, 3);
-            MarkDialogTabPage(settings_.tooltipOpacitySlider, 3);
-            MarkDialogTabPage(settings_.tooltipOpacityLabel, 3);
-            MarkDialogTabPage(settings_.tooltipFadeSlider, 3);
-            MarkDialogTabPage(settings_.tooltipFadeLabel, 3);
-            MarkDialogTabPage(settings_.tooltipScaleSlider, 3);
-            MarkDialogTabPage(settings_.tooltipScaleLabel, 3);
-            MarkDialogTabPage(settings_.tooltipCornerSlider, 3);
-            MarkDialogTabPage(settings_.tooltipCornerLabel, 3);
-
-            TagDialogChildrenContext tagContext{
-                hwnd, kIdSettingsTabs, kIdSave, kIdCancel,
-                S(160), S(382), 2, S(38), -S(120), -S(338)};
-            EnumChildWindows(hwnd, TagDialogChildren,
-                             reinterpret_cast<LPARAM>(&tagContext));
-            EnumChildWindows(hwnd, [](HWND child, LPARAM amount) -> BOOL
-            {
-                HANDLE tag = GetPropW(child, kDialogTabPageProperty);
-                if (tag
-                    && static_cast<int>(reinterpret_cast<INT_PTR>(tag)) - 1 == 3)
-                {
-                    RECT rect{};
-                    GetWindowRect(child, &rect);
-                    MapWindowPoints(nullptr, GetParent(child),
-                                    reinterpret_cast<POINT*>(&rect), 2);
-                    SetWindowPos(child, nullptr, rect.left,
-                        rect.top - static_cast<int>(amount), 0, 0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                }
-                return TRUE;
-            }, S(38));
-            ShowDialogTabPage(hwnd, 0);
-            // The controls remain direct dialog children so existing page
-            // visibility and layout logic stays intact. Keep the enlarged
-            // tab control behind them as the framed page surface.
-            SetWindowPos(settings_.tabControl, HWND_BOTTOM, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-
-            HWND restore = CreateWindowExW(
-                0, L"BUTTON", UiText(L"恢复默认值"),
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-                S(20), S(400), S(120), S(28), hwnd,
-                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(
-                    kIdRestoreDefaults)), instance_, nullptr);
-            setFont(restore);
-
-            // Give each tab a real clipped page surface. Previously the
-            // controls were siblings of the tab control, so rows outside its
-            // page could paint over the tab strip and footer instead of being
-            // clipped or scrollable.
-            RECT pageRect{};
-            GetClientRect(settings_.tabControl, &pageRect);
-            TabCtrl_AdjustRect(settings_.tabControl, FALSE, &pageRect);
-            POINT pageOrigin{pageRect.left, pageRect.top};
-            MapWindowPoints(settings_.tabControl, hwnd, &pageOrigin, 1);
-            const int pageHeight = std::max(
-                S(1), static_cast<int>(pageRect.bottom - pageRect.top));
-            settings_.pageViewport = CreateWindowExW(
-                0, L"LightDock_SettingsPage", L"",
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
-                pageOrigin.x, pageOrigin.y,
-                pageRect.right - pageRect.left,
-                pageHeight,
-                hwnd, nullptr, instance_, this);
-
-            if (settings_.pageViewport)
-            {
-                std::vector<HWND> children;
-                EnumChildWindows(hwnd,
-                    [](HWND child, LPARAM parameter) -> BOOL
-                    {
-                        auto* controls = reinterpret_cast<std::vector<HWND>*>(
-                            parameter);
-                        controls->push_back(child);
-                        return TRUE;
-                    }, reinterpret_cast<LPARAM>(&children));
-
-                // Snapshot first, then reparent only direct dialog children.
-                // Mutating the hierarchy during EnumChildWindows can skip
-                // controls, while moving nested native control internals
-                // (such as combo-box list windows) breaks those controls.
-                for (HWND child : children)
-                {
-                    if (GetParent(child) != hwnd)
-                    {
-                        continue;
-                    }
-
-                    const int id = GetDlgCtrlID(child);
-                    if (child == settings_.tabControl
-                        || child == settings_.pageViewport
-                        || id == kIdSave || id == kIdCancel
-                        || id == kIdRestoreDefaults)
-                    {
-                        continue;
-                    }
-
-                    RECT rect{};
-                    GetWindowRect(child, &rect);
-                    MapWindowPoints(nullptr, hwnd,
-                        reinterpret_cast<POINT*>(&rect), 2);
-
-                    HANDLE tag = GetPropW(child, kDialogTabPageProperty);
-                    const int page = tag
-                        ? static_cast<int>(reinterpret_cast<INT_PTR>(tag)) - 1
-                        : 0;
-                    const int x = rect.left - pageOrigin.x;
-                    const int y = rect.top - pageOrigin.y;
-
-                    SetParent(child, settings_.pageViewport);
-                    SetWindowPos(child, nullptr, x, y, 0, 0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-
-                    settings_.scrollChildren.push_back({child, x, y, page});
-                    RECT childRect{};
-                    GetWindowRect(child, &childRect);
-                    MapWindowPoints(nullptr, settings_.pageViewport,
-                        reinterpret_cast<POINT*>(&childRect), 2);
-                    settings_.pageContentBottom[page] = std::max(
-                        settings_.pageContentBottom[page],
-                        static_cast<int>(childRect.bottom));
-                }
-
-                int pageTop[4] = {
-                    std::numeric_limits<int>::max(),
-                    std::numeric_limits<int>::max(),
-                    std::numeric_limits<int>::max(),
-                    std::numeric_limits<int>::max()};
-                for (const SettingsEditor::ScrollChild& child
-                     : settings_.scrollChildren)
-                {
-                    pageTop[child.page] = std::min(pageTop[child.page],
-                                                   child.y);
-                }
-                for (int page = 0; page < 4; ++page)
-                {
-                    if (pageTop[page] == std::numeric_limits<int>::max())
-                    {
-                        continue;
-                    }
-
-                    // The authored coordinates start above the tab page for
-                    // the behavior and bubble tabs. Preserve a clear top
-                    // inset so their first controls are fully visible.
-                    const int offset = std::max(0, S(8) - pageTop[page]);
-                    if (offset == 0)
-                    {
-                        continue;
-                    }
-
-                    settings_.pageContentBottom[page] += offset;
-                    for (SettingsEditor::ScrollChild& child
-                         : settings_.scrollChildren)
-                    {
-                        if (child.page != page)
-                        {
-                            continue;
-                        }
-
-                        child.y += offset;
-                        SetWindowPos(child.hwnd, nullptr, child.x, child.y,
-                            0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                    }
-                }
-
-                ShowDialogTabPage(hwnd, 0);
-                SetSettingsPageScroll(0);
-            }
-        }
-
-        SetFocus(save);
-
-        return 0;
-    }
-
-    case WM_NOTIFY:
-    {
-        const auto* header = reinterpret_cast<const NMHDR*>(lParam);
-        if (header && header->idFrom == kIdSettingsTabs
-            && header->code == TCN_SELCHANGE)
-        {
-            ShowDialogTabPage(hwnd,
-                TabCtrl_GetCurSel(settings_.tabControl));
-            SetSettingsPageScroll(0);
-            // A tab switch changes which native controls are visible inside
-            // the clipped scroll viewport. Repaint the viewport and dialog
-            // synchronously so the new page is not left blank until input.
-            RedrawWindow(settings_.pageViewport, nullptr, nullptr,
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME
-                    | RDW_UPDATENOW);
-            RedrawWindow(hwnd, nullptr, nullptr,
-                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-            return 0;
-        }
-        break;
-    }
-
-    case WM_HSCROLL:
-        refreshLabels();
-        previewSettings();
-        return 0;
-
-    case WM_DRAWITEM:
-    {
-        const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
-
-        if (draw->CtlID != kIdBgTop && draw->CtlID != kIdBgBottom)
-        {
+            // Defaults for everything except language and display.
+            DockSettings defaults;
+            LoadSettingsModel(defaults);
+            settings_.topColor = RGB(255, 255, 255);
+            settings_.bottomColor = RGB(235, 235, 235);
+            settings_.form->Refresh();
+            PreviewSettings();
             break;
         }
 
-        const COLORREF fill = draw->CtlID == kIdBgTop
-            ? settings_.topColor
-            : settings_.bottomColor;
-
-        HBRUSH brush = CreateSolidBrush(fill);
-        FillRect(draw->hDC, &draw->rcItem, brush);
-        DeleteObject(brush);
-
-        FrameRect(draw->hDC, &draw->rcItem, GetSysColorBrush(COLOR_3DDKSHADOW));
-
-        if ((draw->itemState & ODS_FOCUS) != 0)
-        {
-            DrawFocusRect(draw->hDC, &draw->rcItem);
+        default:
+            break;
         }
+    };
 
-        return TRUE;
-    }
+    form.SelectPage(initialPage);
 
-    case WM_COMMAND:
-        switch (LOWORD(wParam))
-        {
-        case kIdRestoreDefaults:
-        {
-            const DockSettings defaults;
-            auto setSlider = [](HWND control, int value)
-            {
-                if (control)
-                {
-                    SendMessageW(control, TBM_SETPOS, TRUE, value);
-                }
-            };
+    ui::Form::Options options;
+    options.owner = window_.Handle();
+    options.instance = instance_;
+    options.title = UiText(L"Dock 设置");
+    options.width = 720.0f;
+    options.height = 500.0f;
+    options.navigation = ui::Navigation::Sidebar;
+    options.icon = AppIconHandle();
+    options.center = CurrentWorkArea();
 
-            SendMessageW(settings_.modeCombo, CB_SETCURSEL,
-                         defaults.panelMode == PanelMode::Fixed ? 0
-                         : defaults.panelMode == PanelMode::Elastic ? 1 : 2,
-                         0);
-            SendMessageW(settings_.edgeCombo, CB_SETCURSEL,
-                         defaults.dockEdge == DockEdge::Top ? 1
-                         : defaults.dockEdge == DockEdge::Left ? 2
-                         : defaults.dockEdge == DockEdge::Right ? 3 : 0, 0);
-            setSlider(settings_.overallScaleSlider,
-                      static_cast<int>(std::lround(defaults.overallScale * 100.0f)));
-            setSlider(settings_.spacingSlider, defaults.iconSpacing);
-            setSlider(settings_.magnifySlider,
-                      static_cast<int>(std::lround(defaults.magnification * 10.0f)));
-            SendMessageW(settings_.autoHideBox, BM_SETCHECK,
-                         defaults.autoHide ? BST_CHECKED : BST_UNCHECKED, 0);
-            setSlider(settings_.autoHideDelaySlider, defaults.autoHideDelayMs);
-            setSlider(settings_.autoHideSpeedSlider,
-                      defaults.autoHideAnimationMs);
-            setSlider(settings_.dockCornerSlider,
-                      static_cast<int>(std::lround(defaults.cornerRadius)));
-            setSlider(settings_.tooltipOpacitySlider,
-                      static_cast<int>(std::lround(defaults.tooltipOpacity * 100.0f)));
-            setSlider(settings_.tooltipFadeSlider,
-                      static_cast<int>(std::lround(defaults.tooltipFadeSeconds * 1000.0f)));
-            setSlider(settings_.tooltipScaleSlider,
-                      static_cast<int>(std::lround(defaults.tooltipScale * 100.0f)));
-            setSlider(settings_.tooltipCornerSlider,
-                      static_cast<int>(std::lround(defaults.tooltipCornerRadius)));
-            setSlider(settings_.cornerSlider,
-                      static_cast<int>(std::lround(defaults.backdrop.cornerRadius)));
-            setSlider(settings_.scaleSlider,
-                      static_cast<int>(std::lround(defaults.backdrop.iconScale * 100.0f)));
-            setSlider(settings_.opacitySlider,
-                      static_cast<int>(std::lround(defaults.backdrop.opacity * 100.0f)));
-            setSlider(settings_.strokeWidthSlider,
-                      static_cast<int>(std::lround(defaults.backdrop.strokeWidth * 10.0f)));
-            setSlider(settings_.strokeOpacitySlider,
-                      static_cast<int>(std::lround(defaults.backdrop.strokeOpacity * 100.0f)));
-            setSlider(settings_.bgOpacitySlider,
-                      static_cast<int>(std::lround(defaults.backgroundOpacity * 100.0f)));
-
-            settings_.topColor = RGB(255, 255, 255);
-            settings_.bottomColor = RGB(235, 235, 235);
-            SendMessageW(settings_.customBox, BM_SETCHECK,
-                         defaults.backgroundBottom.empty()
-                             ? BST_UNCHECKED : BST_CHECKED, 0);
-            refreshLabels();
-            syncBackgroundControls();
-            previewSettings();
-            return 0;
-        }
-
-        case kIdMode:
-        case kIdDockEdge:
-            if (HIWORD(wParam) == CBN_SELCHANGE)
-            {
-                previewSettings();
-            }
-            return 0;
-
-        case kIdAutoHide:
-            previewSettings();
-            return 0;
-
-        case kIdBgCustom:
-            syncBackgroundControls();
-            previewSettings();
-            return 0;
-
-        case kIdBgTop:
-        case kIdBgBottom:
-        {
-            static COLORREF customColors[16] = {};
-
-            CHOOSECOLORW chooser{};
-            chooser.lStructSize = sizeof(chooser);
-            chooser.hwndOwner = hwnd;
-            chooser.rgbResult = (LOWORD(wParam) == kIdBgTop)
-                ? settings_.topColor
-                : settings_.bottomColor;
-            chooser.lpCustColors = customColors;
-            chooser.Flags = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR;
-
-            if (ChooseColorW(&chooser))
-            {
-                if (LOWORD(wParam) == kIdBgTop)
-                {
-                    settings_.topColor = chooser.rgbResult;
-                }
-                else
-                {
-                    settings_.bottomColor = chooser.rgbResult;
-                }
-
-                syncBackgroundControls();
-                previewSettings();
-            }
-
-            return 0;
-        }
-
-        case kIdSave:
-        {
-            // The live preview already wrote every control into the config;
-            // persist it and close.
-            previewSettings();
-            settings_.saved = true;
-            settings_.closed = true;
-            return 0;
-        }
-
-        case kIdCancel:
-            // Roll back whatever the live preview already applied.
-            if (!settings_.saved)
-            {
-                restoreSettings();
-            }
-
-            settings_.closed = true;
-            return 0;
-        }
-
-        return 0;
-
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLOREDIT:
+    if (!form.Create(options))
     {
-        // Blend labels and edits into the white dialog background instead of
-        // the themed control's gray filler.
-        HDC dc = reinterpret_cast<HDC>(wParam);
-        SetBkMode(dc, TRANSPARENT);
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        settings_.form.reset();
+        return false;
     }
 
-    case WM_CLOSE:
-        if (!settings_.saved)
-        {
-            restoreSettings();
-        }
+    settingsWindowOpen_ = true;
+    autoHideHidePending_ = false;
+    if (!fullscreenActive_)
+    {
+        SetFullscreenVisibilityTarget(1.0f);
+    }
+    WakeAnimation();
 
-        settings_.closed = true;
-        return 0;
+    RunModal(form.Handle(), settings_.closed);
 
-    case WM_DESTROY:
-        if (!settings_.saved)
-        {
-            restoreSettings();
-        }
-
-        settings_.closed = true;
-        return 0;
+    if (!settings_.saved)
+    {
+        restore();
     }
 
-    return DefWindowProcW(hwnd, message, wParam, lParam);
+    settingsWindowOpen_ = false;
+    autoHideHidePending_ = false;
+    WakeAnimation();
+
+    settings_.form->Destroy();
+    settings_.form.reset();
+    return settings_.saved;
 }
 
-LRESULT CALLBACK App::SettingsViewportProc(HWND hwnd, UINT message,
-                                            WPARAM wParam, LPARAM lParam)
+// --- Icon editor ----------------------------------------------------------------
+
+void App::PreviewPlate()
 {
-    App* self = nullptr;
-    if (message == WM_NCCREATE)
-    {
-        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = static_cast<App*>(create->lpCreateParams);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
-                          reinterpret_cast<LONG_PTR>(self));
-    }
-    else
-    {
-        self = reinterpret_cast<App*>(
-            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    }
-
-    if (self)
-    {
-        const LRESULT result = self->HandleSettingsViewportMessage(
-            hwnd, message, wParam, lParam);
-        if (result != std::numeric_limits<LRESULT>::min())
-        {
-            return result;
-        }
-    }
-
-    return DefWindowProcW(hwnd, message, wParam, lParam);
-}
-
-LRESULT App::HandleSettingsViewportMessage(HWND hwnd, UINT message,
-                                            WPARAM wParam, LPARAM lParam)
-{
-    if (hwnd != settings_.pageViewport)
-    {
-        return std::numeric_limits<LRESULT>::min();
-    }
-
-    switch (message)
-    {
-    case WM_COMMAND:
-    case WM_HSCROLL:
-    case WM_NOTIFY:
-    case WM_DRAWITEM:
-    case WM_MEASUREITEM:
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLOREDIT:
-        return SendMessageW(settings_.dialog, message, wParam, lParam);
-    default:
-        break;
-    }
-
-    if (message == WM_MOUSEWHEEL)
-    {
-        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
-        SetSettingsPageScroll(settings_.pageScrollPosition
-            - (delta / WHEEL_DELTA) * 48);
-        return 0;
-    }
-
-    if (message != WM_VSCROLL)
-    {
-        return std::numeric_limits<LRESULT>::min();
-    }
-
-    int position = settings_.pageScrollPosition;
-    const int page = settings_.tabControl
-        ? std::max(0, TabCtrl_GetCurSel(settings_.tabControl)) : 0;
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    const int maxPosition = std::max(
-        0, settings_.pageContentBottom[page]
-            - static_cast<int>(client.bottom - client.top));
-
-    switch (LOWORD(wParam))
-    {
-    case SB_LINEUP:       position -= 24; break;
-    case SB_LINEDOWN:     position += 24; break;
-    case SB_PAGEUP:       position -= client.bottom - client.top; break;
-    case SB_PAGEDOWN:     position += client.bottom - client.top; break;
-    case SB_TOP:          position = 0; break;
-    case SB_BOTTOM:       position = maxPosition; break;
-    case SB_THUMBPOSITION:
-    case SB_THUMBTRACK:
-    {
-        SCROLLINFO info{};
-        info.cbSize = sizeof(info);
-        info.fMask = SIF_TRACKPOS;
-        GetScrollInfo(hwnd, SB_VERT, &info);
-        position = info.nTrackPos;
-        break;
-    }
-    default:
-        return 0;
-    }
-
-    SetSettingsPageScroll(std::clamp(position, 0, maxPosition));
-    return 0;
-}
-
-void App::SetSettingsPageScroll(int position)
-{
-    if (!settings_.pageViewport || !settings_.tabControl)
+    if (!editor_.item)
     {
         return;
     }
 
-    const int page = std::clamp(TabCtrl_GetCurSel(settings_.tabControl), 0, 3);
-    RECT client{};
-    GetClientRect(settings_.pageViewport, &client);
-    const int pageHeight = static_cast<int>(client.bottom - client.top);
-    const int maximum = std::max(
-        0, settings_.pageContentBottom[page] - pageHeight);
-    settings_.pageScrollPosition = std::clamp(position, 0, maximum);
-
-    SCROLLINFO info{};
-    info.cbSize = sizeof(info);
-    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    info.nMin = 0;
-    info.nMax = std::max(0, settings_.pageContentBottom[page] - 1);
-    info.nPage = static_cast<UINT>(std::max(0, pageHeight));
-    info.nPos = settings_.pageScrollPosition;
-    SetScrollInfo(settings_.pageViewport, SB_VERT, &info, TRUE);
-    ShowScrollBar(settings_.pageViewport, SB_VERT, maximum > 0);
-
-    for (const SettingsEditor::ScrollChild& child : settings_.scrollChildren)
+    ItemEditor& m = editor_;
+    if (!m.customBottom)
     {
-        if (child.page == page)
-        {
-            SetWindowPos(child.hwnd, nullptr, child.x,
-                child.y - settings_.pageScrollPosition, 0, 0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
-        }
+        m.bottomColor = DerivedColor(m.topColor);
     }
 
-    // Scrolling moves many native controls at once. Suppress their individual
-    // intermediate paints above, then invalidate both the exposed background
-    // and every child so no stale glyphs or slider fragments remain behind.
-    RedrawWindow(settings_.pageViewport, nullptr, nullptr,
-        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME
-            | RDW_UPDATENOW);
+    PlateStyle& plate = m.item->plate;
+    plate.enabled = m.plateEnabled;
+    plate.iconScale = static_cast<float>(m.iconScale) / 100.0f;
+    plate.opacity = m.customOpacity
+        ? static_cast<float>(m.opacity) / 100.0f : -1.0f;
+    plate.customBottom = m.customBottom;
+    plate.top = HexOf(m.topColor);
+    plate.bottom = HexOf(m.bottomColor);
+    plate.strokeColor = m.customStroke ? HexOf(m.strokeColor) : std::wstring();
+    plate.strokeOpacity = m.customStrokeOpacity
+        ? static_cast<float>(m.strokeOpacity) / 100.0f : -1.0f;
+
+    Render();
 }
 
-LRESULT CALLBACK App::EditorProc(HWND hwnd, UINT message,
-                                 WPARAM wParam, LPARAM lParam)
+bool App::EditItem(size_t index)
 {
-    App* self = nullptr;
-
-    if (message == WM_NCCREATE)
+    if (index >= items_.size() || !window_.Handle())
     {
-        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = static_cast<App*>(create->lpCreateParams);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-    }
-    else
-    {
-        self = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        return false;
     }
 
-    if (!self)
-    {
-        return DefWindowProcW(hwnd, message, wParam, lParam);
-    }
+    editor_ = ItemEditor{};
+    ItemEditor& m = editor_;
+    m.item = items_[index].get();
+    DockItem& item = *m.item;
 
-    return self->HandleEditorMessage(hwnd, message, wParam, lParam);
-}
+    // Snapshot for the live preview rollback on cancel.
+    m.originalPlate = item.plate;
+    m.originalIconSource = item.iconSource;
 
-LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
-                                 WPARAM wParam, LPARAM lParam)
-{
-    enum : int
-    {
-        kIdName = 101,
-        kIdPath,
-        kIdArguments,
-        kIdIcon,
-        kIdBrowsePath,
-        kIdBrowseIcon,
+    m.name = item.name;
+    m.path = item.targetPath;
+    m.arguments = item.arguments;
+    m.iconLabel = item.iconFile;
 
-        kIdEnable = 111,
-        kIdScale,
-        kIdSecond,
-        kIdTop,
-        kIdBottom,
-        kIdStrokeOverride = 116,
-        kIdStrokeColor,
-        kIdStrokeOpacityOverride,
-        kIdStrokeOpacitySlider,
-        kIdPlateOpacityOverride = 140,
-        kIdPlateOpacitySlider,
+    const PlateStyle& own = item.plate;
+    const IconBackdrop& global = config_.settings.backdrop;
+    m.plateEnabled = own.enabled;
+    m.iconScale = Percent(own.iconScale > 0.0f ? own.iconScale : global.iconScale);
+    m.customOpacity = own.opacity >= 0.0f;
+    m.opacity = Percent(own.opacity >= 0.0f ? own.opacity : global.opacity);
+    m.topColor = ColorRefOf(own.top, RGB(59, 66, 82));
+    m.customBottom = own.customBottom;
+    m.bottomColor = own.customBottom
+        ? ColorRefOf(own.bottom, DerivedColor(m.topColor))
+        : DerivedColor(m.topColor);
+    m.customStroke = !own.strokeColor.empty();
+    m.strokeColor = ColorRefOf(own.strokeColor, RGB(255, 255, 255));
+    m.customStrokeOpacity = own.strokeOpacity >= 0.0f;
+    m.strokeOpacity = Percent(own.strokeOpacity >= 0.0f ? own.strokeOpacity
+                                                        : global.strokeOpacity);
 
-        kIdSave = 121,
-        kIdCancel,
-        kIdRestoreDefaults,
-        kIdEditorTabs = 131,
-    };
+    m.form = std::make_unique<ui::Form>();
+    ui::Form& form = *m.form;
 
-    auto sliderValue = [](HWND slider) -> int
-    {
-        return slider ? static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0))
-                      : 0;
-    };
-
-    auto windowText = [](HWND control) -> std::wstring
-    {
-        if (!control)
+    // --- Shortcut page -------------------------------------------------------
+    form.AddPage(UiText(L"快捷方式"));
+    form.AddSection();
+    form.AddHeader(
+        [this]() -> IWICBitmapSource*
         {
-            return {};
-        }
+            return editor_.item ? editor_.item->iconSource.Get() : nullptr;
+        },
+        [this]() { return editor_.name; },
+        [this]() { return editor_.path; },
+        52.0f);
 
-        const int length = GetWindowTextLengthW(control);
-        std::wstring value(static_cast<size_t>(length) + 1, L'\0');
-        const int written = GetWindowTextW(control, value.data(), length + 1);
-        value.resize(written > 0 ? static_cast<size_t>(written) : 0);
-        return value;
-    };
+    form.AddSection(UiText(L"应用"));
+    ui::Form::Control& nameField = form.AddEdit(UiText(L"名称"), &m.name);
+    ui::Form::Control* nameControl = &nameField;
+    ui::Form::Control* pathControl = nullptr;
+    ui::Form::Control* iconControl = nullptr;
 
-    auto hexOf = [](COLORREF color) -> std::wstring
-    {
-        wchar_t text[16];
-        swprintf(text, 16, L"#%02X%02X%02X",
-                 GetRValue(color), GetGValue(color), GetBValue(color));
-        return std::wstring(text);
-    };
-
-    /// The automatically derived gradient partner of a picked colour.
-    auto derivedColor = [](COLORREF top) -> COLORREF
-    {
-        return RGB(GetRValue(top) * 92 / 100,
-                   GetGValue(top) * 92 / 100,
-                   GetBValue(top) * 92 / 100);
-    };
-
-    /// Repaints the two swatches and their hex captions.
-    auto refreshSwatches = [&]()
-    {
-        SetWindowTextW(editor_.topHex, hexOf(editor_.topColor).c_str());
-
-        const std::wstring bottomHex = editor_.secondBox
-            && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0) == BST_CHECKED
-            ? hexOf(editor_.bottomColor)
-            : hexOf(derivedColor(editor_.topColor)) + L"（自动）";
-        SetWindowTextW(editor_.bottomHex, bottomHex.c_str());
-        SetWindowTextW(editor_.strokeHex,
-            editor_.strokeOverrideBox
-                && SendMessageW(editor_.strokeOverrideBox, BM_GETCHECK, 0, 0)
-                   == BST_CHECKED
-                ? hexOf(editor_.strokeColor).c_str() : L"#FFFFFF（默认）");
-
-        if (editor_.topSwatch)
+    pathControl = &form.AddEdit(UiText(L"程序"), &m.path, UiText(L"浏览…"),
+        [this, &pathControl, nameControl, &iconControl]()
         {
-            InvalidateRect(editor_.topSwatch, nullptr, TRUE);
-        }
+            const COMDLG_FILTERSPEC filters[] =
+            {
+                {L"应用程序 (*.exe; *.lnk)", L"*.exe;*.lnk"},
+                {L"所有文件 (*.*)", L"*.*"},
+            };
+            const std::wstring path = PickFile(UiText(L"选择程序"), filters,
+                                               ARRAYSIZE(filters));
+            if (path.empty())
+            {
+                return;
+            }
 
-        if (editor_.bottomSwatch)
-        {
-            InvalidateRect(editor_.bottomSwatch, nullptr, TRUE);
-        }
-        if (editor_.strokeSwatch)
-        {
-            InvalidateRect(editor_.strokeSwatch, nullptr, TRUE);
-        }
-    };
+            editor_.form->SetText(*pathControl, path);
 
-    /// Plate controls only make sense while the plate is enabled, and the
-    /// second colour picker only while the user opted out of the automatic
-    /// gradient partner.
-    auto syncAppearance = [&]()
-    {
-        const bool on = editor_.enableBox
-            && SendMessageW(editor_.enableBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        const bool second = editor_.secondBox
-            && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        const bool stroke = editor_.strokeOverrideBox
-            && SendMessageW(editor_.strokeOverrideBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
-        const bool strokeOpacity = editor_.strokeOpacityBox
-            && SendMessageW(editor_.strokeOpacityBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
-        const bool plateOpacity = editor_.opacityBox
-            && SendMessageW(editor_.opacityBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
+            // Refresh name and icon from the new target, like a shortcut.
+            AppInfo info = icons_.Inspect(path, 256);
+            if (!info.name.empty())
+            {
+                editor_.form->SetText(*nameControl, info.name);
+            }
+            if (info.icon)
+            {
+                editor_.pendingIcon = info.icon;
+                editor_.pendingIconPath.clear();
+                editor_.form->SetText(*iconControl, UiText(L"来自所选程序"));
+                editor_.item->iconSource = editor_.pendingIcon;
+                editor_.item->icon.Reset();
+                Render();
+            }
+        });
 
-        HWND plateControls[] =
+    form.AddEdit(UiText(L"附加命令"), &m.arguments);
+
+    iconControl = &form.AddEdit(UiText(L"图标文件"), &m.iconLabel,
+        UiText(L"浏览…"),
+        [this, &iconControl]()
         {
-            editor_.scaleSlider,
-            editor_.topSwatch,
-            editor_.secondBox,
-            editor_.opacityBox,
+            const COMDLG_FILTERSPEC filters[] =
+            {
+                {L"图片或程序 (*.png; *.exe; *.lnk)", L"*.png;*.exe;*.lnk"},
+                {L"图片 (*.png)", L"*.png"},
+                {L"所有文件 (*.*)", L"*.*"},
+            };
+            const std::wstring path = PickFile(UiText(L"选择图标"), filters,
+                                               ARRAYSIZE(filters));
+            if (path.empty())
+            {
+                return;
+            }
+
+            ComPtr<IWICBitmap> icon;
+            if (GetFileExtension(path) == L".png")
+            {
+                icon = icons_.LoadFromCache(path);
+            }
+            else
+            {
+                icon = icons_.Inspect(path, 256).icon;
+            }
+
+            if (icon)
+            {
+                editor_.pendingIcon = icon;
+                editor_.pendingIconPath = path;
+                editor_.form->SetText(*iconControl, GetFileName(path));
+                editor_.item->iconSource = editor_.pendingIcon;
+                editor_.item->icon.Reset();
+                Render();
+            }
+        });
+    iconControl->readOnly = true;
+
+    // --- Appearance page -----------------------------------------------------
+    auto plateOn = [this]() { return editor_.plateEnabled; };
+
+    form.AddPage(UiText(L"图标外观"));
+    form.AddSection(UiText(L"底板"));
+    form.AddSwitch(UiText(L"启用圆角底板"), &m.plateEnabled);
+    form.AddSlider(UiText(L"图标比例"), &m.iconScale, 50, 150, FormatPercent)
+        .enabled = plateOn;
+    form.AddSwitch(UiText(L"自定义透明度"), &m.customOpacity).enabled = plateOn;
+    form.AddSlider(UiText(L"透明度"), &m.opacity, 0, 100, FormatPercent)
+        .enabled = [this]()
+        {
+            return editor_.plateEnabled && editor_.customOpacity;
         };
 
-        for (HWND control : plateControls)
-        {
-            if (control)
-            {
-                EnableWindow(control, on ? TRUE : FALSE);
-            }
-        }
-
-        if (editor_.bottomSwatch)
-        {
-            EnableWindow(editor_.bottomSwatch, on && second ? TRUE : FALSE);
-        }
-        if (editor_.strokeOverrideBox)
-        {
-            EnableWindow(editor_.strokeOverrideBox, on ? TRUE : FALSE);
-        }
-        if (editor_.strokeSwatch)
-        {
-            EnableWindow(editor_.strokeSwatch,
-                         on && stroke ? TRUE : FALSE);
-        }
-        if (editor_.strokeOpacityBox)
-        {
-            EnableWindow(editor_.strokeOpacityBox, on ? TRUE : FALSE);
-        }
-        if (editor_.strokeOpacitySlider)
-        {
-            EnableWindow(editor_.strokeOpacitySlider,
-                         on && strokeOpacity ? TRUE : FALSE);
-        }
-        if (editor_.opacitySlider)
-        {
-            EnableWindow(editor_.opacitySlider,
-                         on && plateOpacity ? TRUE : FALSE);
-        }
-        if (editor_.opacityLabel)
-        {
-            EnableWindow(editor_.opacityLabel,
-                         on && plateOpacity ? TRUE : FALSE);
-        }
-    };
-
-    auto refreshLabels = [&]()
+    form.AddSection(UiText(L"颜色"));
+    form.AddColor(UiText(L"顶部颜色"), &m.topColor,
+                  [this]() { return HexOf(editor_.topColor); })
+        .enabled = plateOn;
+    form.AddSwitch(UiText(L"自定义第二颜色（渐变）"), &m.customBottom)
+        .enabled = plateOn;
+    form.AddColor(UiText(L"底部颜色"), &m.bottomColor, [this]()
     {
-        wchar_t text[48];
-
-        swprintf(text, 48, L"%d%%", sliderValue(editor_.scaleSlider));
-        SetWindowTextW(editor_.scaleLabel, text);
-        swprintf(text, 48, L"%d%%", sliderValue(editor_.opacitySlider));
-        SetWindowTextW(editor_.opacityLabel, text);
-        swprintf(text, 48, L"%d%%",
-                 sliderValue(editor_.strokeOpacitySlider));
-        SetWindowTextW(editor_.strokeOpacityLabel, text);
-    };
-
-    /// Live preview: pushes the current control values straight into the item
-    /// being edited and repaints the dock, so colour and ratio changes show
-    /// up immediately instead of only after pressing 保存. Cancelling rolls
-    /// back to the snapshot taken in WM_CREATE.
-    auto previewPlate = [&]()
+        return editor_.customBottom
+            ? HexOf(editor_.bottomColor)
+            : HexOf(DerivedColor(editor_.topColor)) + UiText(L"（自动）");
+    }).enabled = [this]()
     {
-        if (!editor_.item)
-        {
-            return;
-        }
-
-        PlateStyle& plate = editor_.item->plate;
-
-        plate.enabled = editor_.enableBox
-            && SendMessageW(editor_.enableBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
-
-        plate.iconScale =
-            static_cast<float>(sliderValue(editor_.scaleSlider)) / 100.0f;
-
-        const bool opacityOverride = editor_.opacityBox
-            && SendMessageW(editor_.opacityBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
-        plate.opacity = opacityOverride
-            ? static_cast<float>(sliderValue(editor_.opacitySlider)) / 100.0f
-            : -1.0f;
-
-        plate.customBottom = editor_.secondBox
-            && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
-
-        plate.top = hexOf(editor_.topColor);
-        plate.bottom = hexOf(editor_.bottomColor);
-        const bool strokeOverride = editor_.strokeOverrideBox
-            && SendMessageW(editor_.strokeOverrideBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
-        plate.strokeColor = strokeOverride ? hexOf(editor_.strokeColor)
-                                           : std::wstring();
-        const bool strokeOpacityOverride = editor_.strokeOpacityBox
-            && SendMessageW(editor_.strokeOpacityBox, BM_GETCHECK, 0, 0)
-               == BST_CHECKED;
-        plate.strokeOpacity = strokeOpacityOverride
-            ? static_cast<float>(sliderValue(editor_.strokeOpacitySlider)) / 100.0f
-            : -1.0f;
-
-        Render();
+        return editor_.plateEnabled && editor_.customBottom;
     };
 
-    /// Puts back the plate and icon the entry had before the dialog
-    /// opened. Both are previewed directly on the dock.
-    auto restorePlate = [&]()
+    form.AddSection(UiText(L"内描边"));
+    form.AddSwitch(UiText(L"自定义描边颜色"), &m.customStroke).enabled = plateOn;
+    form.AddColor(UiText(L"描边颜色"), &m.strokeColor, [this]()
+    {
+        return editor_.customStroke
+            ? HexOf(editor_.strokeColor)
+            : std::wstring(L"#FFFFFF") + UiText(L"（默认）");
+    }).enabled = [this]()
+    {
+        return editor_.plateEnabled && editor_.customStroke;
+    };
+    form.AddSwitch(UiText(L"自定义描边透明度"), &m.customStrokeOpacity)
+        .enabled = plateOn;
+    form.AddSlider(UiText(L"描边不透明度"), &m.strokeOpacity, 0, 100,
+                   FormatPercent)
+        .enabled = [this]()
+        {
+            return editor_.plateEnabled && editor_.customStrokeOpacity;
+        };
+
+    form.AddButton(kButtonRestore, UiText(L"恢复默认值"),
+                   ui::ButtonRole::Normal, true);
+    form.AddButton(kButtonCancel, UiText(L"取消"));
+    form.AddButton(kButtonSave, UiText(L"保存"), ui::ButtonRole::Primary);
+
+    /// Puts back the plate and icon the entry had before the dialog opened.
+    auto restorePlate = [this]()
     {
         if (editor_.item)
         {
@@ -7793,531 +6633,73 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
         }
     };
 
-    switch (message)
+    form.onChange = [this](ui::Form::Control& control)
     {
-    case WM_NCCREATE:
-        // Must fall through to DefWindowProc, otherwise the window title
-        // passed to CreateWindowExW is never stored and the caption is blank.
-        return DefWindowProcW(hwnd, message, wParam, lParam);
-
-    case WM_CREATE:
-    {
-        if (!hwnd || !editor_.item)
+        if (control.kind != ui::Form::Kind::Edit)
         {
-            return -1;
+            PreviewPlate();
         }
-
-        // Snapshot for the live preview rollback on cancel.
-        editor_.originalPlate = editor_.item->plate;
-        editor_.originalIconSource = editor_.item->iconSource;
-
-        INITCOMMONCONTROLSEX controls{};
-        controls.dwSize = sizeof(controls);
-        controls.dwICC = ICC_BAR_CLASSES | ICC_TAB_CLASSES;
-        InitCommonControlsEx(&controls);
-
-        // Scale every coordinate for the dialog's monitor DPI.
-        const float scale = DialogDpi(hwnd) / 96.0f;
-
-        auto S = [scale](int value) -> int
-        {
-            return static_cast<int>(std::lround(value * scale));
-        };
-
-        auto setFont = [](HWND control, bool bold = false)
-        {
-            HFONT font = DialogFont(bold);
-            if (control && font)
-            {
-                SendMessageW(control, WM_SETFONT,
-                             reinterpret_cast<WPARAM>(font), TRUE);
-            }
-        };
-
-        const int rows[] = {22, 60, 98, 136};
-
-        auto makeLabel = [&](const wchar_t* text, int x, int y, int w,
-                             bool bold = false)
-        {
-            text = UiText(text);
-            HWND control = CreateWindowExW(
-                0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                S(x), S(y + 5), S(w), S(20), hwnd, nullptr, instance_, nullptr);
-            setFont(control, bold);
-            return control;
-        };
-
-        auto makeEdit = [&](const std::wstring& value, int id, int x, int y, int w)
-        {
-            HWND control = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", value.c_str(),
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-                S(x), S(y), S(w), S(24),
-                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                instance_, nullptr);
-            setFont(control);
-            return control;
-        };
-
-        auto makeButton = [&](const wchar_t* text, int id, int x, int y, int w)
-        {
-            text = UiText(text);
-            HWND control = CreateWindowExW(
-                0, L"BUTTON", text,
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-                S(x), S(y), S(w), S(27),
-                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                instance_, nullptr);
-            setFont(control);
-            return control;
-        };
-
-        auto makeCheck = [&](const wchar_t* text, bool checked, int id,
-                             int x, int y, int w)
-        {
-            text = UiText(text);
-            HWND control = CreateWindowExW(
-                0, L"BUTTON", text,
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-                S(x), S(y), S(w), S(22),
-                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                instance_, nullptr);
-
-            if (control)
-            {
-                SendMessageW(control, BM_SETCHECK,
-                             checked ? BST_CHECKED : BST_UNCHECKED, 0);
-                setFont(control);
-            }
-
-            return control;
-        };
-
-        auto makeSlider = [&](int id, int x, int y, int w,
-                              int lo, int hi, int value)
-        {
-            HWND control = CreateWindowExW(
-                0, TRACKBAR_CLASSW, nullptr,
-                WS_CHILD | WS_VISIBLE | TBS_HORZ | WS_TABSTOP,
-                S(x), S(y), S(w), S(28),
-                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                instance_, nullptr);
-
-            if (control)
-            {
-                SendMessageW(control, TBM_SETRANGE, TRUE, MAKELPARAM(lo, hi));
-                SendMessageW(control, TBM_SETPOS, TRUE, value);
-                setFont(control);
-            }
-
-            return control;
-        };
-
-        // --- shortcut properties ------------------------------------------
-        makeLabel(L"名称", 20, rows[0], 70);
-        makeLabel(L"程序", 20, rows[1], 70);
-        makeLabel(L"附加命令", 20, rows[2], 70);
-        makeLabel(L"图标文件", 20, rows[3], 70);
-
-        editor_.nameEdit = makeEdit(editor_.item->name, kIdName, 96, rows[0], 270);
-        editor_.pathEdit = makeEdit(editor_.item->targetPath, kIdPath, 96, rows[1], 270);
-        editor_.argumentsEdit = makeEdit(editor_.item->arguments, kIdArguments,
-                                         96, rows[2], 270);
-        editor_.iconEdit = makeEdit(editor_.item->iconFile, kIdIcon, 96, rows[3], 270);
-
-        makeButton(L"浏览...", kIdBrowsePath, 376, rows[1] - 2, 84);
-        makeButton(L"浏览...", kIdBrowseIcon, 376, rows[3] - 2, 84);
-
-        // Group divider: application/arguments above, icon selection below.
-        CreateWindowExW(
-            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(20), S(126), S(440), S(2), hwnd, nullptr, instance_, nullptr);
-
-        // --- per icon plate -------------------------------------------------
-        const PlateStyle& own = editor_.item->plate;
-        const IconBackdrop& globalBackdrop = config_.settings.backdrop;
-
-        editor_.enableBox = makeCheck(L"启用圆角底板", own.enabled,
-                                      kIdEnable, 20, 190, 200);
-
-        makeLabel(L"图标在底板内的比例", 20, 228, 130);
-
-        const float effectiveScale = own.iconScale > 0.0f
-            ? own.iconScale
-            : globalBackdrop.iconScale;
-
-        editor_.scaleSlider = makeSlider(
-            kIdScale, 158, 224, 140, 50, 150,
-            static_cast<int>(std::lround(effectiveScale * 100.0f)));
-        editor_.scaleLabel = makeLabel(L"", 306, 228, 60);
-
-        editor_.opacityBox = makeCheck(
-            L"自定义底板透明度", own.opacity >= 0.0f,
-            kIdPlateOpacityOverride, 20, 260, 160);
-        makeLabel(L"底板透明度", 20, 296, 110);
-        const float effectiveOpacity = own.opacity >= 0.0f
-            ? own.opacity : config_.settings.backdrop.opacity;
-        editor_.opacitySlider = makeSlider(
-            kIdPlateOpacitySlider, 158, 292, 140, 0, 100,
-            static_cast<int>(std::lround(effectiveOpacity * 100.0f)));
-        editor_.opacityLabel = makeLabel(L"", 306, 296, 60);
-
-        // Group divider: plate size/opacity above, colour treatment below.
-        CreateWindowExW(
-            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(20), S(326), S(440), S(2), hwnd, nullptr, instance_, nullptr);
-
-        // --- colour picks ----------------------------------------------------
-        // Owner drawn swatches: the control itself previews the colour and
-        // clicking it opens the system colour picker.
-        auto makeSwatch = [&](int id, int x, int y)
-        {
-            return CreateWindowExW(
-                0, L"BUTTON", nullptr,
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
-                S(x), S(y), S(64), S(24),
-                hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                instance_, nullptr);
-        };
-
-        auto colorRefOf = [](const std::wstring& hex,
-                             COLORREF fallback) -> COLORREF
-        {
-            float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
-            if (ParseHexColor(hex, r, g, b, a))
-            {
-                return RGB(static_cast<int>(r * 255.0f + 0.5f),
-                           static_cast<int>(g * 255.0f + 0.5f),
-                           static_cast<int>(b * 255.0f + 0.5f));
-            }
-
-            return fallback;
-        };
-
-        editor_.topColor = colorRefOf(own.top, RGB(59, 66, 82));
-        editor_.bottomColor = own.customBottom
-            ? colorRefOf(own.bottom, derivedColor(editor_.topColor))
-            : derivedColor(editor_.topColor);
-        editor_.strokeColor = colorRefOf(own.strokeColor, RGB(255, 255, 255));
-
-        makeLabel(L"顶部颜色", 20, 342, 90);
-        editor_.topSwatch = makeSwatch(kIdTop, 158, 338);
-        editor_.topHex = makeLabel(L"", 234, 342, 170);
-
-        editor_.secondBox = makeCheck(L"自定义第二颜色（渐变）", own.customBottom,
-                                      kIdSecond, 20, 378, 240);
-
-        makeLabel(L"底部颜色", 20, 414, 90);
-        editor_.bottomSwatch = makeSwatch(kIdBottom, 158, 410);
-        editor_.bottomHex = makeLabel(L"", 234, 414, 190);
-
-        // Group divider: fill colours above, rim controls below.
-        CreateWindowExW(
-            0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-            S(20), S(442), S(440), S(2), hwnd, nullptr, instance_, nullptr);
-
-        editor_.strokeOverrideBox = makeCheck(
-            L"自定义描边颜色", !own.strokeColor.empty(),
-            kIdStrokeOverride, 20, 456, 130);
-        editor_.strokeSwatch = makeSwatch(kIdStrokeColor, 158, 454);
-        editor_.strokeHex = makeLabel(L"", 234, 458, 190);
-
-        editor_.strokeOpacityBox = makeCheck(
-            L"自定义描边透明度", own.strokeOpacity >= 0.0f,
-            kIdStrokeOpacityOverride, 20, 492, 145);
-        makeLabel(L"描边不透明度", 20, 528, 110);
-        const float strokeOpacity = own.strokeOpacity >= 0.0f
-            ? own.strokeOpacity : config_.settings.backdrop.strokeOpacity;
-        editor_.strokeOpacitySlider = makeSlider(
-            kIdStrokeOpacitySlider, 158, 524, 140, 0, 100,
-            static_cast<int>(std::lround(strokeOpacity * 100.0f)));
-        editor_.strokeOpacityLabel = makeLabel(L"", 306, 528, 60);
-
-        refreshLabels();
-        syncAppearance();
-        refreshSwatches();
-
-        // --- buttons --------------------------------------------------------
-        makeButton(L"保存", kIdSave, 300, 508, 84);
-        makeButton(L"取消", kIdCancel, 390, 508, 84);
-
-            HWND tabs = CreateWindowExW(
-                0, WC_TABCONTROLW, L"",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_TABS,
-                S(12), S(6), S(460), S(490), hwnd,
-                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdEditorTabs)),
-                instance_, nullptr);
-        setFont(tabs);
-        if (tabs)
-        {
-            TCITEMW tab{};
-            tab.mask = TCIF_TEXT;
-            tab.pszText = const_cast<wchar_t*>(UiText(L"快捷方式"));
-            TabCtrl_InsertItem(tabs, 0, &tab);
-            tab.pszText = const_cast<wchar_t*>(UiText(L"图标外观"));
-            TabCtrl_InsertItem(tabs, 1, &tab);
-            TabCtrl_SetCurSel(tabs, 0);
-
-            TagDialogChildrenContext tagContext{
-                hwnd, kIdEditorTabs, kIdSave, kIdCancel,
-                S(176), S(650), 1, S(38), -S(126), 0};
-            EnumChildWindows(hwnd, TagDialogChildren,
-                             reinterpret_cast<LPARAM>(&tagContext));
-            ShowDialogTabPage(hwnd, 0);
-            SetWindowPos(tabs, HWND_BOTTOM, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            makeButton(L"恢复默认值", kIdRestoreDefaults, 20, 508, 120);
-        }
-
-        SetFocus(editor_.nameEdit);
-
-        return 0;
-    }
-
-    case WM_HSCROLL:
-        refreshLabels();
-        previewPlate();
-        return 0;
-
-    case WM_NOTIFY:
+    };
+    form.onClose = [this, restorePlate]()
     {
-        const auto* header = reinterpret_cast<const NMHDR*>(lParam);
-        if (header && header->idFrom == kIdEditorTabs
-            && header->code == TCN_SELCHANGE)
+        if (!editor_.saved)
         {
-            ShowDialogTabPage(hwnd, TabCtrl_GetCurSel(header->hwndFrom));
-            return 0;
+            restorePlate();
         }
-        break;
-    }
-
-    case WM_DRAWITEM:
+        editor_.closed = true;
+    };
+    form.onButton = [this, restorePlate](int id)
     {
-        const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
-
-        if (draw->CtlID != kIdTop && draw->CtlID != kIdBottom
-            && draw->CtlID != kIdStrokeColor)
+        switch (id)
         {
+        case kButtonCancel:
+            restorePlate();
+            editor_.closed = true;
             break;
-        }
 
-        const bool disabled = (draw->itemState & ODS_DISABLED) != 0;
-        const COLORREF fill = disabled
-            ? GetSysColor(COLOR_BTNFACE)
-            : (draw->CtlID == kIdTop ? editor_.topColor
-               : draw->CtlID == kIdBottom ? editor_.bottomColor
-                                          : editor_.strokeColor);
-
-        HBRUSH brush = CreateSolidBrush(fill);
-        FillRect(draw->hDC, &draw->rcItem, brush);
-        DeleteObject(brush);
-
-        FrameRect(draw->hDC, &draw->rcItem,
-                  GetSysColorBrush(disabled ? COLOR_GRAYTEXT : COLOR_3DDKSHADOW));
-
-        if ((draw->itemState & ODS_FOCUS) != 0)
+        case kButtonRestore:
         {
-            DrawFocusRect(draw->hDC, &draw->rcItem);
-        }
-
-        return TRUE;
-    }
-
-    case WM_COMMAND:
-        switch (LOWORD(wParam))
-        {
-        case kIdRestoreDefaults:
-            SendMessageW(editor_.enableBox, BM_SETCHECK, BST_CHECKED, 0);
-            SendMessageW(editor_.scaleSlider, TBM_SETPOS, TRUE,
-                         static_cast<LPARAM>(std::lround(
-                             config_.settings.backdrop.iconScale * 100.0f)));
-            SendMessageW(editor_.opacityBox, BM_SETCHECK,
-                         BST_UNCHECKED, 0);
-            SendMessageW(editor_.opacitySlider, TBM_SETPOS, TRUE,
-                         static_cast<LPARAM>(std::lround(
-                             config_.settings.backdrop.opacity * 100.0f)));
-            SendMessageW(editor_.secondBox, BM_SETCHECK, BST_UNCHECKED, 0);
-            SendMessageW(editor_.strokeOverrideBox, BM_SETCHECK,
-                         BST_UNCHECKED, 0);
-            SendMessageW(editor_.strokeOpacityBox, BM_SETCHECK,
-                         BST_UNCHECKED, 0);
-            SendMessageW(editor_.strokeOpacitySlider, TBM_SETPOS, TRUE,
-                         static_cast<LPARAM>(std::lround(
-                             config_.settings.backdrop.strokeOpacity * 100.0f)));
+            const IconBackdrop& backdrop = config_.settings.backdrop;
+            editor_.plateEnabled = true;
+            editor_.iconScale = Percent(backdrop.iconScale);
+            editor_.customOpacity = false;
+            editor_.opacity = Percent(backdrop.opacity);
+            editor_.customBottom = false;
+            editor_.customStroke = false;
+            editor_.customStrokeOpacity = false;
+            editor_.strokeOpacity = Percent(backdrop.strokeOpacity);
             editor_.topColor = RGB(255, 255, 255);
             editor_.bottomColor = RGB(235, 235, 235);
             editor_.strokeColor = RGB(255, 255, 255);
-            refreshLabels();
-            syncAppearance();
-            refreshSwatches();
-            previewPlate();
-            return 0;
-
-        case kIdEnable:
-        case kIdPlateOpacityOverride:
-        case kIdSecond:
-        case kIdStrokeOverride:
-        case kIdStrokeOpacityOverride:
-            syncAppearance();
-            refreshSwatches();
-            previewPlate();
-            return 0;
-
-        case kIdTop:
-        case kIdBottom:
-        case kIdStrokeColor:
-        {
-            // System colour picker, seeded with the current colour.
-            static COLORREF customColors[16] = {};
-
-            CHOOSECOLORW chooser{};
-            chooser.lStructSize = sizeof(chooser);
-            chooser.hwndOwner = hwnd;
-            chooser.rgbResult = LOWORD(wParam) == kIdTop ? editor_.topColor
-                : LOWORD(wParam) == kIdBottom ? editor_.bottomColor
-                                              : editor_.strokeColor;
-            chooser.lpCustColors = customColors;
-            chooser.Flags = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR;
-
-            if (ChooseColorW(&chooser))
-            {
-                if (LOWORD(wParam) == kIdTop)
-                {
-                    editor_.topColor = chooser.rgbResult;
-
-                    // While the automatic partner is active the bottom
-                    // colour follows the top pick.
-                    if (!editor_.secondBox
-                        || SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0)
-                           != BST_CHECKED)
-                    {
-                        editor_.bottomColor = derivedColor(editor_.topColor);
-                    }
-                }
-                else if (LOWORD(wParam) == kIdBottom)
-                {
-                    editor_.bottomColor = chooser.rgbResult;
-                }
-                else
-                {
-                    editor_.strokeColor = chooser.rgbResult;
-                }
-
-                refreshSwatches();
-                previewPlate();
-            }
-
-            return 0;
+            editor_.form->Refresh();
+            PreviewPlate();
+            break;
         }
 
-        case kIdBrowsePath:
-        {
-            const COMDLG_FILTERSPEC filters[] =
-            {
-                {L"应用程序 (*.exe; *.lnk)", L"*.exe;*.lnk"},
-                {L"所有文件 (*.*)", L"*.*"},
-            };
-
-            const std::wstring path =
-                PickFile(L"选择程序", filters, ARRAYSIZE(filters));
-
-            if (path.empty())
-            {
-                return 0;
-            }
-
-            SetWindowTextW(editor_.pathEdit, path.c_str());
-
-            // Refresh name and icon from the new target, like a shortcut.
-            AppInfo info = icons_.Inspect(path, 256);
-
-            if (!info.name.empty())
-            {
-                SetWindowTextW(editor_.nameEdit, info.name.c_str());
-            }
-
-            if (info.icon)
-            {
-                editor_.pendingIcon = info.icon;
-                editor_.pendingIconPath.clear();
-                SetWindowTextW(editor_.iconEdit, L"(来自所选程序)");
-
-                editor_.item->iconSource = editor_.pendingIcon;
-                editor_.item->icon.Reset();
-                Render();
-            }
-
-            return 0;
-        }
-
-        case kIdBrowseIcon:
-        {
-            const COMDLG_FILTERSPEC filters[] =
-            {
-                {L"图片或程序 (*.png; *.exe; *.lnk)", L"*.png;*.exe;*.lnk"},
-                {L"图片 (*.png)", L"*.png"},
-                {L"所有文件 (*.*)", L"*.*"},
-            };
-
-            const std::wstring path =
-                PickFile(L"选择图标", filters, ARRAYSIZE(filters));
-
-            if (path.empty())
-            {
-                return 0;
-            }
-
-            ComPtr<IWICBitmap> icon;
-
-            if (GetFileExtension(path) == L".png")
-            {
-                icon = icons_.LoadFromCache(path);
-            }
-            else
-            {
-                AppInfo info = icons_.Inspect(path, 256);
-                icon = info.icon;
-            }
-
-            if (icon)
-            {
-                editor_.pendingIcon = icon;
-                editor_.pendingIconPath = path;
-                SetWindowTextW(editor_.iconEdit, GetFileName(path).c_str());
-
-                editor_.item->iconSource = editor_.pendingIcon;
-                editor_.item->icon.Reset();
-                Render();
-            }
-
-            return 0;
-        }
-
-        case kIdSave:
+        case kButtonSave:
         {
             if (!editor_.item)
             {
                 editor_.closed = true;
-                return 0;
+                break;
             }
 
-            DockItem& item = *editor_.item;
+            DockItem& target = *editor_.item;
+            std::wstring name = editor_.name;
+            const std::wstring path = editor_.path;
+            std::wstring arguments = editor_.arguments;
 
-            std::wstring name = windowText(editor_.nameEdit);
-            std::wstring path = windowText(editor_.pathEdit);
-            std::wstring arguments = windowText(editor_.argumentsEdit);
-
-            if (!path.empty() && path != item.targetPath)
+            if (!path.empty() && path != target.targetPath)
             {
                 AppInfo info = icons_.Inspect(path, 256);
 
-                item.targetPath = path;
-                item.resolvedPath =
+                target.targetPath = path;
+                target.resolvedPath =
                     info.resolvedPath.empty() ? path : info.resolvedPath;
-                item.processName = GetFileName(item.resolvedPath);
+                target.processName = GetFileName(target.resolvedPath);
                 // Editing the target must not keep the previous app's identity.
-                item.appUserModelId =
-                    AppLauncher::ResolvePackagedAppId(item.resolvedPath);
+                target.appUserModelId =
+                    AppLauncher::ResolvePackagedAppId(target.resolvedPath);
 
                 if (name.empty())
                 {
@@ -8338,16 +6720,16 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
 
             if (name.empty())
             {
-                name = GetFileStem(item.resolvedPath);
+                name = GetFileStem(target.resolvedPath);
             }
 
-            item.name = name;
-            item.arguments = arguments;
+            target.name = name;
+            target.arguments = arguments;
 
             if (editor_.pendingIcon)
             {
-                item.iconSource = editor_.pendingIcon;
-                item.icon.Reset();
+                target.iconSource = editor_.pendingIcon;
+                target.icon.Reset();
 
                 // Persist every chosen icon into LightDock's own cache,
                 // including custom PNGs. Otherwise a PNG previews correctly
@@ -8355,102 +6737,61 @@ LRESULT App::HandleEditorMessage(HWND hwnd, UINT message,
                 // next launch.
                 icons_.SaveToCache(
                     editor_.pendingIcon.Get(),
-                    GetIconCacheDir() + L"\\" + item.iconFile);
+                    GetIconCacheDir() + L"\\" + target.iconFile);
             }
 
             // --- plate look --------------------------------------------------
-            PlateStyle& plate = item.plate;
-
-            plate.enabled = editor_.enableBox
-                && SendMessageW(editor_.enableBox, BM_GETCHECK, 0, 0)
-                   == BST_CHECKED;
+            PreviewPlate();
+            PlateStyle& plate = target.plate;
 
             // Pin the ratio only when it deviates from the global default;
             // matching values stay unpinned so global changes keep working.
-            const float chosen =
-                static_cast<float>(sliderValue(editor_.scaleSlider)) / 100.0f;
-
-            plate.iconScale = std::abs(chosen - config_.settings.backdrop.iconScale)
-                < 0.005f ? 0.0f : chosen;
-
-            plate.opacity = editor_.opacityBox
-                && SendMessageW(editor_.opacityBox, BM_GETCHECK, 0, 0)
-                   == BST_CHECKED
-                ? static_cast<float>(sliderValue(editor_.opacitySlider)) / 100.0f
-                : -1.0f;
-
-            plate.customBottom = editor_.secondBox
-                && SendMessageW(editor_.secondBox, BM_GETCHECK, 0, 0)
-                   == BST_CHECKED;
-
-            wchar_t hex[16];
-
-            swprintf(hex, 16, L"#%02X%02X%02X", GetRValue(editor_.topColor),
-                     GetGValue(editor_.topColor), GetBValue(editor_.topColor));
-            plate.top = hex;
-
-            swprintf(hex, 16, L"#%02X%02X%02X",
-                     GetRValue(editor_.bottomColor),
-                     GetGValue(editor_.bottomColor),
-                     GetBValue(editor_.bottomColor));
-            plate.bottom = hex;
-
-            plate.strokeColor = editor_.strokeOverrideBox
-                && SendMessageW(editor_.strokeOverrideBox, BM_GETCHECK, 0, 0)
-                   == BST_CHECKED
-                ? hexOf(editor_.strokeColor) : std::wstring();
-            plate.strokeOpacity = editor_.strokeOpacityBox
-                && SendMessageW(editor_.strokeOpacityBox, BM_GETCHECK, 0, 0)
-                   == BST_CHECKED
-                ? static_cast<float>(sliderValue(
-                    editor_.strokeOpacitySlider)) / 100.0f
-                : -1.0f;
+            const float chosen = static_cast<float>(editor_.iconScale) / 100.0f;
+            plate.iconScale =
+                std::abs(chosen - config_.settings.backdrop.iconScale) < 0.005f
+                ? 0.0f : chosen;
 
             editor_.saved = true;
             editor_.closed = true;
-            return 0;
+            break;
         }
 
-        case kIdCancel:
-            restorePlate();
-            editor_.closed = true;
-            return 0;
+        default:
+            break;
         }
+    };
 
-        return 0;
+    ui::Form::Options options;
+    options.owner = window_.Handle();
+    options.instance = instance_;
+    // The title names the app being configured so the user always knows
+    // which entry they are editing.
+    options.title = std::wstring(UiText(L"图标配置 — ")) + item.name;
+    options.width = 560.0f;
+    options.height = 600.0f;
+    options.navigation = ui::Navigation::Segmented;
+    options.icon = AppIconHandle();
+    options.center = CurrentWorkArea();
 
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLOREDIT:
+    if (!form.Create(options))
     {
-        // Blend labels and edits into the white dialog background instead of
-        // the themed control's gray filler.
-        HDC dc = reinterpret_cast<HDC>(wParam);
-        SetBkMode(dc, TRANSPARENT);
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        editor_ = ItemEditor{};
+        return false;
     }
 
-    case WM_CLOSE:
-        // Rolling back the live preview: the dock goes back to how it looked
-        // before the dialog opened.
-        if (!editor_.saved)
-        {
-            restorePlate();
-        }
+    // Modal: the dock keeps painting but stops reacting to the mouse.
+    RunModal(form.Handle(), editor_.closed);
 
-        editor_.closed = true;
-        return 0;
-
-    case WM_DESTROY:
-        if (!editor_.saved)
-        {
-            restorePlate();
-        }
-
-        editor_.closed = true;
-        return 0;
+    if (!editor_.saved)
+    {
+        restorePlate();
     }
 
-    return DefWindowProcW(hwnd, message, wParam, lParam);
+    const bool saved = editor_.saved;
+    editor_.form->Destroy();
+    editor_.form.reset();
+    editor_.item = nullptr;
+    return saved;
 }
 
 } // namespace ld

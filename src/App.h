@@ -11,6 +11,7 @@
 #include "DockWindow.h"
 #include "WindowPreview.h"
 #include "IconLoader.h"
+#include "MacUi.h"
 #include "ProcessMonitor.h"
 
 #include <chrono>
@@ -70,6 +71,9 @@ private:
         /// Monitor entries start here; kMenuMonitorBase + index.
         kMenuMonitorBase = 50000,
     };
+
+    /// Settings window page index of "About".
+    static constexpr int kSettingsAboutPage = 4;
 
     /// One entry per attached display.
     struct MonitorTarget
@@ -133,7 +137,7 @@ private:
     bool RefreshMonitors();
     RECT CurrentWorkArea() const;
     void SelectMonitor(int index);
-    void AppendMonitorMenu(HMENU menu);
+    void AppendMonitorMenu(std::vector<ui::MenuItem>& menu);
 
     // --- loop --------------------------------------------------------------
     void Tick(double dt);
@@ -166,7 +170,7 @@ private:
 
     /// How the dock behaves: panel mode, icon size, spacing, magnification,
     /// plus the global plate defaults (shape only, never colours).
-    bool ShowSettings();
+    bool ShowSettings(int initialPage = 0);
 
     /// File picker with a custom filter and title.
     std::wstring PickFile(const wchar_t* title,
@@ -179,42 +183,11 @@ private:
 
     HINSTANCE instance_ = nullptr;
 
-    /// Editor state, only valid while EditItem is running.
+    /// Icon editor state, only valid while EditItem is running. The form's
+    /// controls bind straight to the plain values below.
     struct ItemEditor
     {
-        HWND dialog = nullptr;
-        HWND nameEdit = nullptr;
-        HWND pathEdit = nullptr;
-        HWND argumentsEdit = nullptr;
-        HWND iconEdit = nullptr;
-
-        // Plate look for this one icon. The corner radius is deliberately
-        // absent: rounded clipping follows the global backdrop.
-        HWND enableBox = nullptr;
-        HWND scaleSlider = nullptr;
-        HWND scaleLabel = nullptr;
-        HWND opacityBox = nullptr;
-        HWND opacitySlider = nullptr;
-        HWND opacityLabel = nullptr;
-
-        /// Owner drawn colour preview buttons; clicking one opens the
-        /// system colour picker.
-        HWND topSwatch = nullptr;
-        HWND topHex = nullptr;
-        HWND secondBox = nullptr;
-        HWND bottomSwatch = nullptr;
-        HWND bottomHex = nullptr;
-        HWND strokeOverrideBox = nullptr;
-        HWND strokeSwatch = nullptr;
-        HWND strokeHex = nullptr;
-        HWND strokeOpacityBox = nullptr;
-        HWND strokeOpacitySlider = nullptr;
-        HWND strokeOpacityLabel = nullptr;
-
-        COLORREF topColor = 0;
-        COLORREF bottomColor = 0;
-        COLORREF strokeColor = RGB(255, 255, 255);
-
+        std::unique_ptr<ui::Form> form;
         DockItem* item = nullptr;
 
         /// Plate look and icon source when the dialog opened. Live preview
@@ -226,79 +199,62 @@ private:
         std::wstring pendingIconPath;
         ComPtr<IWICBitmap> pendingIcon;
 
+        std::wstring name;
+        std::wstring path;
+        std::wstring arguments;
+        std::wstring iconLabel;
+
+        bool plateEnabled = true;
+        int iconScale = 80;
+        bool customOpacity = false;
+        int opacity = 100;
+        COLORREF topColor = RGB(255, 255, 255);
+        bool customBottom = false;
+        COLORREF bottomColor = RGB(235, 235, 235);
+        bool customStroke = false;
+        COLORREF strokeColor = RGB(255, 255, 255);
+        bool customStrokeOpacity = false;
+        int strokeOpacity = 45;
+
         bool saved = false;
         bool closed = false;
     };
 
-    /// "Dock 设置" dialog. Single global settings window: dock behaviour
-    /// plus the global plate shape defaults.
+    /// "Dock 设置" window: dock behaviour, panel look, global plate shape
+    /// and tooltip defaults.
     struct SettingsEditor
     {
-        struct ScrollChild
-        {
-            HWND hwnd = nullptr;
-            int x = 0;
-            int y = 0;
-            int page = 0;
-        };
+        std::unique_ptr<ui::Form> form;
 
-        HWND dialog = nullptr;
-        HWND modeCombo = nullptr;
-        HWND edgeCombo = nullptr;
-        HWND tabControl = nullptr;
-        HWND pageViewport = nullptr;
-        std::vector<ScrollChild> scrollChildren;
-        int pageContentBottom[4]{};
-        int pageScrollPosition = 0;
-        HWND spacingSlider = nullptr;
-        HWND spacingLabel = nullptr;
-        HWND magnifySlider = nullptr;
-        HWND magnifyLabel = nullptr;
-
-        // Global plate defaults: shape only, never colours.
-        HWND cornerSlider = nullptr;
-        HWND cornerLabel = nullptr;
-        HWND scaleSlider = nullptr;
-        HWND scaleLabel = nullptr;
-        HWND opacitySlider = nullptr;
-        HWND opacityLabel = nullptr;
-        HWND strokeWidthSlider = nullptr;
-        HWND strokeWidthLabel = nullptr;
-        HWND strokeOpacitySlider = nullptr;
-        HWND strokeOpacityLabel = nullptr;
-        HWND overallScaleSlider = nullptr;
-        HWND overallScaleLabel = nullptr;
-        HWND autoHideBox = nullptr;
-        HWND autoHideDelaySlider = nullptr;
-        HWND autoHideDelayLabel = nullptr;
-        HWND autoHideSpeedSlider = nullptr;
-        HWND autoHideSpeedLabel = nullptr;
-        HWND dockCornerSlider = nullptr;
-        HWND dockCornerLabel = nullptr;
-
-        // Custom panel background gradient.
-        HWND customBox = nullptr;
-        HWND topSwatch = nullptr;
-        HWND topHex = nullptr;
-        HWND bottomSwatch = nullptr;
-        HWND bottomHex = nullptr;
-        HWND bgOpacitySlider = nullptr;
-        HWND bgOpacityLabel = nullptr;
-        HWND tooltipOpacitySlider = nullptr;
-        HWND tooltipOpacityLabel = nullptr;
-        HWND tooltipFadeSlider = nullptr;
-        HWND tooltipFadeLabel = nullptr;
-        HWND tooltipScaleSlider = nullptr;
-        HWND tooltipScaleLabel = nullptr;
-        HWND tooltipCornerSlider = nullptr;
-        HWND tooltipCornerLabel = nullptr;
-
-        COLORREF topColor = 0;
-        COLORREF bottomColor = 0;
-
-        /// Settings when the dialog opened; cancelling rolls back to these
+        /// Settings when the window opened; cancelling rolls back to these
         /// (the live preview writes straight into the running config).
         DockSettings original;
+
+        int mode = 0;
+        int edge = 0;
+        int overallScale = 89;
+        int spacing = 8;
+        int magnify = 16;
+        bool autoHide = false;
+        int autoHideDelay = 250;
+        int autoHideSpeed = 60;
+
+        int backgroundOpacity = 39;
+        int dockCorner = 18;
+        bool gradient = false;
+        COLORREF topColor = RGB(255, 255, 255);
+        COLORREF bottomColor = RGB(255, 255, 255);
+
+        int plateCorner = 12;
+        int plateScale = 80;
+        int plateOpacity = 100;
+        int strokeWidth = 15;
+        int strokeOpacity = 45;
+
+        int tooltipOpacity = 95;
+        int tooltipFade = 50;
+        int tooltipScale = 100;
+        int tooltipCorner = 10;
 
         bool closed = false;
         bool saved = false;
@@ -307,20 +263,26 @@ private:
     ItemEditor editor_;
     SettingsEditor settings_;
 
-    static LRESULT CALLBACK EditorProc(HWND hwnd, UINT message,
-                                       WPARAM wParam, LPARAM lParam);
-    LRESULT HandleEditorMessage(HWND hwnd, UINT message,
-                                WPARAM wParam, LPARAM lParam);
+    /// Copies the settings form values into the running config and repaints.
+    void PreviewSettings();
+    void LoadSettingsModel(const DockSettings& source);
 
-    static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message,
-                                         WPARAM wParam, LPARAM lParam);
-    LRESULT HandleSettingsMessage(HWND hwnd, UINT message,
-                                  WPARAM wParam, LPARAM lParam);
-    static LRESULT CALLBACK SettingsViewportProc(HWND hwnd, UINT message,
-                                                 WPARAM wParam, LPARAM lParam);
-    LRESULT HandleSettingsViewportMessage(HWND hwnd, UINT message,
-                                          WPARAM wParam, LPARAM lParam);
-    void SetSettingsPageScroll(int position);
+    /// Writes the editor's plate values into the edited item and repaints.
+    void PreviewPlate();
+
+    /// macOS style alert. Returns true when the confirm button was chosen.
+    bool ShowAlert(const std::wstring& title, const std::wstring& message,
+                   const wchar_t* confirm, const wchar_t* cancel);
+
+    /// Shows a popup menu while keeping the dock animating underneath.
+    UINT RunMenu(const std::vector<ui::MenuItem>& items, POINT anchor,
+                 ui::MenuOptions options = {});
+
+    /// The application icon as a WIC bitmap (cached), for headers.
+    IWICBitmapSource* AppIconBitmap();
+    HICON AppIconHandle();
+    ComPtr<IWICBitmap> appIconBitmap_;
+    HICON appIcon_ = nullptr;
 
     /// Runs a nested modal loop for `window` until `closed` flips.
     void RunModal(HWND window, const bool& closed);
@@ -340,7 +302,6 @@ private:
     std::vector<std::unique_ptr<DockItem>> items_;
     std::vector<DockItem*> pointers_;
     std::vector<std::wstring> menuRunningCandidates_;
-    std::vector<HBITMAP> menuRunningBitmaps_;
 
     DockWindow window_;
     WindowPreview windowPreview_;

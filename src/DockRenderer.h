@@ -84,14 +84,15 @@ public:
                       float opacity,
                       bool arrowUp = false);
 
-    /// The same triangular tail used by name bubbles, but attached to the
-    /// separate DWM-backed window preview body. Coordinates are physical
-    /// surface coordinates so the tail can bridge the popup and Dock icon.
-    void DrawBubbleTail(const D2D1_RECT_F& body,
-                        D2D1_POINT_2F tip,
-                        DockEdge edge,
-                        float scale,
-                        float opacity);
+    /// Opaque body + tail of the running-app preview bubble, drawn as one
+    /// antialiased shape in physical surface coordinates. The DWM-backed
+    /// preview window sits inset on top of it, so neither its square corners
+    /// nor a seam between body and tail are ever visible.
+    void DrawPreviewBubble(const D2D1_RECT_F& body,
+                           D2D1_POINT_2F tip,
+                           DockEdge edge,
+                           float scale,
+                           float cornerRadius);
 
     /// Upright window list drawn in physical surface coordinates.
     void DrawWindowMenu(const D2D1_RECT_F& rect,
@@ -110,6 +111,27 @@ public:
                       float thickness, const D2D1_COLOR_F& color);
 
 private:
+    enum class TailSide
+    {
+        None,
+        Top,
+        Right,
+        Bottom,
+        Left,
+    };
+
+    /// Rounded rectangle with an optional triangular tail, as one closed
+    /// figure so fill and outline have no seam where the tail joins.
+    ComPtr<ID2D1PathGeometry> CreateBubbleGeometry(const D2D1_RECT_F& body,
+                                                   float radius,
+                                                   TailSide side,
+                                                   D2D1_POINT_2F tip,
+                                                   float halfBase) const;
+    void FillAndStrokeBubble(ID2D1Geometry* geometry,
+                             ID2D1Brush* fill,
+                             ID2D1Brush* border,
+                             float strokeWidth);
+
     void ReleaseSurface();
     void EnsureBrushes();
     void EnsurePlateBrush(bool gradient,

@@ -902,7 +902,7 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
     const float padY = 7.0f * dpiScale * safeScale;
     const float tail = 8.0f * dpiScale * safeScale;
     const float sideTail = 9.0f * dpiScale * safeScale;
-    const float sideGap = 10.0f * dpiScale * safeScale;
+    const float sideGap = 14.0f * dpiScale * safeScale;
 
     ComPtr<IDWriteTextFormat> format;
     if (FAILED(dwrite_->CreateTextFormat(
@@ -994,64 +994,42 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
     }
 
     // Match the dock panel's global corner radius rather than using an
-    // oversized pill shape of our own.
+    // oversized pill shape of our own. Body and tail are one figure: filling
+    // them separately left a visible seam where the translucent fills and
+    // the body outline overlapped.
     const float radius = ClampF(cornerRadius, 0.0f,
         (std::min)(width, height) * 0.5f);
-    rt_->FillRoundedRectangle(
-        D2D1::RoundedRect(body, radius, radius), fill.Get());
-    rt_->DrawRoundedRectangle(
-        D2D1::RoundedRect(body, radius, radius), border.Get(),
-        1.0f * dpiScale);
 
-    ComPtr<ID2D1PathGeometry> tailGeometry;
-    if (d2d_->CreatePathGeometry(tailGeometry.AddressOf()) == S_OK)
+    TailSide side = TailSide::Bottom;
+    D2D1_POINT_2F tip = D2D1::Point2F(centerX, bodyBottom + tail);
+    float halfBase = tail;
+    if (vertical)
     {
-        ComPtr<ID2D1GeometrySink> sink;
-        if (SUCCEEDED(tailGeometry->Open(sink.AddressOf())))
+        halfBase = sideTail;
+        if (edge_ == DockEdge::Left)
         {
-            if (!vertical)
-            {
-                if (arrowUp)
-                {
-                    sink->BeginFigure(
-                        D2D1::Point2F(centerX - tail, body.top),
-                        D2D1_FIGURE_BEGIN_FILLED);
-                    sink->AddLine(D2D1::Point2F(centerX, bottom));
-                    sink->AddLine(D2D1::Point2F(centerX + tail, body.top));
-                }
-                else
-                {
-                    sink->BeginFigure(
-                        D2D1::Point2F(centerX - tail, bodyBottom),
-                        D2D1_FIGURE_BEGIN_FILLED);
-                    sink->AddLine(D2D1::Point2F(centerX, bodyBottom + tail));
-                    sink->AddLine(D2D1::Point2F(centerX + tail, bodyBottom));
-                }
-            }
-            else if (edge_ == DockEdge::Left)
-            {
-                sink->BeginFigure(
-                    D2D1::Point2F(body.left, bubbleCenterY - sideTail),
-                    D2D1_FIGURE_BEGIN_FILLED);
-                sink->AddLine(D2D1::Point2F(bottom + sideGap, bubbleCenterY));
-                sink->AddLine(D2D1::Point2F(
-                    body.left, bubbleCenterY + sideTail));
-            }
-            else
-            {
-                sink->BeginFigure(
-                    D2D1::Point2F(body.right, bubbleCenterY - sideTail),
-                    D2D1_FIGURE_BEGIN_FILLED);
-                sink->AddLine(D2D1::Point2F(
-                                            logicalHeight_ - bottom - sideGap,
-                                            bubbleCenterY));
-                sink->AddLine(D2D1::Point2F(body.right,
-                                            bubbleCenterY + sideTail));
-            }
-            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink->Close();
-            rt_->FillGeometry(tailGeometry.Get(), fill.Get());
+            side = TailSide::Left;
+            tip = D2D1::Point2F(bottom + sideGap, bubbleCenterY);
         }
+        else
+        {
+            side = TailSide::Right;
+            tip = D2D1::Point2F(logicalHeight_ - bottom - sideGap,
+                                bubbleCenterY);
+        }
+    }
+    else if (arrowUp)
+    {
+        side = TailSide::Top;
+        tip = D2D1::Point2F(centerX, bottom);
+    }
+
+    ComPtr<ID2D1PathGeometry> bubble =
+        CreateBubbleGeometry(body, radius, side, tip, halfBase);
+    if (bubble)
+    {
+        FillAndStrokeBubble(bubble.Get(), fill.Get(), border.Get(),
+                            1.0f * dpiScale);
     }
 
     const D2D1_RECT_F textRect = D2D1::RectF(
@@ -1068,11 +1046,141 @@ void DockRenderer::DrawTooltip(const std::wstring& text,
     }
 }
 
-void DockRenderer::DrawBubbleTail(const D2D1_RECT_F& body,
-                                  D2D1_POINT_2F tip,
-                                  DockEdge edge,
-                                  float scale,
-                                  float opacity)
+ComPtr<ID2D1PathGeometry> DockRenderer::CreateBubbleGeometry(
+    const D2D1_RECT_F& body, float radius, TailSide side,
+    D2D1_POINT_2F tip, float halfBase) const
+{
+    ComPtr<ID2D1PathGeometry> geometry;
+    if (!d2d_ || body.right <= body.left || body.bottom <= body.top
+        || FAILED(d2d_->CreatePathGeometry(geometry.AddressOf())))
+    {
+        return {};
+    }
+
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geometry->Open(sink.AddressOf())))
+    {
+        return {};
+    }
+
+    const float l = body.left;
+    const float t = body.top;
+    const float r = body.right;
+    const float b = body.bottom;
+    const float rad = ClampF(radius, 0.0f,
+        (std::min)(r - l, b - t) * 0.5f);
+
+    // Keep the tail on the straight part of its edge so it never cuts into
+    // a rounded corner.
+    auto clampAlong = [halfBase, rad](float value, float from, float to)
+    {
+        const float lo = from + rad + halfBase;
+        const float hi = to - rad - halfBase;
+        return lo <= hi ? ClampF(value, lo, hi) : (from + to) * 0.5f;
+    };
+
+    auto corner = [&](float x, float y)
+    {
+        if (rad > 0.0f)
+        {
+            sink->AddArc(D2D1::ArcSegment(
+                D2D1::Point2F(x, y), D2D1::SizeF(rad, rad), 0.0f,
+                D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+        }
+        else
+        {
+            sink->AddLine(D2D1::Point2F(x, y));
+        }
+    };
+
+    sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+    sink->BeginFigure(D2D1::Point2F(l + rad, t), D2D1_FIGURE_BEGIN_FILLED);
+
+    if (side == TailSide::Top)
+    {
+        const float cx = clampAlong(tip.x, l, r);
+        sink->AddLine(D2D1::Point2F(cx - halfBase, t));
+        sink->AddLine(tip);
+        sink->AddLine(D2D1::Point2F(cx + halfBase, t));
+    }
+    sink->AddLine(D2D1::Point2F(r - rad, t));
+    corner(r, t + rad);
+
+    if (side == TailSide::Right)
+    {
+        const float cy = clampAlong(tip.y, t, b);
+        sink->AddLine(D2D1::Point2F(r, cy - halfBase));
+        sink->AddLine(tip);
+        sink->AddLine(D2D1::Point2F(r, cy + halfBase));
+    }
+    sink->AddLine(D2D1::Point2F(r, b - rad));
+    corner(r - rad, b);
+
+    if (side == TailSide::Bottom)
+    {
+        const float cx = clampAlong(tip.x, l, r);
+        sink->AddLine(D2D1::Point2F(cx + halfBase, b));
+        sink->AddLine(tip);
+        sink->AddLine(D2D1::Point2F(cx - halfBase, b));
+    }
+    sink->AddLine(D2D1::Point2F(l + rad, b));
+    corner(l, b - rad);
+
+    if (side == TailSide::Left)
+    {
+        const float cy = clampAlong(tip.y, t, b);
+        sink->AddLine(D2D1::Point2F(l, cy + halfBase));
+        sink->AddLine(tip);
+        sink->AddLine(D2D1::Point2F(l, cy - halfBase));
+    }
+    sink->AddLine(D2D1::Point2F(l, t + rad));
+    corner(l + rad, t);
+
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (FAILED(sink->Close()))
+    {
+        return {};
+    }
+    return geometry;
+}
+
+void DockRenderer::FillAndStrokeBubble(ID2D1Geometry* geometry,
+                                       ID2D1Brush* fill,
+                                       ID2D1Brush* border,
+                                       float strokeWidth)
+{
+    if (!rt_ || !geometry)
+    {
+        return;
+    }
+
+    if (fill)
+    {
+        rt_->FillGeometry(geometry, fill);
+    }
+
+    if (border && strokeWidth > 0.0f)
+    {
+        // Round joins keep the tail tip and its base soft instead of
+        // producing sharp miter spikes.
+        ComPtr<ID2D1StrokeStyle> style;
+        if (d2d_)
+        {
+            d2d_->CreateStrokeStyle(
+                D2D1::StrokeStyleProperties(
+                    D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                    D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND),
+                nullptr, 0, style.AddressOf());
+        }
+        rt_->DrawGeometry(geometry, border, strokeWidth, style.Get());
+    }
+}
+
+void DockRenderer::DrawPreviewBubble(const D2D1_RECT_F& body,
+                                     D2D1_POINT_2F tip,
+                                     DockEdge edge,
+                                     float scale,
+                                     float cornerRadius)
 {
     if (!rt_ || !d2d_ || body.right <= body.left || body.bottom <= body.top)
     {
@@ -1085,72 +1193,37 @@ void DockRenderer::DrawBubbleTail(const D2D1_RECT_F& body,
 
     const float safeScale = ClampF(scale, 0.5f, 4.0f);
     const float halfBase = 8.0f * safeScale;
-    const float alpha = ClampF(opacity, 0.0f, 1.0f);
 
+    // Opaque, and exactly the preview window's background colour
+    // RGB(245, 250, 255), so the window blends into the bubble.
     ComPtr<ID2D1SolidColorBrush> fill;
+    ComPtr<ID2D1SolidColorBrush> border;
     rt_->CreateSolidColorBrush(
-        D2D1::ColorF(0.96f, 0.98f, 1.0f, 0.92f * alpha),
+        D2D1::ColorF(245.0f / 255.0f, 250.0f / 255.0f, 1.0f, 1.0f),
         fill.AddressOf());
+    rt_->CreateSolidColorBrush(
+        D2D1::ColorF(184.0f / 255.0f, 199.0f / 255.0f, 214.0f / 255.0f, 1.0f),
+        border.AddressOf());
 
-    if (!fill)
-    {
-        rt_->SetTransform(previous);
-        return;
-    }
-
-    ComPtr<ID2D1PathGeometry> geometry;
-    if (FAILED(d2d_->CreatePathGeometry(geometry.AddressOf())))
-    {
-        rt_->SetTransform(previous);
-        return;
-    }
-
-    ComPtr<ID2D1GeometrySink> sink;
-    if (FAILED(geometry->Open(sink.AddressOf())))
-    {
-        rt_->SetTransform(previous);
-        return;
-    }
-
+    TailSide side = TailSide::Bottom;
     switch (edge)
     {
-    case DockEdge::Top:
-        sink->BeginFigure(
-            D2D1::Point2F(tip.x - halfBase, body.top),
-            D2D1_FIGURE_BEGIN_FILLED);
-        sink->AddLine(tip);
-        sink->AddLine(D2D1::Point2F(tip.x + halfBase, body.top));
-        break;
-
-    case DockEdge::Left:
-        sink->BeginFigure(
-            D2D1::Point2F(body.left, tip.y - halfBase),
-            D2D1_FIGURE_BEGIN_FILLED);
-        sink->AddLine(tip);
-        sink->AddLine(D2D1::Point2F(body.left, tip.y + halfBase));
-        break;
-
-    case DockEdge::Right:
-        sink->BeginFigure(
-            D2D1::Point2F(body.right, tip.y - halfBase),
-            D2D1_FIGURE_BEGIN_FILLED);
-        sink->AddLine(tip);
-        sink->AddLine(D2D1::Point2F(body.right, tip.y + halfBase));
-        break;
-
+    case DockEdge::Top: side = TailSide::Top; break;
+    case DockEdge::Left: side = TailSide::Left; break;
+    case DockEdge::Right: side = TailSide::Right; break;
     case DockEdge::Bottom:
-    default:
-        sink->BeginFigure(
-            D2D1::Point2F(tip.x - halfBase, body.bottom),
-            D2D1_FIGURE_BEGIN_FILLED);
-        sink->AddLine(tip);
-        sink->AddLine(D2D1::Point2F(tip.x + halfBase, body.bottom));
-        break;
+    default: side = TailSide::Bottom; break;
     }
 
-    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-    sink->Close();
-    rt_->FillGeometry(geometry.Get(), fill.Get());
+    ComPtr<ID2D1PathGeometry> bubble =
+        CreateBubbleGeometry(body, cornerRadius, side, tip, halfBase);
+    if (bubble && fill && border)
+    {
+        // The stroke is centred on the outline; inset by half a stroke so
+        // the visible border lands fully on the bubble.
+        FillAndStrokeBubble(bubble.Get(), fill.Get(), border.Get(),
+                            (std::max)(1.0f, safeScale / 0.8f));
+    }
 
     rt_->SetTransform(previous);
 }
