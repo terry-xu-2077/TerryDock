@@ -43,6 +43,23 @@ constexpr double kPollIntervalSeconds = 1.0;
 /// Gap between the bottom of the dock and the bottom of the work area.
 constexpr float kBottomGap = 4.0f;
 
+/// Id of the temporary item shown while a file is dragged over the Dock.
+/// It must never be saved: it only exists until the drop/leave.
+constexpr wchar_t kExternalDragPreviewId[] = L"__external_drag_preview__";
+
+int FindItemIndex(const std::vector<std::unique_ptr<DockItem>>& items,
+                  const wchar_t* id)
+{
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        if (items[i]->id == id)
+        {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
 bool GetVisibleWindowBounds(HWND hwnd, RECT& bounds)
 {
     if (!hwnd)
@@ -1326,7 +1343,8 @@ void App::SaveConfiguration() const
 
     for (const auto& item : items_)
     {
-        if (item->kind != DockItemKind::Pinned)
+        if (item->kind != DockItemKind::Pinned
+            || item->id == kExternalDragPreviewId)
         {
             continue;
         }
@@ -4144,7 +4162,16 @@ void App::RefreshRunningApplications()
     if (geometryChanged)
     {
         pressedIndex_ = -1;
-        draggingIndex_ = -1;
+        // An external file drag keeps following its preview item.
+        draggingIndex_ = externalDragActive_
+            ? FindItemIndex(items_, kExternalDragPreviewId) : -1;
+        if (externalDragActive_)
+        {
+            dragTargetIndex_ = std::clamp(
+                dragTargetIndex_, 0,
+                (std::max)(0, static_cast<int>(items_.size()) - 1));
+            dragVisualTargetIndex_ = dragTargetIndex_;
+        }
         UpdateSurfaceAndGeometry();
         RepositionWindow();
         WakeAnimation();
@@ -4975,7 +5002,7 @@ void App::OnExternalDragEnter(const std::vector<std::wstring>& paths,
     }
 
     auto preview = std::make_unique<DockItem>();
-    preview->id = L"__external_drag_preview__";
+    preview->id = kExternalDragPreviewId;
     preview->name = info.name;
     preview->targetPath = path;
     preview->resolvedPath = info.resolvedPath;
@@ -5054,9 +5081,7 @@ void App::OnExternalDrop(float x, float y)
 
 void App::FinishExternalDrag(bool commit, float x, float y)
 {
-    if (!externalDragActive_
-        || draggingIndex_ < 0
-        || draggingIndex_ >= static_cast<int>(items_.size()))
+    if (!externalDragActive_)
     {
         return;
     }
@@ -5064,12 +5089,18 @@ void App::FinishExternalDrag(bool commit, float x, float y)
     mouseX_ = x;
     mouseY_ = y;
 
+    // Find the preview by id, not by draggingIndex_: the 1 Hz running-app
+    // refresh rebuilds items_ while a drag hovers the Dock, which used to
+    // reset the index, leave the preview stuck in the Dock and eventually
+    // save it to config.json as a real pin.
     int insertion = dragTargetIndex_;
-    const int previewIndex = draggingIndex_;
-    const int originalCount = static_cast<int>(items_.size()) - 1;
-
-    items_.erase(items_.begin() + previewIndex);
-    RebuildItemPointers();
+    const int previewIndex = FindItemIndex(items_, kExternalDragPreviewId);
+    if (previewIndex >= 0)
+    {
+        items_.erase(items_.begin() + previewIndex);
+        RebuildItemPointers();
+    }
+    const int originalCount = static_cast<int>(items_.size());
 
     draggingIndex_ = -1;
     pressedIndex_ = -1;
