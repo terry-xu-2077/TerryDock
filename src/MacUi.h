@@ -74,6 +74,20 @@ const Palette& GetPalette(bool dark);
 /// (Windows 11; harmlessly ignored on Windows 10).
 void ApplyWindowChrome(HWND hwnd, const Palette& palette);
 
+/// Shared Direct2D / DirectWrite helpers for other self-drawn surfaces.
+ID2D1Factory* Direct2D();
+IDWriteFactory* DirectWrite();
+ComPtr<IDWriteTextFormat> CreateTextFormat(float size,
+                                           DWRITE_FONT_WEIGHT weight,
+                                           bool wrap = false,
+                                           const wchar_t* family = L"Segoe UI");
+/// "Segoe Fluent Icons" (Windows 11) or "Segoe MDL2 Assets" (Windows 10).
+const wchar_t* IconFont();
+int MonitorDpi(HMONITOR monitor);
+void FillSoftShadow(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush,
+                    const D2D1_RECT_F& rect, float radius, float spread,
+                    float offsetY, float strength);
+
 /// Converts any WIC source to a premultiplied D2D bitmap for `target`.
 ComPtr<ID2D1Bitmap> CreateBitmapFromWic(ID2D1RenderTarget* target,
                                         IWICBitmapSource* source);

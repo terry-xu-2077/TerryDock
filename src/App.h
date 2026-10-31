@@ -11,6 +11,7 @@
 #include "DockWindow.h"
 #include "WindowPreview.h"
 #include "IconLoader.h"
+#include "Launcher.h"
 #include "MacUi.h"
 #include "ProcessMonitor.h"
 
@@ -23,7 +24,8 @@ namespace ld
 
 /// Wires configuration, icons, layout, animation and the window together and
 /// owns the message loop.
-class App : public DockWindow::Host, public WindowPreview::Host
+class App : public DockWindow::Host, public WindowPreview::Host,
+            public Launcher::Host
 {
 public:
     App() = default;
@@ -51,6 +53,16 @@ public:
 
     // --- WindowPreview::Host -----------------------------------------------
     void OnPreviewWindowActivated(int row) override;
+
+    // --- Launcher::Host ------------------------------------------------------
+    const wchar_t* LauncherText(const wchar_t* chinese) const override;
+    void OnLauncherPin(const std::wstring& path) override;
+    void OnLauncherSystemStart() override;
+    void OnLauncherVisibilityChanged(bool visible) override;
+    std::vector<std::wstring> LauncherPins() const override;
+    void SetLauncherPins(const std::vector<std::wstring>& pins) override;
+    std::vector<std::wstring> LauncherHidden() const override;
+    void SetLauncherHidden(const std::vector<std::wstring>& hidden) override;
 
 private:
     enum : UINT
@@ -305,6 +317,12 @@ private:
 
     DockWindow window_;
     WindowPreview windowPreview_;
+    Launcher launcher_;
+
+    /// Opens (or closes, when already open) LightDock's own Start/Search
+    /// popup next to the item at `index`.
+    void ToggleLauncher(Launcher::Mode mode, size_t index);
+    RECT ItemScreenRect(const DockItem& item) const;
     DockRenderer renderer_;
     IconLoader icons_;
 

@@ -1166,6 +1166,7 @@ bool App::Initialize(HINSTANCE instance)
     // If the helper window cannot be created on a particular Windows/DWM
     // configuration, keep LightDock running and simply omit thumbnails.
     windowPreview_.Initialize(instance, window_.Handle(), this);
+    launcher_.Initialize(window_.Handle(), this);
 
     DetectRefreshRate();
     RefreshMonitors();
@@ -1200,6 +1201,7 @@ void App::Shutdown()
     items_.clear();
     pointers_.clear();
 
+    launcher_.Shutdown();
     windowPreview_.Shutdown();
     renderer_.Shutdown();
     window_.Destroy();
@@ -1318,6 +1320,8 @@ void App::SaveConfiguration() const
 {
     DockConfig snapshot;
     snapshot.settings = config_.settings;
+    snapshot.launcherPins = config_.launcherPins;
+    snapshot.launcherHidden = config_.launcherHidden;
     snapshot.apps.reserve(items_.size());
 
     for (const auto& item : items_)
@@ -1554,17 +1558,18 @@ void App::LaunchApplication(size_t index)
 
     DockItem& item = *items_[index];
 
+    // Windows 11 never lets its Start menu / search flyout be moved next to
+    // the Dock, so both buttons open LightDock's own launcher instead. It
+    // lists the same apps (shell:AppsFolder) and points at the icon.
     if (item.kind == DockItemKind::StartButton)
     {
-        BeginShellPopupPlacement(
-            false, mousePhysicalX_, mousePhysicalY_);
+        ToggleLauncher(Launcher::Mode::Start, index);
         return;
     }
 
     if (item.kind == DockItemKind::SearchButton)
     {
-        BeginShellPopupPlacement(
-            true, mousePhysicalX_, mousePhysicalY_);
+        ToggleLauncher(Launcher::Mode::Search, index);
         return;
     }
 
@@ -1656,6 +1661,99 @@ void App::LaunchApplication(size_t index)
         item.bounceSpring.Reset(0.0f);
     }
 
+    WakeAnimation();
+}
+
+RECT App::ItemScreenRect(const DockItem& item) const
+{
+    const float bottom = item.baselineBottom + item.bounceOffset;
+    const D2D1_RECT_F logical = D2D1::RectF(
+        item.centerX - item.size * 0.5f, bottom - item.size,
+        item.centerX + item.size * 0.5f, bottom);
+    const D2D1_RECT_F physical = dockTransform_.ToPhysical(logical);
+    const RECT bounds = window_.GetBounds();
+    return RECT{
+        bounds.left + static_cast<LONG>(std::lround(physical.left)),
+        bounds.top + static_cast<LONG>(std::lround(physical.top)),
+        bounds.left + static_cast<LONG>(std::lround(physical.right)),
+        bounds.top + static_cast<LONG>(std::lround(physical.bottom))};
+}
+
+void App::ToggleLauncher(Launcher::Mode mode, size_t index)
+{
+    if (index >= items_.size())
+    {
+        return;
+    }
+
+    // Clicking the icon of an open launcher closes it. The click itself may
+    // already have deactivated (and hidden) the popup a moment ago.
+    const bool justClosed = !launcher_.Visible()
+        && GetTickCount64() - launcher_.HiddenAt() < 300
+        && launcher_.CurrentMode() == mode;
+    if (launcher_.Visible() && launcher_.CurrentMode() == mode)
+    {
+        launcher_.Hide();
+        return;
+    }
+    if (justClosed)
+    {
+        return;
+    }
+
+    launcher_.Show(mode, ItemScreenRect(*items_[index]),
+                   config_.settings.dockEdge);
+}
+
+const wchar_t* App::LauncherText(const wchar_t* chinese) const
+{
+    return UiText(chinese);
+}
+
+void App::OnLauncherPin(const std::wstring& path)
+{
+    AddApplication(path);
+}
+
+std::vector<std::wstring> App::LauncherPins() const
+{
+    return config_.launcherPins;
+}
+
+void App::SetLauncherPins(const std::vector<std::wstring>& pins)
+{
+    config_.launcherPins = pins;
+    SaveConfiguration();
+}
+
+std::vector<std::wstring> App::LauncherHidden() const
+{
+    return config_.launcherHidden;
+}
+
+void App::SetLauncherHidden(const std::vector<std::wstring>& hidden)
+{
+    config_.launcherHidden = hidden;
+    SaveConfiguration();
+}
+
+void App::OnLauncherSystemStart()
+{
+    BeginShellPopupPlacement(false, mousePhysicalX_, mousePhysicalY_);
+}
+
+void App::OnLauncherVisibilityChanged(bool visible)
+{
+    // Keep an auto-hiding Dock up while its popup is open.
+    if (visible)
+    {
+        autoHideHidePending_ = false;
+        if (!fullscreenActive_)
+        {
+            SetFullscreenVisibilityTarget(1.0f);
+        }
+    }
+    needsRender_ = true;
     WakeAnimation();
 }
 
@@ -2956,7 +3054,8 @@ void App::Tick(double dt)
     }
 
     const bool indicatorAllowed = config_.settings.autoHide
-        && !fullscreenActive_ && !exitRequested_ && !settingsWindowOpen_;
+        && !fullscreenActive_ && !exitRequested_ && !settingsWindowOpen_
+        && !launcher_.Visible();
     // Drive the status indicator from the dock's own progress. Independent
     // springs made the bar appear/disappear a beat before the dock moved.
     hideIndicatorVisibility_.target = indicatorAllowed
@@ -3487,7 +3586,7 @@ void App::Render()
 
     // The label is rendered in the same layered surface as the dock, so it
     // follows the icon's animated centre and size without a separate window.
-    if (!windowMenuVisible_
+    if (!windowMenuVisible_ && !launcher_.Visible()
         && tooltipOpacity_ > 0.003f && !tooltipItemId_.empty())
     {
         const auto tooltipItem = std::find_if(
@@ -4131,7 +4230,7 @@ void App::CheckPointer()
         const float previousTarget = fullscreenVisibility_.target;
         const auto now = std::chrono::steady_clock::now();
 
-        if (settingsWindowOpen_)
+        if (settingsWindowOpen_ || launcher_.Visible())
         {
             autoHideHidePending_ = false;
             SetFullscreenVisibilityTarget(1.0f);
@@ -5325,6 +5424,33 @@ const wchar_t* App::UiText(const wchar_t* chinese) const
         {L"移出 Dock", L"Remove from Dock"},
         {L"移除", L"Remove"},
         {L"好", L"OK"},
+        {L"搜索应用", L"Search apps"},
+        {L"所有应用", L"All apps"},
+        {L"没有找到应用", L"No matching apps"},
+        {L"打开系统开始菜单", L"Windows Start menu"},
+        {L"以管理员身份运行", L"Run as administrator"},
+        {L"锁定", L"Lock"},
+        {L"注销", L"Sign out"},
+        {L"重启", L"Restart"},
+        {L"关机", L"Shut down"},
+        {L"置顶", L"Pinned"},
+        {L"取消置顶", L"Unpin"},
+        {L"把应用拖到这里，或点击图标右上角的图钉来置顶", L"Drag apps here, or click the pin on an app's icon"},
+        {L"设计创作", L"Design & Creative"},
+        {L"开发工具", L"Developer Tools"},
+        {L"办公效率", L"Productivity"},
+        {L"AI 助手", L"AI Assistants"},
+        {L"通讯社交", L"Communication"},
+        {L"影音娱乐", L"Media & Entertainment"},
+        {L"游戏", L"Games"},
+        {L"网络与远程", L"Internet & Remote"},
+        {L"系统工具", L"System Tools"},
+        {L"其他", L"Other"},
+        {L"已隐藏", L"Hidden"},
+        {L"隐藏", L"Hide"},
+        {L"取消隐藏", L"Unhide"},
+        {L"设置", L"Settings"},
+        {L"电源", L"Power"},
     };
 
     for (const Translation& entry : translations)

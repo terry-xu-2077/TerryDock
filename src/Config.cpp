@@ -270,6 +270,30 @@ DockConfig Config::Load()
         config.settings.monitor = Utf8ToWide(v->AsString());
     }
 
+    if (const json::Value* hidden = root.Find("launcherHidden"))
+    {
+        for (const json::Value& entry : hidden->Items())
+        {
+            const std::wstring value = Utf8ToWide(entry.AsString());
+            if (!value.empty())
+            {
+                config.launcherHidden.push_back(value);
+            }
+        }
+    }
+
+    if (const json::Value* pins = root.Find("launcherPins"))
+    {
+        for (const json::Value& pin : pins->Items())
+        {
+            const std::wstring value = Utf8ToWide(pin.AsString());
+            if (!value.empty())
+            {
+                config.launcherPins.push_back(value);
+            }
+        }
+    }
+
     if (const json::Value* apps = root.Find("apps"))
     {
         for (const json::Value& entry : apps->Items())
@@ -530,6 +554,20 @@ bool Config::Save(const DockConfig& config)
     }
 
     root.Set("apps", std::move(apps));
+
+    json::Value pins(json::Value::Type::Array);
+    for (const std::wstring& pin : config.launcherPins)
+    {
+        pins.PushBack(json::Value(WideToUtf8(pin)));
+    }
+    root.Set("launcherPins", std::move(pins));
+
+    json::Value hidden(json::Value::Type::Array);
+    for (const std::wstring& entry : config.launcherHidden)
+    {
+        hidden.PushBack(json::Value(WideToUtf8(entry)));
+    }
+    root.Set("launcherHidden", std::move(hidden));
 
     const std::string text = json::Serialize(root, true);
     const std::wstring path = FilePath();

@@ -439,6 +439,26 @@ Palette MakeDark()
 
 } // namespace
 
+ID2D1Factory* Direct2D() { return D2DFactory(); }
+IDWriteFactory* DirectWrite() { return DWFactory(); }
+
+ComPtr<IDWriteTextFormat> CreateTextFormat(float size,
+                                           DWRITE_FONT_WEIGHT weight,
+                                           bool wrap, const wchar_t* family)
+{
+    return MakeFormat(size, weight, wrap, family);
+}
+
+const wchar_t* IconFont() { return IconFontFamily(); }
+int MonitorDpi(HMONITOR monitor) { return DpiForMonitor(monitor); }
+
+void FillSoftShadow(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush,
+                    const D2D1_RECT_F& rect, float radius, float spread,
+                    float offsetY, float strength)
+{
+    SoftShadow(target, brush, rect, radius, spread, offsetY, strength);
+}
+
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------

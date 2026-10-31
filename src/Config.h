@@ -149,6 +149,12 @@ struct DockConfig
 {
     DockSettings settings;
     std::vector<AppEntry> apps;
+
+    /// Start panel "pinned" row: shell:AppsFolder parsing names, in order.
+    std::vector<std::wstring> launcherPins;
+
+    /// Apps the user hid from the Start panel groups.
+    std::vector<std::wstring> launcherHidden;
 };
 
 class Config
