@@ -1177,6 +1177,7 @@ void DockRenderer::FillAndStrokeBubble(ID2D1Geometry* geometry,
 }
 
 void DockRenderer::DrawPreviewBubble(const D2D1_RECT_F& body,
+                                     const D2D1_RECT_F& hole,
                                      D2D1_POINT_2F tip,
                                      DockEdge edge,
                                      float scale,
@@ -1219,10 +1220,31 @@ void DockRenderer::DrawPreviewBubble(const D2D1_RECT_F& body,
         CreateBubbleGeometry(body, cornerRadius, side, tip, halfBase);
     if (bubble && fill && border)
     {
-        // The stroke is centred on the outline; inset by half a stroke so
-        // the visible border lands fully on the bubble.
-        FillAndStrokeBubble(bubble.Get(), fill.Get(), border.Get(),
-                            (std::max)(1.0f, safeScale / 0.8f));
+        // Fill only the ring around the preview window, then outline the
+        // whole bubble.
+        const float strokeWidth = (std::max)(1.0f, safeScale / 0.8f);
+        ComPtr<ID2D1RectangleGeometry> holeGeometry;
+        ComPtr<ID2D1PathGeometry> ring;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (hole.right > hole.left && hole.bottom > hole.top
+            && SUCCEEDED(d2d_->CreateRectangleGeometry(
+                hole, holeGeometry.AddressOf()))
+            && SUCCEEDED(d2d_->CreatePathGeometry(ring.AddressOf()))
+            && SUCCEEDED(ring->Open(sink.AddressOf()))
+            && SUCCEEDED(bubble->CombineWithGeometry(
+                holeGeometry.Get(), D2D1_COMBINE_MODE_EXCLUDE, nullptr,
+                sink.Get()))
+            && SUCCEEDED(sink->Close()))
+        {
+            rt_->FillGeometry(ring.Get(), fill.Get());
+            FillAndStrokeBubble(bubble.Get(), nullptr, border.Get(),
+                                strokeWidth);
+        }
+        else
+        {
+            FillAndStrokeBubble(bubble.Get(), fill.Get(), border.Get(),
+                                strokeWidth);
+        }
     }
 
     rt_->SetTransform(previous);

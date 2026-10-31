@@ -3565,9 +3565,13 @@ void App::Render()
 
             // Body, outline and tail are one antialiased shape on the layered
             // Dock surface, so the corners are smooth and the tail has no seam.
+            // The preview window covers exactly the rounded `menu` rect
+            // (whole pixels, see screenMenu below); keep that part clear.
             renderer_.DrawPreviewBubble(
                 D2D1::RectF(menu.left - bodyInset, menu.top - bodyInset,
                             menu.right + bodyInset, menu.bottom + bodyInset),
+                D2D1::RectF(std::round(menu.left), std::round(menu.top),
+                            std::round(menu.right), std::round(menu.bottom)),
                 tailTip, config_.settings.dockEdge, uiScale,
                 bubbleRadius);
 

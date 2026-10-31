@@ -88,7 +88,11 @@ public:
     /// antialiased shape in physical surface coordinates. The DWM-backed
     /// preview window sits inset on top of it, so neither its square corners
     /// nor a seam between body and tail are ever visible.
+    /// `hole` is the preview window's rectangle: it is left transparent,
+    /// because the Dock window may sit above the preview window in z-order
+    /// and an opaque fill there would hide the live thumbnails.
     void DrawPreviewBubble(const D2D1_RECT_F& body,
+                           const D2D1_RECT_F& hole,
                            D2D1_POINT_2F tip,
                            DockEdge edge,
                            float scale,
